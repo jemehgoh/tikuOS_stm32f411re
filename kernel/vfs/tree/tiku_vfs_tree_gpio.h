@@ -42,14 +42,16 @@
  * Computed from the per-device TIKU_DEVICE_HAS_PORTn macros (each
  * 0 or 1), so selecting a different MSP430 variant resizes both
  * tables without touching this module.  Every device header must
- * define all four flags.
+ * define all eight flags.
  */
 #define TIKU_VFS_TREE_GPIO_NPORTS ( \
     TIKU_DEVICE_HAS_PORT1 + TIKU_DEVICE_HAS_PORT2 + \
-    TIKU_DEVICE_HAS_PORT3 + TIKU_DEVICE_HAS_PORT4)
+    TIKU_DEVICE_HAS_PORT3 + TIKU_DEVICE_HAS_PORT4 + \
+    TIKU_DEVICE_HAS_PORT5 + TIKU_DEVICE_HAS_PORT6 + \
+    TIKU_DEVICE_HAS_PORT7 + TIKU_DEVICE_HAS_PORT8)
 
 /**
- * @brief /dev/gpio children: one "1".."4" directory per available
+ * @brief /dev/gpio children: one "1".."8" directory per available
  *        port, each holding eight pin files "0".."7".
  *
  * Referenced by the /dev directory table in tiku_vfs_tree_dev.c.
@@ -73,7 +75,7 @@ extern const tiku_vfs_node_t tiku_vfs_tree_gpio_dir_children[];
  * `watch` on it reacts to the physical edge.  ISR-safe; an
  * out-of-range or device-absent port/pin is a no-op.
  *
- * @param port  Port number (1-based, P1..P4)
+ * @param port  Port number (1-based, P1..P8)
  * @param pin   Pin number (0..7)
  */
 void tiku_vfs_tree_gpio_notify(uint8_t port, uint8_t pin);

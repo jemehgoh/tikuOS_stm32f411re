@@ -69,6 +69,7 @@
 #include "tiku_rtc.h"
 #include <kernel/timers/tiku_clock.h>
 #include <kernel/memory/tiku_mem.h>
+#include <stddef.h>
 
 /*---------------------------------------------------------------------------*/
 /* PERSISTENT STATE                                                          */

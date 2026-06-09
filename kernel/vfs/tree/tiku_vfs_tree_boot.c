@@ -10,10 +10,10 @@
  * Everything a postmortem wants to know about how and how often
  * this device boots:
  *
- *   /sys/boot/reason     decoded SYSRSTIV ("wdt-timeout", "brownout"...)
+ *   /sys/boot/reason     decoded reset cause ("wdt-timeout", "brownout"...)
  *   /sys/boot/count      monotonic FRAM boot counter
  *   /sys/boot/stage      current boot stage from boot/tiku_boot.c
- *   /sys/boot/rstiv      raw SYSRSTIV value in hex, for scripting
+ *   /sys/boot/rstiv      raw reset-cause value in hex, for scripting
  *   /sys/boot/clock/...  live MCLK/SMCLK/ACLK frequencies + fault flag
  *   /sys/boot/mpu/...    MPU violation diagnostics
  *   /sys/last_reset      coarse 4-bucket reset cause (top-level /sys)
@@ -51,9 +51,13 @@
 #include "tiku_vfs_tree_boot.h"
 #include "tiku.h"
 #include <kernel/vfs/tiku_vfs_tree.h>
+#include <kernel/cpu/tiku_common.h>
 #include <kernel/timers/tiku_clock.h>
 #include <kernel/memory/tiku_mem.h>
 #include <boot/tiku_boot.h>
+#if defined(PLATFORM_STM32F411)
+#include <arch/stm32f411re/tiku_stm32f411_regs.h>
+#endif
 #include <stdio.h>
 
 /*---------------------------------------------------------------------------*/
@@ -61,18 +65,20 @@
 /*---------------------------------------------------------------------------*/
 
 /**
- * SYSRSTIV snapshot taken once in tiku_vfs_tree_boot_init().
+ * Reset-cause snapshot taken once in tiku_vfs_tree_boot_init().
  *
- * Reading the live register pops the highest pending interrupt
+ * On MSP430, reading SYSRSTIV pops the highest pending interrupt
  * vector value (hardware walks toward 0 on each read), so the
  * cause must be latched exactly once at boot and served from this
- * copy ever after.  Zero on platforms without SYSRSTIV (RP2350),
- * which decodes as "none"/"power".
+ * copy ever after. On STM32F411, the raw RCC_CSR reset flags are
+ * sampled here before any later code might clear them. Zero on
+ * platforms without a richer reset-cause source (RP2350), which
+ * decodes as "none"/"power".
  */
 static uint16_t boot_reset_cause;
 
 /**
- * @brief Decode a raw SYSRSTIV value to its short name.
+ * @brief Decode a raw platform reset-cause value to its short name.
  *
  * Covers every cause the FR59xx family reports (TI SLAU367,
  * SYSRSTIV table): power faults, watchdog variants, FRAM
@@ -80,12 +86,22 @@ static uint16_t boot_reset_cause;
  * Values not in the table render as "unknown" rather than
  * faulting — future silicon may add vectors.
  *
- * @param iv  Raw SYSRSTIV value (even, 0x0000..0x0024)
+ * @param iv  Raw platform reset-cause value
  * @return Static string naming the cause; never NULL
  */
 static const char *
 reset_cause_str(uint16_t iv)
 {
+#if defined(PLATFORM_STM32F411)
+    if (iv & (STM32F411_RCC_CSR_BORRSTF >> 16))  return "brownout";
+    if (iv & (STM32F411_RCC_CSR_IWDGRSTF >> 16)) return "iwdg";
+    if (iv & (STM32F411_RCC_CSR_WWDGRSTF >> 16)) return "wwdg";
+    if (iv & (STM32F411_RCC_CSR_SFTRSTF >> 16))  return "software";
+    if (iv & (STM32F411_RCC_CSR_PINRSTF >> 16))  return "pin";
+    if (iv & (STM32F411_RCC_CSR_PORRSTF >> 16))  return "power-on";
+    if (iv & (STM32F411_RCC_CSR_LPWRRSTF >> 16)) return "low-power";
+    return "none";
+#else
     switch (iv) {
     case 0x0000: return "none";
     case 0x0002: return "brownout";
@@ -104,6 +120,7 @@ reset_cause_str(uint16_t iv)
     case 0x0024: return "fll-unlock";
     default:     return "unknown";
     }
+#endif
 }
 
 /**
@@ -186,7 +203,7 @@ tiku_vfs_tree_boot_count_read(char *buf, size_t max)
 /*---------------------------------------------------------------------------*/
 
 /**
- * @brief Map raw SYSRSTIV to one of four user-facing categories.
+ * @brief Map raw reset-cause state to one of four user-facing categories.
  *
  * The detailed name is still available at /sys/boot/reason; this
  * is the field a script wants to branch on:
@@ -198,12 +215,28 @@ tiku_vfs_tree_boot_count_read(char *buf, size_t max)
  *   "reboot"    deliberate: software BOR/POR or the RST pin
  *   "other"     anything else (security, FRAM bit error, ...)
  *
- * @param iv  Raw SYSRSTIV value
+ * @param iv  Raw platform reset-cause value
  * @return Static category string; never NULL
  */
 static const char *
 last_reset_str(uint16_t iv)
 {
+#if defined(PLATFORM_STM32F411)
+    if (iv & ((STM32F411_RCC_CSR_IWDGRSTF |
+               STM32F411_RCC_CSR_WWDGRSTF) >> 16)) {
+        return "watchdog";
+    }
+    if (iv & ((STM32F411_RCC_CSR_BORRSTF |
+               STM32F411_RCC_CSR_PORRSTF |
+               STM32F411_RCC_CSR_LPWRRSTF) >> 16)) {
+        return "power";
+    }
+    if (iv & ((STM32F411_RCC_CSR_SFTRSTF |
+               STM32F411_RCC_CSR_PINRSTF) >> 16)) {
+        return "reboot";
+    }
+    return "other";
+#else
     switch (iv) {
     /* Watchdog: counter overflow or password violation */
     case 0x0016: case 0x0018:
@@ -220,13 +253,14 @@ last_reset_str(uint16_t iv)
     default:
         return "other";
     }
+#endif
 }
 
 /**
  * @brief Read handler for /sys/last_reset.
  *
  * Renders the bucketed cause ("watchdog\n", "power\n", "reboot\n"
- * or "other\n") from the same SYSRSTIV snapshot as
+ * or "other\n") from the same latched reset snapshot as
  * /sys/boot/reason.
  *
  * @param buf  Output buffer for the rendered text
@@ -341,7 +375,7 @@ boot_stage_read(char *buf, size_t max)
 /**
  * @brief Read handler for /sys/boot/rstiv.
  *
- * Renders the latched SYSRSTIV snapshot as four hex digits
+ * Renders the latched reset-cause snapshot as four hex digits
  * ("0x0016\n").  This is the escape hatch when the decoded names
  * are not enough — e.g. correlating against the device errata or
  * a vector reset_cause_str() does not know yet.
@@ -554,11 +588,14 @@ _Static_assert(sizeof(tiku_vfs_tree_boot_children) /
  * @brief Capture the reset cause and bump the FRAM boot counter.
  *
  * Runs as the first step of tiku_vfs_tree_init() — see the header
- * for why ordering matters (SYSRSTIV reads are destructive).
+ * for why ordering matters (MSP430 SYSRSTIV reads are destructive,
+ * and STM32 flags should be sampled before later code can clear
+ * them).
  *
  * Sequence:
- *   1. Latch SYSRSTIV into boot_reset_cause (MSP430 only; RP2350
- *      leaves it 0 = "none").
+ *   1. Latch the platform reset cause into boot_reset_cause:
+ *      SYSRSTIV on MSP430, RCC_CSR flags on STM32F411, RP2350
+ *      leaves it 0 = "none".
  *   2. Validate both persist cells — tiku_persist_cell_init()
  *      primes a virgin (all-zero or junk) FRAM to 0 with the
  *      gate stamped last, and keeps real persisted values.
@@ -570,8 +607,10 @@ void
 tiku_vfs_tree_boot_init(void)
 {
     /* Capture reset cause before anything else clears it */
-#ifdef PLATFORM_MSP430
+#if defined(PLATFORM_MSP430)
     boot_reset_cause = SYSRSTIV;
+#elif defined(PLATFORM_STM32F411)
+    boot_reset_cause = tiku_common_reset_reason();
 #endif
 
     /* Validate/prime the cells, then bump the boot counter. The

@@ -107,6 +107,18 @@ GPIO_DIR(3)
 #if TIKU_DEVICE_HAS_PORT4
 GPIO_DIR(4)
 #endif
+#if TIKU_DEVICE_HAS_PORT5
+GPIO_DIR(5)
+#endif
+#if TIKU_DEVICE_HAS_PORT6
+GPIO_DIR(6)
+#endif
+#if TIKU_DEVICE_HAS_PORT7
+GPIO_DIR(7)
+#endif
+#if TIKU_DEVICE_HAS_PORT8
+GPIO_DIR(8)
+#endif
 
 /*---------------------------------------------------------------------------*/
 /* /dev/gpio — per-pin VFS nodes                                             */
@@ -213,6 +225,22 @@ GPIO_PIN(3,4) GPIO_PIN(3,5) GPIO_PIN(3,6) GPIO_PIN(3,7)
 GPIO_PIN(4,0) GPIO_PIN(4,1) GPIO_PIN(4,2) GPIO_PIN(4,3)
 GPIO_PIN(4,4) GPIO_PIN(4,5) GPIO_PIN(4,6) GPIO_PIN(4,7)
 #endif
+#if TIKU_DEVICE_HAS_PORT5
+GPIO_PIN(5,0) GPIO_PIN(5,1) GPIO_PIN(5,2) GPIO_PIN(5,3)
+GPIO_PIN(5,4) GPIO_PIN(5,5) GPIO_PIN(5,6) GPIO_PIN(5,7)
+#endif
+#if TIKU_DEVICE_HAS_PORT6
+GPIO_PIN(6,0) GPIO_PIN(6,1) GPIO_PIN(6,2) GPIO_PIN(6,3)
+GPIO_PIN(6,4) GPIO_PIN(6,5) GPIO_PIN(6,6) GPIO_PIN(6,7)
+#endif
+#if TIKU_DEVICE_HAS_PORT7
+GPIO_PIN(7,0) GPIO_PIN(7,1) GPIO_PIN(7,2) GPIO_PIN(7,3)
+GPIO_PIN(7,4) GPIO_PIN(7,5) GPIO_PIN(7,6) GPIO_PIN(7,7)
+#endif
+#if TIKU_DEVICE_HAS_PORT8
+GPIO_PIN(8,0) GPIO_PIN(8,1) GPIO_PIN(8,2) GPIO_PIN(8,3)
+GPIO_PIN(8,4) GPIO_PIN(8,5) GPIO_PIN(8,6) GPIO_PIN(8,7)
+#endif
 
 /**
  * @brief Build one pin-file node entry for a port table.
@@ -245,6 +273,30 @@ static const tiku_vfs_node_t gpio_p4[] = {
     GPIO_NODE(4,4), GPIO_NODE(4,5), GPIO_NODE(4,6), GPIO_NODE(4,7),
 };
 #endif
+#if TIKU_DEVICE_HAS_PORT5
+static const tiku_vfs_node_t gpio_p5[] = {
+    GPIO_NODE(5,0), GPIO_NODE(5,1), GPIO_NODE(5,2), GPIO_NODE(5,3),
+    GPIO_NODE(5,4), GPIO_NODE(5,5), GPIO_NODE(5,6), GPIO_NODE(5,7),
+};
+#endif
+#if TIKU_DEVICE_HAS_PORT6
+static const tiku_vfs_node_t gpio_p6[] = {
+    GPIO_NODE(6,0), GPIO_NODE(6,1), GPIO_NODE(6,2), GPIO_NODE(6,3),
+    GPIO_NODE(6,4), GPIO_NODE(6,5), GPIO_NODE(6,6), GPIO_NODE(6,7),
+};
+#endif
+#if TIKU_DEVICE_HAS_PORT7
+static const tiku_vfs_node_t gpio_p7[] = {
+    GPIO_NODE(7,0), GPIO_NODE(7,1), GPIO_NODE(7,2), GPIO_NODE(7,3),
+    GPIO_NODE(7,4), GPIO_NODE(7,5), GPIO_NODE(7,6), GPIO_NODE(7,7),
+};
+#endif
+#if TIKU_DEVICE_HAS_PORT8
+static const tiku_vfs_node_t gpio_p8[] = {
+    GPIO_NODE(8,0), GPIO_NODE(8,1), GPIO_NODE(8,2), GPIO_NODE(8,3),
+    GPIO_NODE(8,4), GPIO_NODE(8,5), GPIO_NODE(8,6), GPIO_NODE(8,7),
+};
+#endif
 
 /*---------------------------------------------------------------------------*/
 /* NODE TABLES                                                               */
@@ -272,6 +324,18 @@ const tiku_vfs_node_t tiku_vfs_tree_gpio_children[] = {
 #if TIKU_DEVICE_HAS_PORT4
     { "4", TIKU_VFS_DIR, NULL, NULL, gpio_p4, 8 },
 #endif
+#if TIKU_DEVICE_HAS_PORT5
+    { "5", TIKU_VFS_DIR, NULL, NULL, gpio_p5, 8 },
+#endif
+#if TIKU_DEVICE_HAS_PORT6
+    { "6", TIKU_VFS_DIR, NULL, NULL, gpio_p6, 8 },
+#endif
+#if TIKU_DEVICE_HAS_PORT7
+    { "7", TIKU_VFS_DIR, NULL, NULL, gpio_p7, 8 },
+#endif
+#if TIKU_DEVICE_HAS_PORT8
+    { "8", TIKU_VFS_DIR, NULL, NULL, gpio_p8, 8 },
+#endif
 };
 
 /**
@@ -292,6 +356,18 @@ const tiku_vfs_node_t tiku_vfs_tree_gpio_dir_children[] = {
 #endif
 #if TIKU_DEVICE_HAS_PORT4
     { "4", TIKU_VFS_FILE, gpio_dir_4, NULL, NULL, 0 },
+#endif
+#if TIKU_DEVICE_HAS_PORT5
+    { "5", TIKU_VFS_FILE, gpio_dir_5, NULL, NULL, 0 },
+#endif
+#if TIKU_DEVICE_HAS_PORT6
+    { "6", TIKU_VFS_FILE, gpio_dir_6, NULL, NULL, 0 },
+#endif
+#if TIKU_DEVICE_HAS_PORT7
+    { "7", TIKU_VFS_FILE, gpio_dir_7, NULL, NULL, 0 },
+#endif
+#if TIKU_DEVICE_HAS_PORT8
+    { "8", TIKU_VFS_FILE, gpio_dir_8, NULL, NULL, 0 },
 #endif
 };
 
@@ -352,6 +428,18 @@ tiku_vfs_tree_gpio_notify(uint8_t port, uint8_t pin)
 #endif
 #if TIKU_DEVICE_HAS_PORT4
     case 4: node = &gpio_p4[pin]; break;
+#endif
+#if TIKU_DEVICE_HAS_PORT5
+    case 5: node = &gpio_p5[pin]; break;
+#endif
+#if TIKU_DEVICE_HAS_PORT6
+    case 6: node = &gpio_p6[pin]; break;
+#endif
+#if TIKU_DEVICE_HAS_PORT7
+    case 7: node = &gpio_p7[pin]; break;
+#endif
+#if TIKU_DEVICE_HAS_PORT8
+    case 8: node = &gpio_p8[pin]; break;
 #endif
     default: break;
     }

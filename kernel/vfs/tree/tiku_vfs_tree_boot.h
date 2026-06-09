@@ -9,7 +9,7 @@
  *
  * This module owns the boot-related persistent state: the FRAM
  * boot counter, the lifetime-uptime accumulator, the first-boot
- * magic word, and the SYSRSTIV snapshot taken at init.  Besides
+ * magic word, and the reset-cause snapshot taken at init.  Besides
  * the /sys/boot directory it also provides three top-level /sys
  * files (boot_count, last_reset, cold_boots), whose read handlers
  * are exported below so the /sys assembly can reference them in
@@ -57,10 +57,12 @@ extern const tiku_vfs_node_t tiku_vfs_tree_boot_children[];
  * @brief Capture the reset cause and bump the FRAM boot counter.
  *
  * Must be the FIRST module init that tiku_vfs_tree_init() calls:
- * reading SYSRSTIV pops the highest-priority pending cause, so any
- * earlier read elsewhere would consume the value this module
- * snapshots for /sys/boot/reason, /sys/boot/rstiv and
- * /sys/last_reset.
+ * reading SYSRSTIV on MSP430 pops the highest-priority pending
+ * cause, so any earlier read elsewhere would consume the value
+ * this module snapshots for /sys/boot/reason, /sys/boot/rstiv and
+ * /sys/last_reset. On STM32F411 the RCC_CSR flags are not popped
+ * by read, but should still be sampled here before later code
+ * clears them.
  *
  * Validates this module's persist cells (boot counter, lifetime
  * accumulator) via tiku_persist_cell_init() — virgin or corrupted
