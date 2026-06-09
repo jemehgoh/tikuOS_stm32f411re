@@ -803,6 +803,17 @@ SRCS += kernel/process/tiku_lc_persist.c
 SRCS += kernel/scheduler/tiku_sched.c
 SRCS += kernel/vfs/tiku_vfs.c
 SRCS += kernel/vfs/tiku_vfs_tree.c
+SRCS += kernel/vfs/tree/tiku_vfs_tree_sys.c
+SRCS += kernel/vfs/tree/tiku_vfs_tree_boot.c
+SRCS += kernel/vfs/tree/tiku_vfs_tree_timer.c
+SRCS += kernel/vfs/tree/tiku_vfs_tree_watchdog.c
+SRCS += kernel/vfs/tree/tiku_vfs_tree_power.c
+SRCS += kernel/vfs/tree/tiku_vfs_tree_persist.c
+SRCS += kernel/vfs/tree/tiku_vfs_tree_watch.c
+SRCS += kernel/vfs/tree/tiku_vfs_tree_dev.c
+SRCS += kernel/vfs/tree/tiku_vfs_tree_gpio.c
+SRCS += kernel/vfs/tree/tiku_vfs_tree_inittab.c
+SRCS += kernel/vfs/tree/tiku_vfs_tree_data.c
 
 # ---------------------------------------------------------------------------
 # Shell (kernel service — compiled when TIKU_SHELL_ENABLE=1)
@@ -997,6 +1008,9 @@ SRCS += tests/drivers/test_wifi.c
 SRCS += tests/drivers/test_bt.c
 SRCS += tests/kernel/vfs/test_vfs.c
 SRCS += tests/kernel/vfs/test_vfs_tree.c
+SRCS += tests/kernel/vfs/test_vfs_watch.c
+SRCS += tests/kernel/vfs/test_vfs_introspect.c
+SRCS += tests/kernel/vfs/test_vfs_gpio_notify.c
 SRCS += tests/init/test_catalog.c
 SRCS += tests/init/test_init_table.c
 SRCS += tests/init/test_init_boot.c
