@@ -1,5 +1,5 @@
 /*
- * Tiku Operating System v0.04
+ * Tiku Operating System v0.05
  * Simple. Ubiquitous. Intelligence, Everywhere.
  * http://tiku-os.org
  *
@@ -113,6 +113,21 @@ const tiku_vfs_node_t *tiku_vfs_resolve(const char *path);
 int tiku_vfs_read(const char *path, char *buf, size_t max);
 
 /**
+ * @brief Read directly from a resolved node, skipping the path walk.
+ *
+ * For callers that already hold a node pointer (a watch event
+ * delivers one as its payload; the rules engine and `watch` cache
+ * one at arm time).  Same readable-FILE validation and error
+ * contract as tiku_vfs_read(); a NULL @p node returns -1.
+ *
+ * @param node  Node to read (NULL tolerated → -1)
+ * @param buf   Output buffer
+ * @param max   Buffer capacity
+ * @return Bytes written to buf, or -1 on error
+ */
+int tiku_vfs_read_node(const tiku_vfs_node_t *node, char *buf, size_t max);
+
+/**
  * @brief Write to a path
  * @param path  Absolute path to a writable FILE node
  * @param data  Data to write
@@ -129,5 +144,151 @@ int tiku_vfs_write(const char *path, const char *data, size_t len);
  * @return 0 on success, -1 on error (not found or not a directory)
  */
 int tiku_vfs_list(const char *path, tiku_vfs_list_fn callback, void *ctx);
+
+/*---------------------------------------------------------------------------*/
+/* WATCH — change notification on nodes                                      */
+/*---------------------------------------------------------------------------*/
+
+/*
+ * The namespace as event bus: a process subscribes to a FILE node
+ * and receives TIKU_EVENT_VFS (data = the node pointer) whenever the
+ * node changes.  Two trigger paths feed the same subscription:
+ *
+ *   1. Every successful tiku_vfs_write() notifies watchers of the
+ *      written node automatically — shell writes, BASIC writes and
+ *      network writes all ring for free.
+ *   2. Drivers whose values change without a write (a GPIO edge, a
+ *      sensor threshold) call tiku_vfs_notify() explicitly.
+ *
+ * Node-pointer identity is the subscription key: the tree is static,
+ * so node addresses are stable for the life of the system, and the
+ * event's data field carries the same pointer back to the receiver
+ * for dispatch.  The watch table is a fixed array of slots in SRAM
+ * (subscriptions are per-boot; processes re-subscribe at init).
+ *
+ * Delivery semantics: one event per trigger, no coalescing — the
+ * event means "this node was touched", and the receiver reads the
+ * node for the current value.  Several queued events for one node
+ * are harmless re-reads.  An event is posted even when a write
+ * stored the same value as before (writes are not compared against
+ * prior content).
+ *
+ * Context rules: tiku_vfs_notify() is ISR-safe (it only scans the
+ * table and posts events; tiku_process_post() is ISR-safe, and
+ * table mutation is interrupt-masked).  watch/unwatch are
+ * process-context calls.
+ */
+
+/** Forward declaration — receivers are kernel processes */
+struct tiku_process;
+
+/** @brief Watch-table capacity (subscription slots) */
+#ifndef TIKU_VFS_WATCH_MAX
+#define TIKU_VFS_WATCH_MAX  8
+#endif
+
+/**
+ * @brief Subscribe a process to changes of a FILE node.
+ *
+ * Resolves @p path now and stores the (node, process) pair in a
+ * free watch slot.  Subscribing the same pair twice is idempotent
+ * and returns the existing slot.  From then on, every successful
+ * write to the node — and every explicit tiku_vfs_notify() on it —
+ * posts TIKU_EVENT_VFS to @p p with the node pointer as event data.
+ *
+ * @param path  Absolute path to a FILE node
+ * @param p     Receiving process
+ * @return Slot index (>= 0), or -1 on bad path, non-FILE node,
+ *         NULL process, or full table
+ */
+int8_t tiku_vfs_watch(const char *path, struct tiku_process *p);
+
+/**
+ * @brief Remove one (path, process) subscription.
+ *
+ * @param path  The watched path
+ * @param p     The subscribed process
+ * @return 0 when a subscription was removed, -1 when none matched
+ */
+int8_t tiku_vfs_unwatch(const char *path, struct tiku_process *p);
+
+/**
+ * @brief Remove every subscription held by @p p.
+ *
+ * The bulk form used on re-arm (drop everything, re-subscribe from
+ * scratch) and on process teardown.
+ *
+ * @param p  The subscribed process
+ */
+void tiku_vfs_unwatch_all(struct tiku_process *p);
+
+/**
+ * @brief Ring the watchers of @p node.
+ *
+ * Called automatically by tiku_vfs_write() on success; called
+ * explicitly by drivers whose node values change without a write.
+ * ISR-safe.  No-op when nobody watches the node.
+ *
+ * @param node  The node that changed (as returned by
+ *              tiku_vfs_resolve())
+ */
+void tiku_vfs_notify(const tiku_vfs_node_t *node);
+
+/*---------------------------------------------------------------------------*/
+/* INTROSPECTION — read-only views of VFS state                              */
+/*---------------------------------------------------------------------------*/
+
+/**
+ * @brief Suggested buffer size for tiku_vfs_path_of().
+ *
+ * Comfortably exceeds the deepest path in the stock tree; sizes a
+ * caller's scratch buffer without hard-coding a magic number.
+ */
+#ifndef TIKU_VFS_PATH_MAX
+#define TIKU_VFS_PATH_MAX  64
+#endif
+
+/**
+ * @brief Number of watch slots currently in use.
+ * @return Used slots in [0, TIKU_VFS_WATCH_MAX]; free = MAX - used.
+ */
+uint8_t tiku_vfs_watch_used(void);
+
+/**
+ * @brief Read one watch slot's (node, process) pair.
+ *
+ * @param i     Slot index in [0, TIKU_VFS_WATCH_MAX)
+ * @param node  Out: watched node (NULL to ignore)
+ * @param proc  Out: subscribed process (NULL to ignore)
+ * @return 0 if the slot is in use, -1 if free or out of range
+ */
+int8_t tiku_vfs_watch_get(uint8_t i, const tiku_vfs_node_t **node,
+                          struct tiku_process **proc);
+
+/**
+ * @brief Reverse-resolve a node pointer to its absolute path.
+ *
+ * DFS from the root (the tree has no parent links); O(tree size),
+ * for cold observability reads, not a hot path.  The root resolves
+ * to "/".
+ *
+ * @param node  Node to name (must be in the tree)
+ * @param buf   Output buffer (size >= TIKU_VFS_PATH_MAX recommended)
+ * @param max   Buffer capacity
+ * @return Path length, or -1 if not found / bad args
+ */
+int tiku_vfs_path_of(const tiku_vfs_node_t *node, char *buf, size_t max);
+
+/**
+ * @brief Total nodes in the tree (dirs + files), counted live.
+ * @return Node count, or 0 before tiku_vfs_init()
+ */
+uint16_t tiku_vfs_count(void);
+
+/**
+ * @brief Deepest path in the tree, in components (root alone = 1).
+ * @return Max depth, or 0 before tiku_vfs_init()
+ */
+uint8_t tiku_vfs_depth(void);
 
 #endif /* TIKU_VFS_H_ */
