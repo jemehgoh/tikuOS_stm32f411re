@@ -44,7 +44,7 @@
  * If nothing is set we fall back to MSP430 to keep the historical
  * default working out-of-the-box for legacy targets.
  */
-#if !defined(PLATFORM_MSP430) && !defined(PLATFORM_RP2350)
+#if !defined(PLATFORM_MSP430) && !defined(PLATFORM_RP2350) && !defined(PLATFORM_AMBIQ)
 #define PLATFORM_MSP430 1
 #endif
 
@@ -88,6 +88,16 @@
 #define TIKU_DEVICE_RP2350 1
 #endif
 
+#elif defined(PLATFORM_AMBIQ)
+
+/*
+ * Ambiq Apollo 510 (Cortex-M55). One silicon variant for now; the board
+ * define (TIKU_BOARD_APOLLO510_EVB) comes from the Makefile.
+ */
+#ifndef TIKU_DEVICE_APOLLO510
+#define TIKU_DEVICE_APOLLO510 1
+#endif
+
 #endif /* PLATFORM_* */
 
 /*---------------------------------------------------------------------------*/
@@ -116,6 +126,18 @@
 #ifndef MAIN_CPU_FREQ
 #define MAIN_CPU_FREQ 150
 #endif
+#elif defined(PLATFORM_AMBIQ)
+/* Apollo510: the CPU core runs at 96 MHz (Low-Power mode; 250 MHz in the
+ * High-Performance "turbo" mode). The Cortex-M55 SysTick, however, is clocked
+ * at 48 MHz (= core/2) on this part — and this value feeds the SysTick reload
+ * (TIKU_MAIN_CPU_HZ / TIKU_CLOCK_ARCH_SECOND) AND the SysTick-based busy
+ * delays, so it is set to the 48 MHz TIMER clock, NOT the 96 MHz core (a 96
+ * here would run the tick/delays at half speed). The TRUE core clock (for
+ * /sys + info) is read from the MCU perf-mode register at runtime — see
+ * tiku_cpu_ambiq_clock_get_hz(). */
+#ifndef MAIN_CPU_FREQ
+#define MAIN_CPU_FREQ 48
+#endif
 #else
 #define MAIN_CPU_FREQ 7    /* MSP430: 8 MHz (maximum supported) */
 #endif
@@ -124,7 +146,7 @@
  *  and other subsystems that need the clock frequency as a compile-time
  *  constant.
  */
-#if defined(PLATFORM_RP2350)
+#if defined(PLATFORM_RP2350) || defined(PLATFORM_AMBIQ)
 #define TIKU_MAIN_CPU_HZ  ((unsigned long)MAIN_CPU_FREQ * 1000000UL)
 #elif MAIN_CPU_FREQ == 1
 #define TIKU_MAIN_CPU_HZ  1000000UL
@@ -157,6 +179,8 @@
 #include <arch/msp430/tiku_device_select.h>    /* Device + board headers */
 #elif defined(PLATFORM_RP2350)
 #include <arch/arm-rp2350/tiku_device_select.h>
+#elif defined(PLATFORM_AMBIQ)
+#include <arch/ambiq/tiku_device_select.h>
 #endif
 
 /*---------------------------------------------------------------------------*/
@@ -195,6 +219,8 @@
 #include <arch/msp430/tiku_timer_arch.h>     /* TIKU_CLOCK_ARCH_SECOND et al. */
 #elif defined(PLATFORM_RP2350)
 #include <arch/arm-rp2350/tiku_timer_arch.h>
+#elif defined(PLATFORM_AMBIQ)
+#include <arch/ambiq/tiku_timer_arch.h>
 #endif
 #include <kernel/timers/tiku_clock.h>
 #include <kernel/timers/tiku_htimer.h>
