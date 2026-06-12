@@ -18,7 +18,7 @@
 #include "tiku_i2c_arch.h"
 #include "tiku_cpu_freq_boot_arch.h"
 #include "tiku_pinmux_arch.h"
-#include "tiku_stm32f411_regs.h"
+#include <stm32f411xe.h>
 #include "tiku.h"
 #include <stdint.h>
 
@@ -40,10 +40,13 @@
 /* Constants                                                                 */
 /*---------------------------------------------------------------------------*/
 
-#define TIKU_STM32F411_I2C_BASE       STM32F411_I2C1_BASE
-#define TIKU_STM32F411_I2C_RCC_BIT    STM32F411_RCC_APB1_I2C1
-#define TIKU_STM32F411_I2C_AF         STM32F411_GPIO_AF_I2C1_3
-#define TIKU_STM32F411_I2C_PCLK1_FALLBACK_HZ  16000000UL
+#define TIKU_STM32F411_I2C_AF               4U
+#define TIKU_STM32_GPIO_MODE_AF             2U
+#define TIKU_STM32_GPIO_PUPD_NONE           0U
+#define TIKU_STM32_GPIO_SPEED_HIGH          3U
+#define TIKU_STM32F411_I2C_PCLK1_FALLBACK_HZ 16000000UL
+#define TIKU_STM32_I2C_CR2_FREQ_MAX         0x3FU
+#define TIKU_STM32_I2C_CCR_MAX              0x0FFFU
 
 /* Bound every wait so a stuck bus or peripheral cannot hang forever. */
 #define I2C_TIMEOUT                   100000U
@@ -51,11 +54,11 @@
 #define I2C_FREQ_STANDARD_HZ          100000UL
 #define I2C_FREQ_FAST_HZ              400000UL
 
-#define I2C_ERROR_MASK  (STM32F411_I2C_SR1_BERR    \
-                       | STM32F411_I2C_SR1_ARLO    \
-                       | STM32F411_I2C_SR1_AF      \
-                       | STM32F411_I2C_SR1_OVR     \
-                       | STM32F411_I2C_SR1_TIMEOUT)
+#define I2C_ERROR_MASK  (I2C_SR1_BERR    \
+                       | I2C_SR1_ARLO    \
+                       | I2C_SR1_AF      \
+                       | I2C_SR1_OVR     \
+                       | I2C_SR1_TIMEOUT)
 
 /*---------------------------------------------------------------------------*/
 /* Private state                                                             */
@@ -67,6 +70,12 @@ static uint8_t g_i2c_speed = TIKU_I2C_SPEED_STANDARD;
 /*---------------------------------------------------------------------------*/
 /* Private helpers                                                           */
 /*---------------------------------------------------------------------------*/
+
+static __IO uint8_t *
+stm32f411_i2c_dr8(void)
+{
+    return (__IO uint8_t *)&I2C1->DR;
+}
 
 /**
  * @brief Program the I2C timing registers for the requested bus speed.
@@ -110,9 +119,9 @@ stm32f411_i2c_pins_init(void)
      * pull resistors disabled and drive the lines as open-drain AF4. */
     if (tiku_stm32f411_pinmux_config(TIKU_BOARD_I2C0_SCL_PORT,
                                      TIKU_BOARD_I2C0_SCL_PIN,
-                                     STM32F411_GPIO_MODE_AF,
-                                     STM32F411_GPIO_PUPD_NONE,
-                                     STM32F411_GPIO_SPEED_HIGH) != 0
+                                     TIKU_STM32_GPIO_MODE_AF,
+                                     TIKU_STM32_GPIO_PUPD_NONE,
+                                     TIKU_STM32_GPIO_SPEED_HIGH) != 0
         || tiku_stm32f411_pinmux_set_drive(TIKU_BOARD_I2C0_SCL_PORT,
                                            TIKU_BOARD_I2C0_SCL_PIN,
                                            1U) != 0
@@ -121,9 +130,9 @@ stm32f411_i2c_pins_init(void)
                                         TIKU_STM32F411_I2C_AF) != 0
         || tiku_stm32f411_pinmux_config(TIKU_BOARD_I2C0_SDA_PORT,
                                         TIKU_BOARD_I2C0_SDA_PIN,
-                                        STM32F411_GPIO_MODE_AF,
-                                        STM32F411_GPIO_PUPD_NONE,
-                                        STM32F411_GPIO_SPEED_HIGH) != 0
+                                        TIKU_STM32_GPIO_MODE_AF,
+                                        TIKU_STM32_GPIO_PUPD_NONE,
+                                        TIKU_STM32_GPIO_SPEED_HIGH) != 0
         || tiku_stm32f411_pinmux_set_drive(TIKU_BOARD_I2C0_SDA_PORT,
                                            TIKU_BOARD_I2C0_SDA_PIN,
                                            1U) != 0
@@ -148,7 +157,7 @@ stm32f411_i2c_wait_sr1_set(uint32_t mask)
     uint32_t timeout;
 
     for (timeout = 0U; timeout < I2C_TIMEOUT; timeout++) {
-        uint32_t sr1 = _STM32F411_REG(STM32F411_I2C_SR1(TIKU_STM32F411_I2C_BASE));
+        uint32_t sr1 = I2C1->SR1;
 
         if (sr1 & I2C_ERROR_MASK) {
             return -1;
@@ -175,8 +184,7 @@ stm32f411_i2c_wait_sr2_clear(uint32_t mask)
     uint32_t timeout;
 
     for (timeout = 0U; timeout < I2C_TIMEOUT; timeout++) {
-        if ((_STM32F411_REG(STM32F411_I2C_SR2(TIKU_STM32F411_I2C_BASE)) & mask)
-            == 0U) {
+        if ((I2C1->SR2 & mask) == 0U) {
             return 0;
         }
     }
@@ -192,7 +200,7 @@ stm32f411_i2c_wait_sr2_clear(uint32_t mask)
 static int
 stm32f411_i2c_wait_idle(void)
 {
-    return stm32f411_i2c_wait_sr2_clear(STM32F411_I2C_SR2_BUSY);
+    return stm32f411_i2c_wait_sr2_clear(I2C_SR2_BUSY);
 }
 
 /**
@@ -206,10 +214,10 @@ stm32f411_i2c_restore_master_defaults(void)
 {
     uint32_t cr1;
 
-    cr1 = _STM32F411_REG(STM32F411_I2C_CR1(TIKU_STM32F411_I2C_BASE));
-    cr1 |= STM32F411_I2C_CR1_ACK;
-    cr1 &= ~STM32F411_I2C_CR1_POS;
-    _STM32F411_REG(STM32F411_I2C_CR1(TIKU_STM32F411_I2C_BASE)) = cr1;
+    cr1 = I2C1->CR1;
+    cr1 |= I2C_CR1_ACK;
+    cr1 &= ~I2C_CR1_POS;
+    I2C1->CR1 = cr1;
 }
 
 /**
@@ -220,8 +228,8 @@ stm32f411_i2c_restore_master_defaults(void)
 static void
 stm32f411_i2c_clear_addr(void)
 {
-    (void)_STM32F411_REG(STM32F411_I2C_SR1(TIKU_STM32F411_I2C_BASE));
-    (void)_STM32F411_REG(STM32F411_I2C_SR2(TIKU_STM32F411_I2C_BASE));
+    (void)I2C1->SR1;
+    (void)I2C1->SR2;
 }
 
 /**
@@ -232,9 +240,9 @@ stm32f411_i2c_clear_addr(void)
 static int
 stm32f411_i2c_error_code(void)
 {
-    uint32_t sr1 = _STM32F411_REG(STM32F411_I2C_SR1(TIKU_STM32F411_I2C_BASE));
+    uint32_t sr1 = I2C1->SR1;
 
-    if (sr1 & STM32F411_I2C_SR1_AF) {
+    if (sr1 & I2C_SR1_AF) {
         return TIKU_I2C_ERR_NACK;
     }
     if (sr1 & I2C_ERROR_MASK) {
@@ -254,11 +262,11 @@ stm32f411_i2c_clear_status(void)
 {
     uint32_t sr1;
 
-    sr1 = _STM32F411_REG(STM32F411_I2C_SR1(TIKU_STM32F411_I2C_BASE));
+    sr1 = I2C1->SR1;
     sr1 &= ~I2C_ERROR_MASK;
-    _STM32F411_REG(STM32F411_I2C_SR1(TIKU_STM32F411_I2C_BASE)) = sr1;
+    I2C1->SR1 = sr1;
 
-    (void)_STM32F411_REG(STM32F411_I2C_SR2(TIKU_STM32F411_I2C_BASE));
+    (void)I2C1->SR2;
 }
 
 /**
@@ -271,17 +279,19 @@ static void
 stm32f411_i2c_reset_block(void)
 {
     // Enable clock and reset I2C peripheral
-    stm32f411_rcc_enable_apb1(TIKU_STM32F411_I2C_RCC_BIT);
-    stm32f411_rcc_reset_apb1(TIKU_STM32F411_I2C_RCC_BIT);
+    RCC->APB1ENR |= RCC_APB1ENR_I2C1EN;
+    (void)RCC->APB1ENR;
+    RCC->APB1RSTR |= RCC_APB1RSTR_I2C1RST;
+    RCC->APB1RSTR &= ~RCC_APB1RSTR_I2C1RST;
 
-    // Reset all registers 
-    _STM32F411_REG(STM32F411_I2C_CR1(TIKU_STM32F411_I2C_BASE)) = 0U;
-    _STM32F411_REG(STM32F411_I2C_CR2(TIKU_STM32F411_I2C_BASE)) = 0U;
-    _STM32F411_REG(STM32F411_I2C_OAR1(TIKU_STM32F411_I2C_BASE)) = 0U;
-    _STM32F411_REG(STM32F411_I2C_OAR2(TIKU_STM32F411_I2C_BASE)) = 0U;
-    _STM32F411_REG(STM32F411_I2C_CCR(TIKU_STM32F411_I2C_BASE)) = 0U;
-    _STM32F411_REG(STM32F411_I2C_TRISE(TIKU_STM32F411_I2C_BASE)) = 0U;
-    _STM32F411_REG(STM32F411_I2C_FLTR(TIKU_STM32F411_I2C_BASE)) = 0U;
+    // Reset all registers
+    I2C1->CR1 = 0U;
+    I2C1->CR2 = 0U;
+    I2C1->OAR1 = 0U;
+    I2C1->OAR2 = 0U;
+    I2C1->CCR = 0U;
+    I2C1->TRISE = 0U;
+    I2C1->FLTR = 0U;
 }
 
 /**
@@ -340,11 +350,11 @@ stm32f411_i2c_abort_transaction(void)
     uint32_t cr1;
     int rc;
 
-    cr1 = _STM32F411_REG(STM32F411_I2C_CR1(TIKU_STM32F411_I2C_BASE));
-    cr1 |= STM32F411_I2C_CR1_STOP;
-    cr1 |= STM32F411_I2C_CR1_ACK;
-    cr1 &= ~STM32F411_I2C_CR1_POS;
-    _STM32F411_REG(STM32F411_I2C_CR1(TIKU_STM32F411_I2C_BASE)) = cr1;
+    cr1 = I2C1->CR1;
+    cr1 |= I2C_CR1_STOP;
+    cr1 |= I2C_CR1_ACK;
+    cr1 &= ~I2C_CR1_POS;
+    I2C1->CR1 = cr1;
 
     rc = stm32f411_i2c_error_code();
     (void)stm32f411_i2c_finish_stop();
@@ -376,12 +386,12 @@ stm32f411_i2c_timing_init(uint8_t speed)
     }
 
     freq_mhz = (uint32_t)(pclk1_hz / 1000000UL);
-    if (freq_mhz < 2U || freq_mhz > STM32F411_I2C_CR2_FREQ_MASK) {
+    if (freq_mhz < 2U || freq_mhz > TIKU_STM32_I2C_CR2_FREQ_MAX) {
         return TIKU_I2C_ERR_PARAM;
     }
 
-    cr2 = freq_mhz & STM32F411_I2C_CR2_FREQ_MASK;
-    _STM32F411_REG(STM32F411_I2C_CR2(TIKU_STM32F411_I2C_BASE)) = cr2;
+    cr2 = freq_mhz & TIKU_STM32_I2C_CR2_FREQ_MAX;
+    I2C1->CR2 = cr2;
 
     if (speed == TIKU_I2C_SPEED_FAST) {
         /* Fast mode, duty = 2 (Tlow/Thigh = 2), SCL = FPCLK1 / (3 * CCR). */
@@ -390,14 +400,13 @@ stm32f411_i2c_timing_init(uint8_t speed)
         if (ccr == 0U) {
             ccr = 1U;
         }
-        if (ccr > STM32F411_I2C_CCR_CCR_MASK) {
+        if (ccr > TIKU_STM32_I2C_CCR_MAX) {
             return TIKU_I2C_ERR_PARAM;
         }
 
         /* RM0383 fast-mode rise-time limit: 300 ns. */
         trise = ((freq_mhz * 300U) / 1000U) + 1U;
-        _STM32F411_REG(STM32F411_I2C_CCR(TIKU_STM32F411_I2C_BASE)) =
-            STM32F411_I2C_CCR_FS | (ccr & STM32F411_I2C_CCR_CCR_MASK);
+        I2C1->CCR = I2C_CCR_FS | (ccr & TIKU_STM32_I2C_CCR_MAX);
     } else {
         /* Standard mode, SCL = FPCLK1 / (2 * CCR). CCR must be >= 4. */
         ccr = stm32f411_i2c_div_round_up((uint32_t)pclk1_hz,
@@ -405,28 +414,24 @@ stm32f411_i2c_timing_init(uint8_t speed)
         if (ccr < 4U) {
             ccr = 4U;
         }
-        if (ccr > STM32F411_I2C_CCR_CCR_MASK) {
+        if (ccr > TIKU_STM32_I2C_CCR_MAX) {
             return TIKU_I2C_ERR_PARAM;
         }
 
         /* RM0383 standard-mode rise-time limit: 1000 ns. */
         trise = freq_mhz + 1U;
-        _STM32F411_REG(STM32F411_I2C_CCR(TIKU_STM32F411_I2C_BASE)) =
-            (ccr & STM32F411_I2C_CCR_CCR_MASK);
+        I2C1->CCR = ccr & TIKU_STM32_I2C_CCR_MAX;
     }
 
-    _STM32F411_REG(STM32F411_I2C_TRISE(TIKU_STM32F411_I2C_BASE)) = trise;
-    _STM32F411_REG(STM32F411_I2C_FLTR(TIKU_STM32F411_I2C_BASE)) = 0U;
+    I2C1->TRISE = trise;
+    I2C1->FLTR = 0U;
 
     /* Bit 14 must stay set even when we only use the peripheral as master. */
-    _STM32F411_REG(STM32F411_I2C_OAR1(TIKU_STM32F411_I2C_BASE)) =
-        STM32F411_BIT(14);
+    I2C1->OAR1 = (1UL << 14);
 
     /* Polling-only backend: leave DMA and interrupt enables cleared. */
-    _STM32F411_REG(STM32F411_I2C_CR1(TIKU_STM32F411_I2C_BASE)) =
-        STM32F411_I2C_CR1_ACK;
-    _STM32F411_REG(STM32F411_I2C_CR1(TIKU_STM32F411_I2C_BASE)) =
-        STM32F411_I2C_CR1_ACK | STM32F411_I2C_CR1_PE;
+    I2C1->CR1 = I2C_CR1_ACK;
+    I2C1->CR1 = I2C_CR1_ACK | I2C_CR1_PE;
 
     I2C_PRINTF("timing: pclk1=%luHz speed=%s ccr=%lu trise=%lu\n",
                pclk1_hz,
@@ -462,42 +467,39 @@ stm32f411_i2c_write_phase(uint8_t addr, const uint8_t *buf, uint16_t len,
 
     stm32f411_i2c_restore_master_defaults();
 
-    cr1 = _STM32F411_REG(STM32F411_I2C_CR1(TIKU_STM32F411_I2C_BASE));
-    _STM32F411_REG(STM32F411_I2C_CR1(TIKU_STM32F411_I2C_BASE)) =
-        cr1 | STM32F411_I2C_CR1_START;
+    cr1 = I2C1->CR1;
+    I2C1->CR1 = cr1 | I2C_CR1_START;
 
-    if (stm32f411_i2c_wait_sr1_set(STM32F411_I2C_SR1_SB) != 0) {
+    if (stm32f411_i2c_wait_sr1_set(I2C_SR1_SB) != 0) {
         return stm32f411_i2c_abort_transaction();
     }
 
     // Scale the address to 7 bits and set the LSB to 0 for writes
-    _STM32F411_REG8(STM32F411_I2C_DR(TIKU_STM32F411_I2C_BASE)) =
-        (uint8_t)((addr & 0x7FU) << 1);
+    *stm32f411_i2c_dr8() = (uint8_t)((addr & 0x7FU) << 1);
 
-    if (stm32f411_i2c_wait_sr1_set(STM32F411_I2C_SR1_ADDR) != 0) {
+    if (stm32f411_i2c_wait_sr1_set(I2C_SR1_ADDR) != 0) {
         return stm32f411_i2c_abort_transaction();
     }
     stm32f411_i2c_clear_addr();
 
     for (i = 0U; i < len; i++) {
-        if (stm32f411_i2c_wait_sr1_set(STM32F411_I2C_SR1_TXE) != 0) {
+        if (stm32f411_i2c_wait_sr1_set(I2C_SR1_TXE) != 0) {
             return stm32f411_i2c_abort_transaction();
         }
 
-        _STM32F411_REG8(STM32F411_I2C_DR(TIKU_STM32F411_I2C_BASE)) = buf[i];
+        *stm32f411_i2c_dr8() = buf[i];
     }
 
-    if (stm32f411_i2c_wait_sr1_set(STM32F411_I2C_SR1_TXE) != 0) {
+    if (stm32f411_i2c_wait_sr1_set(I2C_SR1_TXE) != 0) {
         return stm32f411_i2c_abort_transaction();
     }
-    if (stm32f411_i2c_wait_sr1_set(STM32F411_I2C_SR1_BTF) != 0) {
+    if (stm32f411_i2c_wait_sr1_set(I2C_SR1_BTF) != 0) {
         return stm32f411_i2c_abort_transaction();
     }
 
     if (send_stop != 0U) {
-        cr1 = _STM32F411_REG(STM32F411_I2C_CR1(TIKU_STM32F411_I2C_BASE));
-        _STM32F411_REG(STM32F411_I2C_CR1(TIKU_STM32F411_I2C_BASE)) =
-            cr1 | STM32F411_I2C_CR1_STOP;
+        cr1 = I2C1->CR1;
+        I2C1->CR1 = cr1 | I2C_CR1_STOP;
 
         if (stm32f411_i2c_finish_stop() != TIKU_I2C_OK) {
             return TIKU_I2C_ERR_TIMEOUT;
@@ -530,24 +532,22 @@ stm32f411_i2c_read_phase(uint8_t addr, uint8_t *buf, uint16_t len)
 
     stm32f411_i2c_restore_master_defaults();
 
-    cr1 = _STM32F411_REG(STM32F411_I2C_CR1(TIKU_STM32F411_I2C_BASE));
+    cr1 = I2C1->CR1;
     if (len == 2U) {
-        cr1 |= STM32F411_I2C_CR1_POS;
-        _STM32F411_REG(STM32F411_I2C_CR1(TIKU_STM32F411_I2C_BASE)) = cr1;
+        cr1 |= I2C_CR1_POS;
+        I2C1->CR1 = cr1;
     }
 
-    _STM32F411_REG(STM32F411_I2C_CR1(TIKU_STM32F411_I2C_BASE)) =
-        cr1 | STM32F411_I2C_CR1_START;
+    I2C1->CR1 = cr1 | I2C_CR1_START;
 
-    if (stm32f411_i2c_wait_sr1_set(STM32F411_I2C_SR1_SB) != 0) {
+    if (stm32f411_i2c_wait_sr1_set(I2C_SR1_SB) != 0) {
         return stm32f411_i2c_abort_transaction();
     }
 
     // Scale the address to 7 bits and set the LSB to 1 for reads
-    _STM32F411_REG8(STM32F411_I2C_DR(TIKU_STM32F411_I2C_BASE)) =
-        (uint8_t)(((addr & 0x7FU) << 1) | 0x01U);
+    *stm32f411_i2c_dr8() = (uint8_t)(((addr & 0x7FU) << 1) | 0x01U);
 
-    if (stm32f411_i2c_wait_sr1_set(STM32F411_I2C_SR1_ADDR) != 0) {
+    if (stm32f411_i2c_wait_sr1_set(I2C_SR1_ADDR) != 0) {
         return stm32f411_i2c_abort_transaction();
     }
 
@@ -555,20 +555,19 @@ stm32f411_i2c_read_phase(uint8_t addr, uint8_t *buf, uint16_t len)
         /* Single-byte read.
          * Make ACK disable before clearing ADDR, and send STOP after, for
          * receiving. */
-        cr1 = _STM32F411_REG(STM32F411_I2C_CR1(TIKU_STM32F411_I2C_BASE));
-        cr1 &= ~STM32F411_I2C_CR1_ACK;
-        _STM32F411_REG(STM32F411_I2C_CR1(TIKU_STM32F411_I2C_BASE)) = cr1;
+        cr1 = I2C1->CR1;
+        cr1 &= ~I2C_CR1_ACK;
+        I2C1->CR1 = cr1;
 
         stm32f411_i2c_clear_addr();
 
-        _STM32F411_REG(STM32F411_I2C_CR1(TIKU_STM32F411_I2C_BASE)) =
-            cr1 | STM32F411_I2C_CR1_STOP;
+        I2C1->CR1 = cr1 | I2C_CR1_STOP;
 
-        if (stm32f411_i2c_wait_sr1_set(STM32F411_I2C_SR1_RXNE) != 0) {
+        if (stm32f411_i2c_wait_sr1_set(I2C_SR1_RXNE) != 0) {
             return stm32f411_i2c_abort_transaction();
         }
 
-        buf[0] = _STM32F411_REG8(STM32F411_I2C_DR(TIKU_STM32F411_I2C_BASE));
+        buf[0] = *stm32f411_i2c_dr8();
 
         if (stm32f411_i2c_finish_stop() != TIKU_I2C_OK) {
             return TIKU_I2C_ERR_TIMEOUT;
@@ -580,21 +579,20 @@ stm32f411_i2c_read_phase(uint8_t addr, uint8_t *buf, uint16_t len)
     if (len == 2U) {
         /* 2-byte read.
          * Set ACK low before clearing ADDR, and set STOP high after BTF=1. */
-        cr1 = _STM32F411_REG(STM32F411_I2C_CR1(TIKU_STM32F411_I2C_BASE));
-        cr1 &= ~STM32F411_I2C_CR1_ACK;
-        _STM32F411_REG(STM32F411_I2C_CR1(TIKU_STM32F411_I2C_BASE)) = cr1;
+        cr1 = I2C1->CR1;
+        cr1 &= ~I2C_CR1_ACK;
+        I2C1->CR1 = cr1;
 
         stm32f411_i2c_clear_addr();
 
-        if (stm32f411_i2c_wait_sr1_set(STM32F411_I2C_SR1_BTF) != 0) {
+        if (stm32f411_i2c_wait_sr1_set(I2C_SR1_BTF) != 0) {
             return stm32f411_i2c_abort_transaction();
         }
 
-        _STM32F411_REG(STM32F411_I2C_CR1(TIKU_STM32F411_I2C_BASE)) =
-            cr1 | STM32F411_I2C_CR1_STOP;
+        I2C1->CR1 = cr1 | I2C_CR1_STOP;
 
-        buf[0] = _STM32F411_REG8(STM32F411_I2C_DR(TIKU_STM32F411_I2C_BASE));
-        buf[1] = _STM32F411_REG8(STM32F411_I2C_DR(TIKU_STM32F411_I2C_BASE));
+        buf[0] = *stm32f411_i2c_dr8();
+        buf[1] = *stm32f411_i2c_dr8();
 
         if (stm32f411_i2c_finish_stop() != TIKU_I2C_OK) {
             return TIKU_I2C_ERR_TIMEOUT;
@@ -608,35 +606,34 @@ stm32f411_i2c_read_phase(uint8_t addr, uint8_t *buf, uint16_t len)
     /* Multi-byte read. */
     remaining = len;
     while (remaining > 3U) {
-        if (stm32f411_i2c_wait_sr1_set(STM32F411_I2C_SR1_RXNE) != 0) {
+        if (stm32f411_i2c_wait_sr1_set(I2C_SR1_RXNE) != 0) {
             return stm32f411_i2c_abort_transaction();
         }
 
-        *buf++ = _STM32F411_REG8(STM32F411_I2C_DR(TIKU_STM32F411_I2C_BASE));
+        *buf++ = *stm32f411_i2c_dr8();
         remaining--;
     }
 
     /* Read for byte N-2 (after BTF=1 and setting ACK low). */
-    if (stm32f411_i2c_wait_sr1_set(STM32F411_I2C_SR1_BTF) != 0) {
+    if (stm32f411_i2c_wait_sr1_set(I2C_SR1_BTF) != 0) {
         return stm32f411_i2c_abort_transaction();
     }
 
-    cr1 = _STM32F411_REG(STM32F411_I2C_CR1(TIKU_STM32F411_I2C_BASE));
-    cr1 &= ~STM32F411_I2C_CR1_ACK;
-    _STM32F411_REG(STM32F411_I2C_CR1(TIKU_STM32F411_I2C_BASE)) = cr1;
+    cr1 = I2C1->CR1;
+    cr1 &= ~I2C_CR1_ACK;
+    I2C1->CR1 = cr1;
 
-    *buf++ = _STM32F411_REG8(STM32F411_I2C_DR(TIKU_STM32F411_I2C_BASE));
+    *buf++ = *stm32f411_i2c_dr8();
 
     /* Read for bytes N-1 and N (after BTF=1 and setting STOP high). */
-    if (stm32f411_i2c_wait_sr1_set(STM32F411_I2C_SR1_BTF) != 0) {
+    if (stm32f411_i2c_wait_sr1_set(I2C_SR1_BTF) != 0) {
         return stm32f411_i2c_abort_transaction();
     }
 
-    _STM32F411_REG(STM32F411_I2C_CR1(TIKU_STM32F411_I2C_BASE)) =
-        cr1 | STM32F411_I2C_CR1_STOP;
+    I2C1->CR1 = cr1 | I2C_CR1_STOP;
 
-    *buf++ = _STM32F411_REG8(STM32F411_I2C_DR(TIKU_STM32F411_I2C_BASE));
-    *buf = _STM32F411_REG8(STM32F411_I2C_DR(TIKU_STM32F411_I2C_BASE));
+    *buf++ = *stm32f411_i2c_dr8();
+    *buf = *stm32f411_i2c_dr8();
 
     if (stm32f411_i2c_finish_stop() != TIKU_I2C_OK) {
         return TIKU_I2C_ERR_TIMEOUT;
@@ -672,7 +669,7 @@ tiku_i2c_arch_init(const tiku_i2c_config_t *config)
 void
 tiku_i2c_arch_close(void)
 {
-    _STM32F411_REG(STM32F411_I2C_CR1(TIKU_STM32F411_I2C_BASE)) = 0U;
+    I2C1->CR1 = 0U;
     g_i2c_ready = 0U;
 }
 

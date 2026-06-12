@@ -75,7 +75,7 @@
 
 #elif defined(PLATFORM_STM32F411)
 
-#include <arch/stm32f411re/tiku_uart_arch.h>
+#include <arch/st/stm32f411re/tiku_uart_arch.h>
 #define TIKU_PRINTF(...) tiku_uart_printf(__VA_ARGS__)
 
 /*---------------------------------------------------------------------------*/

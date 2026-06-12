@@ -14,16 +14,16 @@
 #define TIKU_STM32F411_DEVICE_SELECT_H_
 
 #if defined(TIKU_DEVICE_STM32F411RE)
-#include <arch/stm32f411re/devices/tiku_device_stm32f411re.h>
+#include <arch/st/stm32f411re/devices/tiku_device_stm32f411re.h>
 #else
 #error "No TikuOS STM32F411 device selected. Define TIKU_DEVICE_STM32F411RE."
 #endif
 
 #if defined(TIKU_BOARD_NUCLEO_F411RE)
-#include <arch/stm32f411re/boards/tiku_board_nucleo_f411re.h>
+#include <arch/st/stm32f411re/boards/tiku_board_nucleo_f411re.h>
 #else
 #define TIKU_BOARD_NUCLEO_F411RE 1
-#include <arch/stm32f411re/boards/tiku_board_nucleo_f411re.h>
+#include <arch/st/stm32f411re/boards/tiku_board_nucleo_f411re.h>
 #endif
 
 #endif /* TIKU_STM32F411_DEVICE_SELECT_H_ */

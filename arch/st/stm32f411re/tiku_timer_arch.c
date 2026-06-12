@@ -12,9 +12,9 @@
 
 #include "tiku_timer_arch.h"
 #include "tiku_cpu_freq_boot_arch.h"
-#include "tiku_stm32f411_regs.h"
 #include <kernel/scheduler/tiku_sched.h>
 #include <stdint.h>
+#include <stm32f411xe.h>
 
 /*---------------------------------------------------------------------------*/
 /* State                                                                     */
@@ -48,12 +48,11 @@ void tiku_clock_arch_init(void) {
         reload = 0x00FFFFFFU;
     }
 
-    _STM32F411_REG(STM32F411_SYST_RVR) = reload;
-    _STM32F411_REG(STM32F411_SYST_CVR) = 0U;
-    _STM32F411_REG(STM32F411_SYST_CSR) =
-        STM32F411_SYST_CSR_ENABLE
-        | STM32F411_SYST_CSR_TICKINT
-        | STM32F411_SYST_CSR_CLKSRC_CPU;
+    SysTick->LOAD = reload;
+    SysTick->VAL = 0U;
+    SysTick->CTRL = SysTick_CTRL_ENABLE_Msk
+                  | SysTick_CTRL_TICKINT_Msk
+                  | SysTick_CTRL_CLKSOURCE_Msk;
 }
 
 tiku_clock_arch_time_t tiku_clock_arch_time(void) {
@@ -94,8 +93,8 @@ void tiku_clock_arch_delay(unsigned int us) {
 }
 
 unsigned short tiku_clock_arch_fine(void) {
-    uint32_t cvr = _STM32F411_REG(STM32F411_SYST_CVR);
-    uint32_t rvr = _STM32F411_REG(STM32F411_SYST_RVR);
+    uint32_t cvr = SysTick->VAL;
+    uint32_t rvr = SysTick->LOAD;
     uint32_t fine;
 
     if (rvr == 0U) {

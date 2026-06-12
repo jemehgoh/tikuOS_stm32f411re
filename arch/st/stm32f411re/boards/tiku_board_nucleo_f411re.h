@@ -14,8 +14,8 @@
 #define TIKU_BOARD_NUCLEO_F411RE_H_
 
 #include <stdint.h>
-#include <arch/stm32f411re/tiku_pinmux_arch.h>
-#include <arch/stm32f411re/tiku_gpio_arch.h>
+#include <arch/st/stm32f411re/tiku_pinmux_arch.h>
+#include <arch/st/stm32f411re/tiku_gpio_arch.h>
 
 /*---------------------------------------------------------------------------*/
 /* BOARD IDENTIFICATION                                                      */

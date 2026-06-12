@@ -173,7 +173,7 @@
 #elif defined(PLATFORM_RP2350)
 #include <arch/arm-rp2350/tiku_device_select.h>
 #elif defined(PLATFORM_STM32F411)
-#include <arch/stm32f411re/tiku_device_select.h>
+#include <arch/st/stm32f411re/tiku_device_select.h>
 #endif
 
 /*---------------------------------------------------------------------------*/
@@ -213,7 +213,7 @@
 #elif defined(PLATFORM_RP2350)
 #include <arch/arm-rp2350/tiku_timer_arch.h>
 #elif defined(PLATFORM_STM32F411)
-#include <arch/stm32f411re/tiku_timer_arch.h>
+#include <arch/st/stm32f411re/tiku_timer_arch.h>
 #endif
 #include <kernel/timers/tiku_clock.h>
 #include <kernel/timers/tiku_htimer.h>

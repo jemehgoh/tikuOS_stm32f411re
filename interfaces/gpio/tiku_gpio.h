@@ -35,7 +35,7 @@
 #elif defined(PLATFORM_RP2350)
 #include <arch/arm-rp2350/tiku_gpio_arch.h>
 #elif defined(PLATFORM_STM32F411)
-#include <arch/stm32f411re/tiku_gpio_arch.h>
+#include <arch/st/stm32f411re/tiku_gpio_arch.h>
 #endif
 #include <hal/tiku_gpio_irq_hal.h>
 

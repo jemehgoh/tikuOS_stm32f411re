@@ -21,8 +21,8 @@
  */
 
 #include "tiku_cpu_freq_boot_arch.h"
-#include "tiku_stm32f411_regs.h"
 #include <stdint.h>
+#include <stm32f411xe.h>
 
 /*---------------------------------------------------------------------------*/
 /* Local constants                                                           */
@@ -31,18 +31,18 @@
 #define STM32F411_HSI_HZ              16000000UL
 #define STM32F411_CLOCK_SPIN_TIMEOUT  1000000U
 
-#define STM32F411_RCC_CFGR_HPRE_MASK  (0x0FU << 4)
-#define STM32F411_RCC_CFGR_PPRE1_MASK (0x07U << 10)
-#define STM32F411_RCC_CFGR_PPRE2_MASK (0x07U << 13)
+#define TIKU_STM32_RCC_PLLCFGR_PLLM(v) \
+    ((((uint32_t)(v)) << RCC_PLLCFGR_PLLM_Pos) & RCC_PLLCFGR_PLLM_Msk)
+#define TIKU_STM32_RCC_PLLCFGR_PLLN(v) \
+    ((((uint32_t)(v)) << RCC_PLLCFGR_PLLN_Pos) & RCC_PLLCFGR_PLLN_Msk)
+#define TIKU_STM32_RCC_PLLCFGR_PLLQ(v) \
+    ((((uint32_t)(v)) << RCC_PLLCFGR_PLLQ_Pos) & RCC_PLLCFGR_PLLQ_Msk)
+#define TIKU_STM32_FLASH_ACR_LATENCY(v) \
+    ((((uint32_t)(v)) << FLASH_ACR_LATENCY_Pos) & FLASH_ACR_LATENCY_Msk)
 
-#define STM32F411_RCC_CIR_CSSF        STM32F411_BIT(7)
-#define STM32F411_PWR_CR_VOS_SCALE1   (0x03U << STM32F411_PWR_CR_VOS_SHIFT)
-
-/*---------------------------------------------------------------------------*/
-/* Linker symbols                                                            */
-/*---------------------------------------------------------------------------*/
-
-extern uint32_t __vectors_start;
+#define TIKU_STM32_PWR_CR_VOS_SCALE1  (0x03U << PWR_CR_VOS_Pos)
+#define TIKU_STM32_PLLP_DIV2          0x00000000U
+#define TIKU_STM32_PLLP_DIV4          RCC_PLLCFGR_PLLP_0
 
 /*---------------------------------------------------------------------------*/
 /* Cached clock rates                                                        */
@@ -59,43 +59,35 @@ static volatile uint8_t       g_clock_fault = 0U;
 /*---------------------------------------------------------------------------*/
 
 static inline void stm32f411_disable_irq(void) {
-    __asm__ volatile ("cpsid i" ::: "memory");
+    __disable_irq();
 }
 
-static inline void stm32f411_dsb(void) {
-    __asm__ volatile ("dsb" ::: "memory");
-}
-
-static inline void stm32f411_isb(void) {
-    __asm__ volatile ("isb" ::: "memory");
-}
-
-static int stm32f411_spin_until_set(uint32_t reg, uint32_t mask) {
+static int stm32f411_spin_until_set(volatile uint32_t *reg, uint32_t mask) {
     uint32_t i = STM32F411_CLOCK_SPIN_TIMEOUT;
     while (i--) {
-        if (_STM32F411_REG(reg) & mask) {
+        if ((*reg & mask) != 0U) {
             return 1;
         }
     }
     return 0;
 }
 
-static int stm32f411_spin_until_clear(uint32_t reg, uint32_t mask) {
+static int stm32f411_spin_until_clear(volatile uint32_t *reg, uint32_t mask) {
     uint32_t i = STM32F411_CLOCK_SPIN_TIMEOUT;
     while (i--) {
-        if ((_STM32F411_REG(reg) & mask) == 0U) {
+        if ((*reg & mask) == 0U) {
             return 1;
         }
     }
     return 0;
 }
 
-static int stm32f411_spin_until_value(uint32_t reg,
+static int stm32f411_spin_until_value(volatile uint32_t *reg,
                                       uint32_t mask,
                                       uint32_t value) {
     uint32_t i = STM32F411_CLOCK_SPIN_TIMEOUT;
     while (i--) {
-        if ((_STM32F411_REG(reg) & mask) == value) {
+        if ((*reg & mask) == value) {
             return 1;
         }
     }
@@ -109,23 +101,9 @@ static void stm32f411_clock_cache_hsi(void) {
     g_pclk2_hz  = STM32F411_HSI_HZ;
 }
 
-static void stm32f411_set_vector_table(void) {
-    _STM32F411_REG(STM32F411_SCB_VTOR) = (uint32_t)(uintptr_t)&__vectors_start;
-    stm32f411_dsb();
-    stm32f411_isb();
-}
-
-static void stm32f411_enable_fpu(void) {
-    _STM32F411_REG(STM32F411_SCB_CPACR) |=
-        STM32F411_SCB_CPACR_CP10_FULL | STM32F411_SCB_CPACR_CP11_FULL;
-    stm32f411_dsb();
-    stm32f411_isb();
-}
-
 static int stm32f411_hsi_enable(void) {
-    _STM32F411_REG(STM32F411_RCC_CR) |= STM32F411_RCC_CR_HSION;
-    return stm32f411_spin_until_set(STM32F411_RCC_CR,
-                                    STM32F411_RCC_CR_HSIRDY);
+    RCC->CR |= RCC_CR_HSION;
+    return stm32f411_spin_until_set(&RCC->CR, RCC_CR_HSIRDY);
 }
 
 static int stm32f411_switch_sysclk_to_hsi(void) {
@@ -135,57 +113,60 @@ static int stm32f411_switch_sysclk_to_hsi(void) {
         return 0;
     }
 
-    cfgr = _STM32F411_REG(STM32F411_RCC_CFGR);
-    cfgr &= ~STM32F411_RCC_CFGR_SW_MASK;
-    cfgr |= STM32F411_RCC_CFGR_SW_HSI;
-    _STM32F411_REG(STM32F411_RCC_CFGR) = cfgr;
+    cfgr = RCC->CFGR;
+    cfgr &= ~RCC_CFGR_SW_Msk;
+    cfgr |= RCC_CFGR_SW_HSI;
+    RCC->CFGR = cfgr;
 
-    return stm32f411_spin_until_value(STM32F411_RCC_CFGR,
-                                      STM32F411_RCC_CFGR_SWS_MASK,
-                                      STM32F411_RCC_CFGR_SWS_HSI);
+    return stm32f411_spin_until_value(&RCC->CFGR,
+                                      RCC_CFGR_SWS_Msk,
+                                      RCC_CFGR_SWS_HSI);
 }
 
 static void stm32f411_pll_disable(void) {
-    _STM32F411_REG(STM32F411_RCC_CR) &= ~STM32F411_RCC_CR_PLLON;
-    (void)stm32f411_spin_until_clear(STM32F411_RCC_CR,
-                                     STM32F411_RCC_CR_PLLRDY);
+    RCC->CR &= ~RCC_CR_PLLON;
+    (void)stm32f411_spin_until_clear(&RCC->CR, RCC_CR_PLLRDY);
 }
 
 static int stm32f411_flash_configure(uint8_t latency) {
-    uint32_t acr = _STM32F411_REG(STM32F411_FLASH_ACR);
+    uint32_t acr = FLASH->ACR;
 
-    acr &= ~STM32F411_FLASH_ACR_LATENCY_MASK;
-    acr |= STM32F411_FLASH_ACR_LATENCY(latency)
-        | STM32F411_FLASH_ACR_PRFTEN
-        | STM32F411_FLASH_ACR_ICEN
-        | STM32F411_FLASH_ACR_DCEN;
-    _STM32F411_REG(STM32F411_FLASH_ACR) = acr;
+    acr &= ~FLASH_ACR_LATENCY_Msk;
+    acr |= TIKU_STM32_FLASH_ACR_LATENCY(latency)
+        | FLASH_ACR_PRFTEN
+        | FLASH_ACR_ICEN
+        | FLASH_ACR_DCEN;
+    FLASH->ACR = acr;
 
-    return stm32f411_spin_until_value(STM32F411_FLASH_ACR,
-                                      STM32F411_FLASH_ACR_LATENCY_MASK,
-                                      STM32F411_FLASH_ACR_LATENCY(latency));
+    return stm32f411_spin_until_value(&FLASH->ACR,
+                                      FLASH_ACR_LATENCY_Msk,
+                                      TIKU_STM32_FLASH_ACR_LATENCY(latency));
 }
 
 static void stm32f411_voltage_scale1(void) {
-    stm32f411_rcc_enable_apb1(STM32F411_RCC_APB1_PWR);
-    _STM32F411_REG(STM32F411_PWR_CR) =
-        (_STM32F411_REG(STM32F411_PWR_CR) & ~STM32F411_PWR_CR_VOS_MASK)
-        | STM32F411_PWR_CR_VOS_SCALE1;
-    (void)stm32f411_spin_until_set(STM32F411_PWR_CSR,
-                                   STM32F411_PWR_CSR_VOSRDY);
+    RCC->APB1ENR |= RCC_APB1ENR_PWREN;
+    (void)RCC->APB1ENR;
+
+    PWR->CR =
+        (PWR->CR & ~PWR_CR_VOS_Msk)
+        | TIKU_STM32_PWR_CR_VOS_SCALE1;
+    (void)stm32f411_spin_until_set(&PWR->CSR, PWR_CSR_VOSRDY);
 }
 
 static void stm32f411_enable_boot_peripherals(void) {
-    stm32f411_rcc_enable_ahb1(STM32F411_RCC_AHB1_GPIOA
-                            | STM32F411_RCC_AHB1_GPIOB
-                            | STM32F411_RCC_AHB1_GPIOC);
+    RCC->AHB1ENR |= RCC_AHB1ENR_GPIOAEN
+                 |  RCC_AHB1ENR_GPIOBEN
+                 |  RCC_AHB1ENR_GPIOCEN;
+    (void)RCC->AHB1ENR;
 
-    stm32f411_rcc_enable_apb1(STM32F411_RCC_APB1_PWR
-                            | STM32F411_RCC_APB1_TIM2
-                            | STM32F411_RCC_APB1_TIM5
-                            | STM32F411_RCC_APB1_USART2);
+    RCC->APB1ENR |= RCC_APB1ENR_PWREN
+                 |  RCC_APB1ENR_TIM2EN
+                 |  RCC_APB1ENR_TIM5EN
+                 |  RCC_APB1ENR_USART2EN;
+    (void)RCC->APB1ENR;
 
-    stm32f411_rcc_enable_apb2(STM32F411_RCC_APB2_SYSCFG);
+    RCC->APB2ENR |= RCC_APB2ENR_SYSCFGEN;
+    (void)RCC->APB2ENR;
 }
 
 struct stm32f411_clock_plan {
@@ -208,30 +189,30 @@ struct stm32f411_clock_plan {
 static const struct stm32f411_clock_plan stm32f411_clock_plans[] = {
     {
         16U, 0U, 0U, 0U, 0U, 0U, 0U,
-        STM32F411_RCC_CFGR_HPRE_DIV1,
-        STM32F411_RCC_CFGR_PPRE1_DIV1,
-        STM32F411_RCC_CFGR_PPRE2_DIV1,
+        RCC_CFGR_HPRE_DIV1,
+        RCC_CFGR_PPRE1_DIV1,
+        RCC_CFGR_PPRE2_DIV1,
         16000000UL, 16000000UL, 16000000UL, 16000000UL
     },
     {
-        48U, 1U, 16U, 192U, STM32F411_RCC_PLLCFGR_PLLP_DIV4, 4U, 1U,
-        STM32F411_RCC_CFGR_HPRE_DIV1,
-        STM32F411_RCC_CFGR_PPRE1_DIV1,
-        STM32F411_RCC_CFGR_PPRE2_DIV1,
+        48U, 1U, 16U, 192U, TIKU_STM32_PLLP_DIV4, 4U, 1U,
+        RCC_CFGR_HPRE_DIV1,
+        RCC_CFGR_PPRE1_DIV1,
+        RCC_CFGR_PPRE2_DIV1,
         48000000UL, 48000000UL, 48000000UL, 48000000UL
     },
     {
-        84U, 1U, 16U, 336U, STM32F411_RCC_PLLCFGR_PLLP_DIV4, 7U, 2U,
-        STM32F411_RCC_CFGR_HPRE_DIV1,
-        STM32F411_RCC_CFGR_PPRE1_DIV2,
-        STM32F411_RCC_CFGR_PPRE2_DIV1,
+        84U, 1U, 16U, 336U, TIKU_STM32_PLLP_DIV4, 7U, 2U,
+        RCC_CFGR_HPRE_DIV1,
+        RCC_CFGR_PPRE1_DIV2,
+        RCC_CFGR_PPRE2_DIV1,
         84000000UL, 84000000UL, 42000000UL, 84000000UL
     },
     {
-        100U, 1U, 16U, 200U, STM32F411_RCC_PLLCFGR_PLLP_DIV2, 4U, 3U,
-        STM32F411_RCC_CFGR_HPRE_DIV1,
-        STM32F411_RCC_CFGR_PPRE1_DIV2,
-        STM32F411_RCC_CFGR_PPRE2_DIV1,
+        100U, 1U, 16U, 200U, TIKU_STM32_PLLP_DIV2, 4U, 3U,
+        RCC_CFGR_HPRE_DIV1,
+        RCC_CFGR_PPRE1_DIV2,
+        RCC_CFGR_PPRE2_DIV1,
         100000000UL, 100000000UL, 50000000UL, 100000000UL
     },
 };
@@ -267,6 +248,7 @@ static void stm32f411_fallback_hsi(void) {
     stm32f411_pll_disable();
     (void)stm32f411_flash_configure(0U);
     stm32f411_clock_cache_hsi();
+    SystemCoreClockUpdate();
     g_clock_fault = 1U;
 }
 
@@ -285,34 +267,33 @@ static int stm32f411_apply_pll_plan(
         return 0;
     }
 
-    cfgr = _STM32F411_REG(STM32F411_RCC_CFGR);
-    cfgr &= ~(STM32F411_RCC_CFGR_HPRE_MASK
-            | STM32F411_RCC_CFGR_PPRE1_MASK
-            | STM32F411_RCC_CFGR_PPRE2_MASK);
+    cfgr = RCC->CFGR;
+    cfgr &= ~(RCC_CFGR_HPRE_Msk
+            | RCC_CFGR_PPRE1_Msk
+            | RCC_CFGR_PPRE2_Msk);
     cfgr |= plan->hpre_bits | plan->ppre1_bits | plan->ppre2_bits;
-    _STM32F411_REG(STM32F411_RCC_CFGR) = cfgr;
+    RCC->CFGR = cfgr;
 
-    _STM32F411_REG(STM32F411_RCC_PLLCFGR) =
-        STM32F411_RCC_PLLCFGR_PLLM(plan->pllm)
-        | STM32F411_RCC_PLLCFGR_PLLN(plan->plln)
+    RCC->PLLCFGR =
+        TIKU_STM32_RCC_PLLCFGR_PLLM(plan->pllm)
+        | TIKU_STM32_RCC_PLLCFGR_PLLN(plan->plln)
         | plan->pllp_bits
-        | STM32F411_RCC_PLLCFGR_PLLSRC_HSI
-        | STM32F411_RCC_PLLCFGR_PLLQ(plan->pllq);
+        | RCC_PLLCFGR_PLLSRC_HSI
+        | TIKU_STM32_RCC_PLLCFGR_PLLQ(plan->pllq);
 
-    _STM32F411_REG(STM32F411_RCC_CR) |= STM32F411_RCC_CR_PLLON;
-    if (!stm32f411_spin_until_set(STM32F411_RCC_CR,
-                                  STM32F411_RCC_CR_PLLRDY)) {
+    RCC->CR |= RCC_CR_PLLON;
+    if (!stm32f411_spin_until_set(&RCC->CR, RCC_CR_PLLRDY)) {
         return 0;
     }
 
-    cfgr = _STM32F411_REG(STM32F411_RCC_CFGR);
-    cfgr &= ~STM32F411_RCC_CFGR_SW_MASK;
-    cfgr |= STM32F411_RCC_CFGR_SW_PLL;
-    _STM32F411_REG(STM32F411_RCC_CFGR) = cfgr;
+    cfgr = RCC->CFGR;
+    cfgr &= ~RCC_CFGR_SW_Msk;
+    cfgr |= RCC_CFGR_SW_PLL;
+    RCC->CFGR = cfgr;
 
-    return stm32f411_spin_until_value(STM32F411_RCC_CFGR,
-                                      STM32F411_RCC_CFGR_SWS_MASK,
-                                      STM32F411_RCC_CFGR_SWS_PLL);
+    return stm32f411_spin_until_value(&RCC->CFGR,
+                                      RCC_CFGR_SWS_Msk,
+                                      RCC_CFGR_SWS_PLL);
 }
 
 /*---------------------------------------------------------------------------*/
@@ -321,14 +302,14 @@ static int stm32f411_apply_pll_plan(
 
 void tiku_cpu_boot_stm32f411_init(void) {
     stm32f411_disable_irq();
-    stm32f411_set_vector_table();
-    stm32f411_enable_fpu();
+    SystemInit();
 
     if (!stm32f411_hsi_enable()) {
         g_clock_fault = 1U;
     }
 
     stm32f411_clock_cache_hsi();
+    SystemCoreClockUpdate();
     stm32f411_enable_boot_peripherals();
 }
 
@@ -350,6 +331,7 @@ void tiku_cpu_freq_stm32f411_init(unsigned int target_mhz) {
             g_clock_fault = unsupported;
         }
         stm32f411_update_clock_cache(plan);
+        SystemCoreClockUpdate();
         return;
     }
 
@@ -359,6 +341,7 @@ void tiku_cpu_freq_stm32f411_init(unsigned int target_mhz) {
     }
 
     stm32f411_update_clock_cache(plan);
+    SystemCoreClockUpdate();
     g_clock_fault = unsupported;
 }
 
@@ -367,12 +350,8 @@ void tiku_cpu_boot_stm32f411_power_wfi_enter(void) {
 }
 
 void tiku_cpu_boot_stm32f411_reset(void) {
-    _STM32F411_REG(STM32F411_SCB_AIRCR) =
-        STM32F411_SCB_AIRCR_VECTKEY | STM32F411_SCB_AIRCR_SYSRESETREQ;
-    stm32f411_dsb();
-    for (;;) {
-        __asm__ volatile ("wfe" ::: "memory");
-    }
+    NVIC_SystemReset();
+    for (;;) { }
 }
 
 unsigned long tiku_cpu_stm32f411_clock_get_hz(void) {
@@ -400,6 +379,5 @@ int tiku_cpu_stm32f411_clock_has_fault(void) {
         return 1;
     }
 
-    return (_STM32F411_REG(STM32F411_RCC_CIR) & STM32F411_RCC_CIR_CSSF)
-        ? 1 : 0;
+    return (RCC->CIR & RCC_CIR_CSSF) ? 1 : 0;
 }

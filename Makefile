@@ -561,8 +561,12 @@ CFLAGS += -Os -Wall -Wextra
 CFLAGS += -D$(DEVICE_DEFINE)=1
 CFLAGS += -DTIKU_BOARD_NUCLEO_F411RE=1
 CFLAGS += -DPLATFORM_STM32F411=1
+CFLAGS += -DSTM32F411xE
 CFLAGS += --specs=nano.specs --specs=nosys.specs
 CFLAGS += -I$(PROJ_DIR)
+CFLAGS += -I$(PROJ_DIR)/arch/st/stm32f411re
+CFLAGS += -I$(PROJ_DIR)/arch/st/CMSIS/Include
+CFLAGS += -I$(PROJ_DIR)/arch/st/CMSIS/Core/Include
 CFLAGS += -ffunction-sections -fdata-sections -fno-common
 
 else
@@ -648,10 +652,9 @@ else ifeq ($(TIKU_PLATFORM),stm32f411)
 
 LDFLAGS  = -mcpu=cortex-m4 -mthumb -mfloat-abi=softfp -mfpu=fpv4-sp-d16
 LDFLAGS += --specs=nano.specs --specs=nosys.specs -nostartfiles
-LDFLAGS += -Tarch/stm32f411re/devices/stm32f411re.ld
+LDFLAGS += -Tarch/st/stm32f411re/devices/stm32f411re.ld
 LDFLAGS += -Wl,--gc-sections
 LDFLAGS += -Wl,-u,tiku_autostart_processes
-LDFLAGS += -Wl,-u,tiku_stm32f411_vectors
 LDFLAGS += -Wl,-Map=$(BUILD_DIR)/main.map
 
 else
@@ -755,26 +758,27 @@ SRCS += arch/arm-rp2350/tiku_trng_arch.c
 else ifeq ($(TIKU_PLATFORM),stm32f411)
 
 # STM32F411RE arch
-SRCS += arch/stm32f411re/tiku_cpu_common.c
-SRCS += arch/stm32f411re/tiku_crt_vector.c
-SRCS += arch/stm32f411re/tiku_crt_early.c
-SRCS += arch/stm32f411re/tiku_cpu_freq_boot_arch.c
-SRCS += arch/stm32f411re/tiku_cpu_watchdog_arch.c
-SRCS += arch/stm32f411re/tiku_htimer_arch.c
-SRCS += arch/stm32f411re/tiku_i2c_arch.c
-SRCS += arch/stm32f411re/tiku_adc_arch.c
-SRCS += arch/stm32f411re/tiku_onewire_arch.c
-SRCS += arch/stm32f411re/tiku_timer_arch.c
-SRCS += arch/stm32f411re/tiku_crit_arch.c
-SRCS += arch/stm32f411re/tiku_wake_arch.c
-SRCS += arch/stm32f411re/tiku_gpio_irq_arch.c
-SRCS += arch/stm32f411re/tiku_uart_arch.c
-SRCS += arch/stm32f411re/tiku_mem_arch.c
-SRCS += arch/stm32f411re/tiku_mpu_arch.c
-SRCS += arch/stm32f411re/tiku_region_arch.c
-SRCS += arch/stm32f411re/tiku_pinmux_arch.c
-SRCS += arch/stm32f411re/tiku_gpio_arch.c
-SRCS += arch/stm32f411re/tiku_spi_arch.c
+SRCS += arch/st/stm32f411re/tiku_cpu_common.c
+SRCS += arch/st/stm32f411re/system_stm32f4xx_tiku.c
+SRCS += arch/st/stm32f411re/tiku_irq_bridge_stm32f411.c
+SRCS += arch/st/stm32f411re/tiku_cpu_freq_boot_arch.c
+SRCS += arch/st/stm32f411re/tiku_cpu_watchdog_arch.c
+SRCS += arch/st/stm32f411re/tiku_htimer_arch.c
+SRCS += arch/st/stm32f411re/tiku_i2c_arch.c
+SRCS += arch/st/stm32f411re/tiku_adc_arch.c
+SRCS += arch/st/stm32f411re/tiku_onewire_arch.c
+SRCS += arch/st/stm32f411re/tiku_timer_arch.c
+SRCS += arch/st/stm32f411re/tiku_crit_arch.c
+SRCS += arch/st/stm32f411re/tiku_wake_arch.c
+SRCS += arch/st/stm32f411re/tiku_gpio_irq_arch.c
+SRCS += arch/st/stm32f411re/tiku_uart_arch.c
+SRCS += arch/st/stm32f411re/tiku_mem_arch.c
+SRCS += arch/st/stm32f411re/tiku_mpu_arch.c
+SRCS += arch/st/stm32f411re/tiku_region_arch.c
+SRCS += arch/st/stm32f411re/tiku_pinmux_arch.c
+SRCS += arch/st/stm32f411re/tiku_gpio_arch.c
+SRCS += arch/st/stm32f411re/tiku_spi_arch.c
+ASM_SRCS += arch/st/CMSIS/Source/Templates/gcc/startup_stm32f411xe.s
 
 else
 
@@ -1463,12 +1467,13 @@ endif # HAS_TIKUKITS
 
 endif # MINIMAL=1 / else
 
-# Object files in build directory. ASM_SRCS is for .S files pulled in
-# by build.mk fragments (e.g. firmware-blob .incbin wrappers); same
-# CFLAGS as C, since the toolchain treats .S as preprocessed-and-then-
-# assembled and we only need the include-path / -D macros.
+# Object files in build directory. ASM_SRCS is for .S/.s files pulled in
+# by build fragments or vendor startup sources; same CFLAGS as C, since
+# the toolchain treats them as preprocess-and-assemble inputs and we only
+# need the include-path / -D macros.
 OBJS = $(patsubst %.c,$(BUILD_DIR)/%.o,$(SRCS)) \
-       $(patsubst %.S,$(BUILD_DIR)/%.o,$(ASM_SRCS))
+       $(patsubst %.S,$(BUILD_DIR)/%.o,$(filter %.S,$(ASM_SRCS))) \
+       $(patsubst %.s,$(BUILD_DIR)/%.o,$(filter %.s,$(ASM_SRCS)))
 
 ifneq ($(BASIC_PROGRAM),)
 # Append the embedded-BASIC object directly (the recipe lives below
@@ -1521,6 +1526,10 @@ $(BUILD_DIR)/%.o: %.c
 # Assembly-source rule. Used by firmware-blob wrappers that pull in
 # binary data via .incbin (see drivers/wifi/cyw43/firmware.S).
 $(BUILD_DIR)/%.o: %.S
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -c -o $@ $<
+
+$(BUILD_DIR)/%.o: %.s
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -c -o $@ $<
 

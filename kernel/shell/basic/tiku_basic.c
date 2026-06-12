@@ -67,7 +67,7 @@
 #elif TIKU_BASIC_GPIO_ENABLE && defined(PLATFORM_RP2350)
 #include <arch/arm-rp2350/tiku_gpio_arch.h>
 #elif TIKU_BASIC_GPIO_ENABLE && defined(PLATFORM_STM32F411)
-#include <arch/stm32f411re/tiku_gpio_arch.h>
+#include <arch/st/stm32f411re/tiku_gpio_arch.h>
 #endif
 #if TIKU_BASIC_ADC_ENABLE
 #include <interfaces/adc/tiku_adc.h>

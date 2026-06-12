@@ -12,10 +12,10 @@
 
 #include "tiku_cpu_common.h"
 #include "tiku_cpu_freq_boot_arch.h"
-#include "tiku_stm32f411_regs.h"
 #include "tiku.h"
 #include <stddef.h>
 #include <stdint.h>
+#include <stm32f411xe.h>
 
 static void stm32f411_delay_cycles(unsigned long cycles)
 {
@@ -51,7 +51,7 @@ uint8_t tiku_cpu_stm32f411_unique_id(uint8_t *buf, uint8_t len)
 {
     uint8_t i;
     uint8_t n;
-    const volatile uint8_t *uid = (const volatile uint8_t *)(uintptr_t)STM32F411_UID_BASE;
+    const volatile uint8_t *uid = (const volatile uint8_t *)(uintptr_t)UID_BASE;
 
     if (buf == NULL || len == 0U) {
         return 0U;
@@ -66,5 +66,5 @@ uint8_t tiku_cpu_stm32f411_unique_id(uint8_t *buf, uint8_t len)
 
 uint16_t tiku_cpu_stm32f411_reset_reason(void)
 {
-    return (uint16_t)((_STM32F411_REG(STM32F411_RCC_CSR) >> 16) & 0xFFFFU);
+    return (uint16_t)((RCC->CSR >> 16) & 0xFFFFU);
 }

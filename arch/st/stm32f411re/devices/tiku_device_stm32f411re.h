@@ -14,7 +14,7 @@
 #define TIKU_DEVICE_STM32F411RE_H_
 
 #include <stdint.h>
-#include <arch/stm32f411re/tiku_stm32f411_regs.h>
+#include <stm32f411xe.h>
 
 /*---------------------------------------------------------------------------*/
 /* DEVICE IDENTIFICATION                                                     */
@@ -61,14 +61,14 @@
 * 128KB of SRAM at 0x20000000.
 */
 #define TIKU_DEVICE_RAM_SIZE        (128UL * 1024UL)
-#define TIKU_DEVICE_RAM_START       STM32F411_SRAM_BASE
+#define TIKU_DEVICE_RAM_START       SRAM_BASE
 
 /*
 * "FRAM" on the STM32F411RE refers to the on-chip flash (512 KB at 0x80000000).
 */
 #define TIKU_DEVICE_FRAM_SIZE       (512UL * 1024UL)
-#define TIKU_DEVICE_FRAM_START      STM32F411_FLASH_MEM_BASE
-#define TIKU_DEVICE_FRAM_END        (STM32F411_FLASH_MEM_BASE + TIKU_DEVICE_FRAM_SIZE - 1UL)
+#define TIKU_DEVICE_FRAM_START      FLASH_BASE
+#define TIKU_DEVICE_FRAM_END        (FLASH_BASE + TIKU_DEVICE_FRAM_SIZE - 1UL)
 
 #define TIKU_DEVICE_FRAM_CONFIG_SIZE      576U
 #define TIKU_DEVICE_FRAM_APP_SLOT_SIZE    4096U

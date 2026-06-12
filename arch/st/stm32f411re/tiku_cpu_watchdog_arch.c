@@ -11,7 +11,7 @@
  */
 
 #include "tiku_cpu_watchdog_arch.h"
-#include "tiku_stm32f411_regs.h"
+#include <stm32f411xe.h>
 #include <stdint.h>
 
 #define STM32F411_IWDG_PR_DIV32     3U
@@ -23,8 +23,7 @@ static volatile uint8_t g_iwdg_started = 0U;
 static void stm32f411_iwdg_wait_ready(void) {
     uint32_t i = STM32F411_IWDG_SPIN_TIMEOUT;
     while (i--) {
-        if ((_STM32F411_REG(STM32F411_IWDG_SR) &
-             (STM32F411_IWDG_SR_PVU | STM32F411_IWDG_SR_RVU)) == 0U) {
+        if ((IWDG->SR & (IWDG_SR_PVU | IWDG_SR_RVU)) == 0U) {
             return;
         }
     }
@@ -56,14 +55,13 @@ void tiku_cpu_stm32f411_watchdog_on_arch(tiku_wdt_clk_t src,
                                          tiku_wdt_interval_t isel) {
     (void)src;
 
-    _STM32F411_REG(STM32F411_IWDG_KR) = STM32F411_IWDG_KR_UNLOCK;
-    _STM32F411_REG(STM32F411_IWDG_PR) = STM32F411_IWDG_PR_DIV32;
-    _STM32F411_REG(STM32F411_IWDG_RLR) =
-        stm32f411_iwdg_reload_from_interval(isel);
+    IWDG->KR = 0x5555U;
+    IWDG->PR = STM32F411_IWDG_PR_DIV32;
+    IWDG->RLR = stm32f411_iwdg_reload_from_interval(isel);
     stm32f411_iwdg_wait_ready();
 
-    _STM32F411_REG(STM32F411_IWDG_KR) = STM32F411_IWDG_KR_RELOAD;
-    _STM32F411_REG(STM32F411_IWDG_KR) = STM32F411_IWDG_KR_ENABLE;
+    IWDG->KR = 0xAAAAU;
+    IWDG->KR = 0xCCCCU;
     g_iwdg_started = 1U;
 }
 
@@ -80,5 +78,5 @@ void tiku_cpu_stm32f411_watchdog_resume_arch(int kick_on_resume) {
 }
 
 void tiku_cpu_stm32f411_watchdog_kick_arch(void) {
-    _STM32F411_REG(STM32F411_IWDG_KR) = STM32F411_IWDG_KR_RELOAD;
+    IWDG->KR = 0xAAAAU;
 }

@@ -12,7 +12,7 @@
 
 #include "tiku_adc_arch.h"
 #include "tiku_pinmux_arch.h"
-#include "tiku_stm32f411_regs.h"
+#include <stm32f411xe.h>
 #include "tiku.h"
 
 #ifdef TIKU_BOARD_ADC_AVAILABLE  /* Board supports ADC1 */
@@ -24,8 +24,12 @@
 /** Busy-wait loop iteration limit to prevent infinite hangs. */
 #define ADC_TIMEOUT                   10000U
 #define STM32F411_ADC_CHANNEL_COUNT   16U
-#define STM32F411_ADC_CR1_RES_MASK    (0x03U << STM32F411_ADC_CR1_RES_SHIFT)
-#define STM32F411_ADC_CCR_ADCPRE_MASK (0x03U << STM32F411_ADC_CCR_ADCPRE_SHIFT)
+#define TIKU_STM32_GPIO_MODE_ANALOG   3U
+#define TIKU_STM32_GPIO_PUPD_NONE     0U
+#define TIKU_STM32_GPIO_SPEED_HIGH    3U
+#define TIKU_STM32_ADC_SAMPLE_84      4U
+#define TIKU_STM32_ADC_SAMPLE_480     7U
+#define TIKU_STM32_ADC_ADCPRE_DIV6    ADC_CCR_ADCPRE_1
 
 /*---------------------------------------------------------------------------*/
 /* PRIVATE TYPES                                                             */
@@ -67,13 +71,13 @@ adc_resolution_bits(uint8_t resolution, uint32_t *bits)
 
     switch (resolution) {
     case TIKU_ADC_RES_8BIT:
-        *bits = STM32F411_ADC_CR1_RES_8BIT;
+        *bits = ADC_CR1_RES_1;
         return TIKU_ADC_OK;
     case TIKU_ADC_RES_10BIT:
-        *bits = STM32F411_ADC_CR1_RES_10BIT;
+        *bits = ADC_CR1_RES_0;
         return TIKU_ADC_OK;
     case TIKU_ADC_RES_12BIT:
-        *bits = STM32F411_ADC_CR1_RES_12BIT;
+        *bits = 0U;
         return TIKU_ADC_OK;
     default:
         return TIKU_ADC_ERR_PARAM;
@@ -106,48 +110,46 @@ adc_set_sample_time(uint8_t hw_channel, uint32_t sample_bits)
     uint32_t reg;
     uint32_t shift;
 
-    shift = STM32F411_ADC_SMPR_CH_SHIFT(hw_channel);
+    shift = 3U * ((uint32_t)hw_channel % 10U);
     if (hw_channel < 10U) {
-        reg = _STM32F411_REG(STM32F411_ADC_SMPR2);
+        reg = ADC1->SMPR2;
         reg &= ~(0x07U << shift);
         reg |= (sample_bits & 0x07U) << shift;
-        _STM32F411_REG(STM32F411_ADC_SMPR2) = reg;
+        ADC1->SMPR2 = reg;
     } else {
-        reg = _STM32F411_REG(STM32F411_ADC_SMPR1);
+        reg = ADC1->SMPR1;
         reg &= ~(0x07U << shift);
         reg |= (sample_bits & 0x07U) << shift;
-        _STM32F411_REG(STM32F411_ADC_SMPR1) = reg;
+        ADC1->SMPR1 = reg;
     }
 }
 
 static void
 adc_select_channel(uint8_t hw_channel)
 {
-    _STM32F411_REG(STM32F411_ADC_SQR1) &=
-        ~STM32F411_ADC_SQR1_L_MASK;
-    _STM32F411_REG(STM32F411_ADC_SQR2) = 0U;
-    _STM32F411_REG(STM32F411_ADC_SQR3) = STM32F411_ADC_SQR3_SQ1(hw_channel);
+    ADC1->SQR1 &= ~ADC_SQR1_L_Msk;
+    ADC1->SQR2 = 0U;
+    ADC1->SQR3 = (uint32_t)hw_channel & ADC_SQR3_SQ1_Msk;
 }
 
 static void
 adc_disable_special_channels(void)
 {
-    _STM32F411_REG(STM32F411_ADC_CCR) &=
-        ~(STM32F411_ADC_CCR_TSVREFE | STM32F411_ADC_CCR_VBATE);
+    ADC->CCR &= ~(ADC_CCR_TSVREFE | ADC_CCR_VBATE);
 }
 
 static void
 adc_enable_temp_channel(void)
 {
     adc_disable_special_channels();
-    _STM32F411_REG(STM32F411_ADC_CCR) |= STM32F411_ADC_CCR_TSVREFE;
+    ADC->CCR |= ADC_CCR_TSVREFE;
 }
 
 static void
 adc_enable_battery_channel(void)
 {
     adc_disable_special_channels();
-    _STM32F411_REG(STM32F411_ADC_CCR) |= STM32F411_ADC_CCR_VBATE;
+    ADC->CCR |= ADC_CCR_VBATE;
 }
 
 static void
@@ -155,6 +157,7 @@ adc_reset_pin_if_analog(uint8_t channel)
 {
     uint32_t gpio_base;
     uint32_t rcc_bit;
+    GPIO_TypeDef *gpio;
     uint32_t moder;
     uint8_t port;
     uint8_t pin;
@@ -169,13 +172,15 @@ adc_reset_pin_if_analog(uint8_t channel)
         return;
     }
 
-    stm32f411_rcc_enable_ahb1(rcc_bit);
+    RCC->AHB1ENR |= rcc_bit;
+    (void)RCC->AHB1ENR;
+    gpio = (GPIO_TypeDef *)(uintptr_t)gpio_base;
 
-    moder = _STM32F411_REG(STM32F411_GPIO_MODER(gpio_base));
+    moder = gpio->MODER;
     if (((moder >> (2U * (uint32_t)pin)) & 0x03U)
-        == STM32F411_GPIO_MODE_ANALOG) {
+        == TIKU_STM32_GPIO_MODE_ANALOG) {
         (void)tiku_stm32f411_pinmux_init_input(port, pin,
-                                               STM32F411_GPIO_PUPD_NONE);
+                                               TIKU_STM32_GPIO_PUPD_NONE);
     }
 }
 
@@ -205,17 +210,18 @@ tiku_adc_arch_init(const tiku_adc_config_t *config)
         return status;
     }
 
-    stm32f411_rcc_enable_apb2(STM32F411_RCC_APB2_ADC1);
+    RCC->APB2ENR |= RCC_APB2ENR_ADC1EN;
+    (void)RCC->APB2ENR;
 
     /*
     * CCR register default configuration:
     *   - Analog clock frequency: PCLK2 divided by 6
     *   - VBATE and TSVREFE (battery and temp sensor channels) disabled
     */
-    ccr = _STM32F411_REG(STM32F411_ADC_CCR);
-    ccr &= ~STM32F411_ADC_CCR_ADCPRE_MASK;
-    ccr |= STM32F411_ADC_CCR_ADCPRE_PCLK2_DIV6;
-    _STM32F411_REG(STM32F411_ADC_CCR) = ccr;
+    ccr = ADC->CCR;
+    ccr &= ~ADC_CCR_ADCPRE_Msk;
+    ccr |= TIKU_STM32_ADC_ADCPRE_DIV6;
+    ADC->CCR = ccr;
     adc_disable_special_channels();
 
     /*
@@ -223,10 +229,10 @@ tiku_adc_arch_init(const tiku_adc_config_t *config)
     * - Scan mode disabled (SCAN=0)
     * - Resolution: set according to config
     */
-    cr1 = _STM32F411_REG(STM32F411_ADC_CR1);
-    cr1 &= ~(STM32F411_ADC_CR1_SCAN | STM32F411_ADC_CR1_RES_MASK);
+    cr1 = ADC1->CR1;
+    cr1 &= ~(ADC_CR1_SCAN | ADC_CR1_RES_Msk);
     cr1 |= resolution_bits;
-    _STM32F411_REG(STM32F411_ADC_CR1) = cr1;
+    ADC1->CR1 = cr1;
 
     /*
     * CR2 register default configuration:
@@ -236,23 +242,22 @@ tiku_adc_arch_init(const tiku_adc_config_t *config)
     *  - EOC flag set at end of each conversion (EOCS=1)
     *  - DMA disabled (DMA=0)
     */
-    cr2 = _STM32F411_REG(STM32F411_ADC_CR2);
-    cr2 &= ~(STM32F411_ADC_CR2_CONT
-          | STM32F411_ADC_CR2_DMA
-          | STM32F411_ADC_CR2_DDS
-          | STM32F411_ADC_CR2_ALIGN
-          | STM32F411_ADC_CR2_SWSTART);
-    cr2 |= STM32F411_ADC_CR2_EOCS;
-    _STM32F411_REG(STM32F411_ADC_CR2) = cr2;
+    cr2 = ADC1->CR2;
+    cr2 &= ~(ADC_CR2_CONT
+          | ADC_CR2_DMA
+          | ADC_CR2_DDS
+          | ADC_CR2_ALIGN
+          | ADC_CR2_SWSTART);
+    cr2 |= ADC_CR2_EOCS;
+    ADC1->CR2 = cr2;
 
     // Reset conversion sequences upon startup
-    _STM32F411_REG(STM32F411_ADC_SQR1) &=
-        ~STM32F411_ADC_SQR1_L_MASK;
-    _STM32F411_REG(STM32F411_ADC_SQR2) = 0U;
-    _STM32F411_REG(STM32F411_ADC_SQR3) = 0U;
-    
+    ADC1->SQR1 &= ~ADC_SQR1_L_Msk;
+    ADC1->SQR2 = 0U;
+    ADC1->SQR3 = 0U;
+
     // Start ADC
-    _STM32F411_REG(STM32F411_ADC_CR2) |= STM32F411_ADC_CR2_ADON;
+    ADC1->CR2 |= ADC_CR2_ADON;
 
     adc_reference = config->reference;
     g_adc_cfg = *config;
@@ -267,11 +272,11 @@ tiku_adc_arch_close(void)
     uint8_t channel;
 
     // Disable ADC
-    _STM32F411_REG(STM32F411_ADC_CR2) &= ~STM32F411_ADC_CR2_ADON;
-    
+    ADC1->CR2 &= ~ADC_CR2_ADON;
+
     // Disable battery monitor and temperature sensor channels
     adc_disable_special_channels();
-    _STM32F411_REG(STM32F411_RCC_APB2ENR) &= ~STM32F411_RCC_APB2_ADC1;
+    RCC->APB2ENR &= ~RCC_APB2ENR_ADC1EN;
 
     // Reset any external channel pins that are in analog mode
     // This assumes that the ADC driver is the only user of those pins, which is true for the current board configuration
@@ -297,7 +302,7 @@ tiku_adc_arch_channel_init(uint8_t channel)
         adc_enable_temp_channel();
         hw_channel = adc_hw_channel(channel);
         adc_select_channel(hw_channel);
-        adc_set_sample_time(hw_channel, STM32F411_ADC_SAMPLE_480CYCLES);
+        adc_set_sample_time(hw_channel, TIKU_STM32_ADC_SAMPLE_480);
         return TIKU_ADC_OK;
     }
 
@@ -306,7 +311,7 @@ tiku_adc_arch_channel_init(uint8_t channel)
         adc_enable_battery_channel();
         hw_channel = adc_hw_channel(channel);
         adc_select_channel(hw_channel);
-        adc_set_sample_time(hw_channel, STM32F411_ADC_SAMPLE_480CYCLES);
+        adc_set_sample_time(hw_channel, TIKU_STM32_ADC_SAMPLE_480);
         return TIKU_ADC_OK;
     }
 
@@ -318,15 +323,15 @@ tiku_adc_arch_channel_init(uint8_t channel)
 
     if (tiku_stm32f411_pinmux_config(g_adc_channel_pins[channel].port,
                                      g_adc_channel_pins[channel].pin,
-                                     STM32F411_GPIO_MODE_ANALOG,
-                                     STM32F411_GPIO_PUPD_NONE,
-                                     STM32F411_GPIO_SPEED_HIGH) != 0) {
+                                     TIKU_STM32_GPIO_MODE_ANALOG,
+                                     TIKU_STM32_GPIO_PUPD_NONE,
+                                     TIKU_STM32_GPIO_SPEED_HIGH) != 0) {
         return TIKU_ADC_ERR_PARAM;
     }
 
     hw_channel = adc_hw_channel(channel);
     adc_select_channel(hw_channel);
-    adc_set_sample_time(hw_channel, STM32F411_ADC_SAMPLE_84CYCLES);
+    adc_set_sample_time(hw_channel, TIKU_STM32_ADC_SAMPLE_84);
 
     return TIKU_ADC_OK;
 }
@@ -356,26 +361,26 @@ tiku_adc_arch_read(uint8_t channel, uint16_t *value)
     adc_select_channel(hw_channel);
 
     if (channel >= TIKU_ADC_CH_TEMP) {
-        adc_set_sample_time(hw_channel, STM32F411_ADC_SAMPLE_480CYCLES);
+        adc_set_sample_time(hw_channel, TIKU_STM32_ADC_SAMPLE_480);
     } else {
-        adc_set_sample_time(hw_channel, STM32F411_ADC_SAMPLE_84CYCLES);
+        adc_set_sample_time(hw_channel, TIKU_STM32_ADC_SAMPLE_84);
     }
 
-    _STM32F411_REG(STM32F411_ADC_SR) = 0U;
+    ADC1->SR = 0U;
 
-    cr2 = _STM32F411_REG(STM32F411_ADC_CR2);
-    cr2 |= STM32F411_ADC_CR2_ADON;
-    _STM32F411_REG(STM32F411_ADC_CR2) = cr2;
-    _STM32F411_REG(STM32F411_ADC_CR2) = cr2 | STM32F411_ADC_CR2_SWSTART;
+    cr2 = ADC1->CR2;
+    cr2 |= ADC_CR2_ADON;
+    ADC1->CR2 = cr2;
+    ADC1->CR2 = cr2 | ADC_CR2_SWSTART;
 
     timeout = ADC_TIMEOUT;
-    while ((_STM32F411_REG(STM32F411_ADC_SR) & STM32F411_ADC_SR_EOC) == 0U) {
+    while ((ADC1->SR & ADC_SR_EOC) == 0U) {
         if (--timeout == 0U) {
             return TIKU_ADC_ERR_TIMEOUT;
         }
     }
 
-    *value = (uint16_t)_STM32F411_REG(STM32F411_ADC_DR);
+    *value = (uint16_t)ADC1->DR;
     (void)adc_reference;
     (void)g_adc_cfg;
     return TIKU_ADC_OK;

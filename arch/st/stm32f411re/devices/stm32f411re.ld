@@ -23,7 +23,7 @@
 
 OUTPUT_FORMAT("elf32-littlearm")
 OUTPUT_ARCH(arm)
-ENTRY(tiku_stm32f411_reset_handler)
+ENTRY(Reset_Handler)
 
 MEMORY
 {
@@ -39,6 +39,7 @@ __flash_end   = ORIGIN(FLASH) + LENGTH(FLASH);
 /* The Cortex-M loads the initial SP from the first vector entry.
  * Place it at the very top of SRAM and let the stack grow downward. */
 __stack = __sram_end;
+_estack = __stack;
 
 /*
  * No NVM backup sector on STM32F411RE internal flash.
@@ -55,6 +56,7 @@ SECTIONS
     .vectors ORIGIN(FLASH) :
     {
         __vectors_start = .;
+        KEEP(*(.isr_vector))
         KEEP(*(.vectors))
         __vectors_end = .;
     } > FLASH
@@ -74,27 +76,56 @@ SECTIONS
         *(.gnu.linkonce.r.*)
     } > FLASH
 
+    .preinit_array : ALIGN(4)
+    {
+        PROVIDE_HIDDEN(__preinit_array_start = .);
+        KEEP(*(.preinit_array))
+        KEEP(*(.preinit_array.*))
+        PROVIDE_HIDDEN(__preinit_array_end = .);
+    } > FLASH
+
+    .init_array : ALIGN(4)
+    {
+        PROVIDE_HIDDEN(__init_array_start = .);
+        KEEP(*(SORT(.init_array.*)))
+        KEEP(*(.init_array))
+        PROVIDE_HIDDEN(__init_array_end = .);
+    } > FLASH
+
+    .fini_array : ALIGN(4)
+    {
+        PROVIDE_HIDDEN(__fini_array_start = .);
+        KEEP(*(SORT(.fini_array.*)))
+        KEEP(*(.fini_array))
+        PROVIDE_HIDDEN(__fini_array_end = .);
+    } > FLASH
+
     .ARM.extab : { *(.ARM.extab*) } > FLASH
     .ARM.exidx : { __exidx_start = .; *(.ARM.exidx*) __exidx_end = .; } > FLASH
 
     /* -------- 3. Initialised data ------------------------------------ */
     __data_load = LOADADDR(.data);
+    _sidata = __data_load;
     .data : ALIGN(4)
     {
         __data_start = .;
+        _sdata = .;
         *(.data*)
         . = ALIGN(4);
         __data_end = .;
+        _edata = .;
     } > SRAM AT > FLASH
 
     /* -------- 4. Zero-initialised BSS -------------------------------- */
     .bss : ALIGN(4)
     {
         __bss_start = .;
+        _sbss = .;
         *(.bss*)
         *(COMMON)
         . = ALIGN(4);
         __bss_end = .;
+        _ebss = .;
     } > SRAM
 
     /* -------- 5. MPU diagnostic state (NOLOAD) ----------------------- */

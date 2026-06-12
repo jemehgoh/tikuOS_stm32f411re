@@ -16,7 +16,7 @@
 
 #include "tiku_spi_arch.h"
 #include "tiku_pinmux_arch.h"
-#include "tiku_stm32f411_regs.h"
+#include <stm32f411xe.h>
 #include "tiku.h"
 #include <stdint.h>
 
@@ -24,8 +24,10 @@
 /* CONSTANTS                                                                 */
 /*---------------------------------------------------------------------------*/
 
-#define TIKU_STM32F411_SPI_BASE       STM32F411_SPI1_BASE
-#define TIKU_STM32F411_SPI_RCC_BIT    STM32F411_RCC_APB2_SPI1
+#define TIKU_STM32F411_SPI_AF         5U
+#define TIKU_STM32_GPIO_MODE_AF       2U
+#define TIKU_STM32_GPIO_PUPD_NONE     0U
+#define TIKU_STM32_GPIO_SPEED_HIGH    3U
 
 /* Bound every busy-wait loop so a wedged peripheral cannot hang forever. */
 #define SPI_TIMEOUT                   100000U
@@ -37,6 +39,11 @@
 
 static uint8_t g_spi_ready;
 
+static __IO uint8_t *stm32f411_spi_dr8(void)
+{
+    return (__IO uint8_t *)&SPI1->DR;
+}
+
 /*---------------------------------------------------------------------------*/
 /* PRIVATE HELPERS                                                           */
 /*---------------------------------------------------------------------------*/
@@ -47,7 +54,7 @@ stm32f411_spi_wait_set(uint32_t mask)
     uint32_t timeout;
 
     for (timeout = 0U; timeout < SPI_TIMEOUT; timeout++) {
-        if (_STM32F411_REG(STM32F411_SPI_SR(TIKU_STM32F411_SPI_BASE)) & mask) {
+        if (SPI1->SR & mask) {
             return 0;
         }
     }
@@ -61,8 +68,7 @@ stm32f411_spi_wait_clear(uint32_t mask)
     uint32_t timeout;
 
     for (timeout = 0U; timeout < SPI_TIMEOUT; timeout++) {
-        if ((_STM32F411_REG(STM32F411_SPI_SR(TIKU_STM32F411_SPI_BASE)) & mask)
-            == 0U) {
+        if ((SPI1->SR & mask) == 0U) {
             return 0;
         }
     }
@@ -73,26 +79,24 @@ stm32f411_spi_wait_clear(uint32_t mask)
 static void
 stm32f411_spi_clear_rx_state(void)
 {
-    while (_STM32F411_REG(STM32F411_SPI_SR(TIKU_STM32F411_SPI_BASE))
-           & STM32F411_SPI_SR_RXNE) {
-        (void)_STM32F411_REG8(STM32F411_SPI_DR(TIKU_STM32F411_SPI_BASE));
+    while (SPI1->SR & SPI_SR_RXNE) {
+        (void)*stm32f411_spi_dr8();
     }
 
-    if (_STM32F411_REG(STM32F411_SPI_SR(TIKU_STM32F411_SPI_BASE))
-        & STM32F411_SPI_SR_OVR) {
-        (void)_STM32F411_REG8(STM32F411_SPI_DR(TIKU_STM32F411_SPI_BASE));
-        (void)_STM32F411_REG(STM32F411_SPI_SR(TIKU_STM32F411_SPI_BASE));
+    if (SPI1->SR & SPI_SR_OVR) {
+        (void)*stm32f411_spi_dr8();
+        (void)SPI1->SR;
     }
 }
 
 static int
 stm32f411_spi_wait_idle(void)
 {
-    if (stm32f411_spi_wait_set(STM32F411_SPI_SR_TXE) != 0) {
+    if (stm32f411_spi_wait_set(SPI_SR_TXE) != 0) {
         return -1;
     }
 
-    if (stm32f411_spi_wait_clear(STM32F411_SPI_SR_BSY) != 0) {
+    if (stm32f411_spi_wait_clear(SPI_SR_BSY) != 0) {
         return -1;
     }
 
@@ -107,10 +111,10 @@ stm32f411_spi_mode_bits(uint8_t mode)
 
     cr1 = 0U;
     if (mode & 0x1U) {
-        cr1 |= STM32F411_SPI_CR1_CPHA;
+        cr1 |= SPI_CR1_CPHA;
     }
     if (mode & 0x2U) {
-        cr1 |= STM32F411_SPI_CR1_CPOL;
+        cr1 |= SPI_CR1_CPOL;
     }
 
     return cr1;
@@ -123,28 +127,28 @@ stm32f411_spi_prescaler_bits(uint16_t prescaler, uint32_t *br_bits)
     // The STM32F411's SPI only supports baud rates of f_PCLK / 2, 4, 8, ..., 256.
     switch (prescaler) {
     case 2U:
-        *br_bits = (0x0U << STM32F411_SPI_CR1_BR_SHIFT);
+        *br_bits = (0x0U << SPI_CR1_BR_Pos);
         return 0;
     case 4U:
-        *br_bits = (0x1U << STM32F411_SPI_CR1_BR_SHIFT);
+        *br_bits = (0x1U << SPI_CR1_BR_Pos);
         return 0;
     case 8U:
-        *br_bits = (0x2U << STM32F411_SPI_CR1_BR_SHIFT);
+        *br_bits = (0x2U << SPI_CR1_BR_Pos);
         return 0;
     case 16U:
-        *br_bits = (0x3U << STM32F411_SPI_CR1_BR_SHIFT);
+        *br_bits = (0x3U << SPI_CR1_BR_Pos);
         return 0;
     case 32U:
-        *br_bits = (0x4U << STM32F411_SPI_CR1_BR_SHIFT);
+        *br_bits = (0x4U << SPI_CR1_BR_Pos);
         return 0;
     case 64U:
-        *br_bits = (0x5U << STM32F411_SPI_CR1_BR_SHIFT);
+        *br_bits = (0x5U << SPI_CR1_BR_Pos);
         return 0;
     case 128U:
-        *br_bits = (0x6U << STM32F411_SPI_CR1_BR_SHIFT);
+        *br_bits = (0x6U << SPI_CR1_BR_Pos);
         return 0;
     case 256U:
-        *br_bits = (0x7U << STM32F411_SPI_CR1_BR_SHIFT);
+        *br_bits = (0x7U << SPI_CR1_BR_Pos);
         return 0;
     default:
         return -1;
@@ -154,17 +158,17 @@ stm32f411_spi_prescaler_bits(uint16_t prescaler, uint32_t *br_bits)
 static int
 stm32f411_spi_xfer_byte(uint8_t tx, uint8_t *rx)
 {
-    if (stm32f411_spi_wait_set(STM32F411_SPI_SR_TXE) != 0) {
+    if (stm32f411_spi_wait_set(SPI_SR_TXE) != 0) {
         return TIKU_SPI_ERR_TIMEOUT;
     }
 
-    _STM32F411_REG8(STM32F411_SPI_DR(TIKU_STM32F411_SPI_BASE)) = tx;
+    *stm32f411_spi_dr8() = tx;
 
-    if (stm32f411_spi_wait_set(STM32F411_SPI_SR_RXNE) != 0) {
+    if (stm32f411_spi_wait_set(SPI_SR_RXNE) != 0) {
         return TIKU_SPI_ERR_TIMEOUT;
     }
 
-    *rx = _STM32F411_REG8(STM32F411_SPI_DR(TIKU_STM32F411_SPI_BASE));
+    *rx = *stm32f411_spi_dr8();
     return TIKU_SPI_OK;
 }
 
@@ -196,64 +200,65 @@ tiku_spi_arch_init(const tiku_spi_config_t *config)
     // Check that the SCK/MISO/MOSI pins can be configured for SPI1 and are not used elsewhere.
     if (tiku_stm32f411_pinmux_config(TIKU_BOARD_SPI1_SCK_PORT,
                                      TIKU_BOARD_SPI1_SCK_PIN,
-                                     STM32F411_GPIO_MODE_AF,
-                                     STM32F411_GPIO_PUPD_NONE,
-                                     STM32F411_GPIO_SPEED_HIGH) != 0
+                                     TIKU_STM32_GPIO_MODE_AF,
+                                     TIKU_STM32_GPIO_PUPD_NONE,
+                                     TIKU_STM32_GPIO_SPEED_HIGH) != 0
         || tiku_stm32f411_pinmux_set_drive(TIKU_BOARD_SPI1_SCK_PORT,
                                            TIKU_BOARD_SPI1_SCK_PIN,
                                            0U) != 0
         || tiku_stm32f411_pinmux_set_af(TIKU_BOARD_SPI1_SCK_PORT,
                                         TIKU_BOARD_SPI1_SCK_PIN,
-                                        STM32F411_GPIO_AF_SPI1_2_4_5) != 0
+                                        TIKU_STM32F411_SPI_AF) != 0
         || tiku_stm32f411_pinmux_config(TIKU_BOARD_SPI1_MISO_PORT,
                                         TIKU_BOARD_SPI1_MISO_PIN,
-                                        STM32F411_GPIO_MODE_AF,
-                                        STM32F411_GPIO_PUPD_NONE,
-                                        STM32F411_GPIO_SPEED_HIGH) != 0
+                                        TIKU_STM32_GPIO_MODE_AF,
+                                        TIKU_STM32_GPIO_PUPD_NONE,
+                                        TIKU_STM32_GPIO_SPEED_HIGH) != 0
         || tiku_stm32f411_pinmux_set_drive(TIKU_BOARD_SPI1_MISO_PORT,
                                            TIKU_BOARD_SPI1_MISO_PIN,
                                            0U) != 0
         || tiku_stm32f411_pinmux_set_af(TIKU_BOARD_SPI1_MISO_PORT,
                                         TIKU_BOARD_SPI1_MISO_PIN,
-                                        STM32F411_GPIO_AF_SPI1_2_4_5) != 0
+                                        TIKU_STM32F411_SPI_AF) != 0
         || tiku_stm32f411_pinmux_config(TIKU_BOARD_SPI1_MOSI_PORT,
                                         TIKU_BOARD_SPI1_MOSI_PIN,
-                                        STM32F411_GPIO_MODE_AF,
-                                        STM32F411_GPIO_PUPD_NONE,
-                                        STM32F411_GPIO_SPEED_HIGH) != 0
+                                        TIKU_STM32_GPIO_MODE_AF,
+                                        TIKU_STM32_GPIO_PUPD_NONE,
+                                        TIKU_STM32_GPIO_SPEED_HIGH) != 0
         || tiku_stm32f411_pinmux_set_drive(TIKU_BOARD_SPI1_MOSI_PORT,
                                            TIKU_BOARD_SPI1_MOSI_PIN,
                                            0U) != 0
         || tiku_stm32f411_pinmux_set_af(TIKU_BOARD_SPI1_MOSI_PORT,
                                         TIKU_BOARD_SPI1_MOSI_PIN,
-                                        STM32F411_GPIO_AF_SPI1_2_4_5) != 0) {
+                                        TIKU_STM32F411_SPI_AF) != 0) {
         return TIKU_SPI_ERR_PARAM;
     }
 
     // Enable peripheral clock and reset SPI peripheral
-    stm32f411_rcc_enable_apb2(TIKU_STM32F411_SPI_RCC_BIT);
-    stm32f411_rcc_reset_apb2(TIKU_STM32F411_SPI_RCC_BIT);
+    RCC->APB2ENR |= RCC_APB2ENR_SPI1EN;
+    (void)RCC->APB2ENR;
+    RCC->APB2RSTR |= RCC_APB2RSTR_SPI1RST;
+    RCC->APB2RSTR &= ~RCC_APB2RSTR_SPI1RST;
 
     // Reset SPI control registers for configuration
-    _STM32F411_REG(STM32F411_SPI_CR1(TIKU_STM32F411_SPI_BASE)) = 0U;
-    _STM32F411_REG(STM32F411_SPI_CR2(TIKU_STM32F411_SPI_BASE)) = 0U;
-    _STM32F411_REG(STM32F411_SPI_I2SCFGR(TIKU_STM32F411_SPI_BASE)) = 0U;
+    SPI1->CR1 = 0U;
+    SPI1->CR2 = 0U;
+    SPI1->I2SCFGR = 0U;
     stm32f411_spi_clear_rx_state();
 
-    cr1 = STM32F411_SPI_CR1_MSTR
-        | STM32F411_SPI_CR1_SSM
-        | STM32F411_SPI_CR1_SSI
+    cr1 = SPI_CR1_MSTR
+        | SPI_CR1_SSM
+        | SPI_CR1_SSI
         | br_bits
         | stm32f411_spi_mode_bits(config->mode);
 
     // Set up LSB first order if specified (default is MSB first)
     if (config->bit_order == TIKU_SPI_LSB_FIRST) {
-        cr1 |= STM32F411_SPI_CR1_LSBFIRST;
+        cr1 |= SPI_CR1_LSBFIRST;
     }
 
-    _STM32F411_REG(STM32F411_SPI_CR1(TIKU_STM32F411_SPI_BASE)) = cr1;
-    _STM32F411_REG(STM32F411_SPI_CR1(TIKU_STM32F411_SPI_BASE)) =
-        cr1 | STM32F411_SPI_CR1_SPE;
+    SPI1->CR1 = cr1;
+    SPI1->CR1 = cr1 | SPI_CR1_SPE;
 
     g_spi_ready = 1U;
 
@@ -278,9 +283,9 @@ tiku_spi_arch_close(void)
     (void)stm32f411_spi_wait_idle();
     stm32f411_spi_clear_rx_state();
 
-    cr1 = _STM32F411_REG(STM32F411_SPI_CR1(TIKU_STM32F411_SPI_BASE));
-    cr1 &= ~STM32F411_SPI_CR1_SPE;
-    _STM32F411_REG(STM32F411_SPI_CR1(TIKU_STM32F411_SPI_BASE)) = cr1;
+    cr1 = SPI1->CR1;
+    cr1 &= ~SPI_CR1_SPE;
+    SPI1->CR1 = cr1;
 
     g_spi_ready = 0U;
     SPI_PRINTF("close\n");

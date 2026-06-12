@@ -11,7 +11,7 @@
  */
 
 #include "tiku_mpu_arch.h"
-#include "tiku_stm32f411_regs.h"
+#include <stm32f411xe.h>
 #include <stdint.h>
 
 struct tiku_stm32f411_mpu_diag {
@@ -58,13 +58,13 @@ uint16_t tiku_mpu_arch_get_ctl(void)
 
 void tiku_mpu_arch_disable_irq(void)
 {
-    __asm__ volatile ("mrs %0, primask" : "=r"(g_saved_primask));
-    __asm__ volatile ("cpsid i" ::: "memory");
+    g_saved_primask = __get_PRIMASK();
+    __disable_irq();
 }
 
 void tiku_mpu_arch_enable_irq(void)
 {
-    __asm__ volatile ("msr primask, %0" : : "r"(g_saved_primask) : "memory");
+    __set_PRIMASK(g_saved_primask);
 }
 
 void tiku_mpu_arch_init_segments(void)
@@ -76,7 +76,7 @@ void tiku_mpu_arch_set_default_protection(void)
 {
     g_mpu_sam = TIKU_MPU_DEFAULT_SAM;
     g_mpu_ctl = 1U;
-    _STM32F411_REG(STM32F411_SCB_SHCSR) |= STM32F411_SCB_SHCSR_MEMFAULTENA;
+    SCB->SHCSR |= SCB_SHCSR_MEMFAULTENA_Msk;
 }
 
 void tiku_mpu_arch_set_seg_perm(uint8_t seg, uint8_t perm)
@@ -110,12 +110,12 @@ void tiku_mpu_arch_clear_violation_flags(void)
 {
     stm32f411_mpu_diag_init();
     g_mpu_diag.violation_flags = 0U;
-    _STM32F411_REG(STM32F411_SCB_CFSR) = _STM32F411_REG(STM32F411_SCB_CFSR);
+    SCB->CFSR = SCB->CFSR;
 }
 
 void tiku_mpu_arch_enable_violation_nmi(void)
 {
-    _STM32F411_REG(STM32F411_SCB_SHCSR) |= STM32F411_SCB_SHCSR_MEMFAULTENA;
+    SCB->SHCSR |= SCB_SHCSR_MEMFAULTENA_Msk;
 }
 
 uint32_t tiku_mpu_arch_violation_count(void)
@@ -132,22 +132,22 @@ uint32_t tiku_mpu_arch_last_fault_addr(void)
 
 void tiku_stm32f411_mem_manage_handler(void)
 {
-    uint32_t cfsr = _STM32F411_REG(STM32F411_SCB_CFSR);
+    uint32_t cfsr = SCB->CFSR;
 
     stm32f411_mpu_diag_init();
     g_mpu_diag.violation_count++;
     g_mpu_diag.violation_flags = (uint16_t)(cfsr & 0x00FFU);
-    if (cfsr & STM32F411_SCB_MMFSR_MMARVALID) {
-        g_mpu_diag.last_fault_addr = _STM32F411_REG(STM32F411_SCB_MMFAR);
+    if (cfsr & SCB_CFSR_MMARVALID_Msk) {
+        g_mpu_diag.last_fault_addr = SCB->MMFAR;
     } else {
         g_mpu_diag.last_fault_addr = 0U;
     }
 
-    _STM32F411_REG(STM32F411_SCB_CFSR) = cfsr;
-    _STM32F411_REG(STM32F411_SCB_AIRCR) =
-        STM32F411_SCB_AIRCR_VECTKEY | STM32F411_SCB_AIRCR_SYSRESETREQ;
+    SCB->CFSR = cfsr;
+    SCB->AIRCR =
+        (0x5FAUL << SCB_AIRCR_VECTKEY_Pos) | SCB_AIRCR_SYSRESETREQ_Msk;
 
     for (;;) {
-        __asm__ volatile ("wfe");
+        __WFE();
     }
 }

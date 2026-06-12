@@ -13,7 +13,7 @@
 #include "tiku_uart_arch.h"
 #include "tiku_cpu_freq_boot_arch.h"
 #include "tiku_pinmux_arch.h"
-#include "tiku_stm32f411_regs.h"
+#include <stm32f411xe.h>
 #include "tiku.h"
 #include <stdarg.h>
 #include <stdint.h>
@@ -30,7 +30,12 @@
 #error "TIKU_UART_RXBUF_SIZE must be a power of two"
 #endif
 
-#define TIKU_UART_RXBUF_MASK  (TIKU_UART_RXBUF_SIZE - 1)
+#define TIKU_UART_RXBUF_MASK     (TIKU_UART_RXBUF_SIZE - 1)
+#define TIKU_STM32_GPIO_MODE_AF    2U
+#define TIKU_STM32_GPIO_PUPD_NONE  0U
+#define TIKU_STM32_GPIO_PUPD_UP    1U
+#define TIKU_STM32_GPIO_SPEED_HIGH 3U
+#define TIKU_STM32_UART_AF         7U
 
 static struct {
     volatile uint8_t  buf[TIKU_UART_RXBUF_SIZE];
@@ -43,43 +48,30 @@ static struct {
 /* Helpers                                                                   */
 /*---------------------------------------------------------------------------*/
 
-/*
- * UART register access wrapper functions.
- */
-static inline uint32_t uart_read(uint32_t off)
-{
-    return _STM32F411_REG(STM32F411_USART2_BASE + off);
-}
-
-static inline void uart_write(uint32_t off, uint32_t val)
-{
-    _STM32F411_REG(STM32F411_USART2_BASE + off) = val;
-}
-
 static void stm32f411_uart_gpio_init(void)
 {
     (void)tiku_stm32f411_pinmux_config(TIKU_BOARD_UART_TX_PORT,
                                        TIKU_BOARD_UART_TX_PIN,
-                                       STM32F411_GPIO_MODE_AF,
-                                       STM32F411_GPIO_PUPD_NONE,
-                                       STM32F411_GPIO_SPEED_HIGH);
+                                       TIKU_STM32_GPIO_MODE_AF,
+                                       TIKU_STM32_GPIO_PUPD_NONE,
+                                       TIKU_STM32_GPIO_SPEED_HIGH);
     (void)tiku_stm32f411_pinmux_set_drive(TIKU_BOARD_UART_TX_PORT,
                                           TIKU_BOARD_UART_TX_PIN,
                                           0U);
     (void)tiku_stm32f411_pinmux_set_af(TIKU_BOARD_UART_TX_PORT,
                                        TIKU_BOARD_UART_TX_PIN,
-                                       STM32F411_GPIO_AF_USART1_2);
+                                       TIKU_STM32_UART_AF);
     (void)tiku_stm32f411_pinmux_config(TIKU_BOARD_UART_RX_PORT,
                                        TIKU_BOARD_UART_RX_PIN,
-                                       STM32F411_GPIO_MODE_AF,
-                                       STM32F411_GPIO_PUPD_UP,
-                                       STM32F411_GPIO_SPEED_HIGH);
+                                       TIKU_STM32_GPIO_MODE_AF,
+                                       TIKU_STM32_GPIO_PUPD_UP,
+                                       TIKU_STM32_GPIO_SPEED_HIGH);
     (void)tiku_stm32f411_pinmux_set_drive(TIKU_BOARD_UART_RX_PORT,
                                           TIKU_BOARD_UART_RX_PIN,
                                           0U);
     (void)tiku_stm32f411_pinmux_set_af(TIKU_BOARD_UART_RX_PORT,
                                        TIKU_BOARD_UART_RX_PIN,
-                                       STM32F411_GPIO_AF_USART1_2);
+                                       TIKU_STM32_UART_AF);
 }
 
 static uint32_t stm32f411_uart_brr(unsigned long pclk, unsigned long baud)
@@ -92,13 +84,13 @@ static uint32_t stm32f411_uart_brr(unsigned long pclk, unsigned long baud)
 
 static void uart_drain_rx(void)
 {
-    while (uart_read(STM32F411_USART_SR(0))
-           & (STM32F411_USART_SR_RXNE
-            | STM32F411_USART_SR_ORE
-            | STM32F411_USART_SR_FE
-            | STM32F411_USART_SR_PE
-            | STM32F411_USART_SR_NF)) {
-        (void)uart_read(STM32F411_USART_DR(0));
+    while (USART2->SR
+           & (USART_SR_RXNE
+            | USART_SR_ORE
+            | USART_SR_FE
+            | USART_SR_PE
+            | USART_SR_NE)) {
+        (void)USART2->DR;
     }
 }
 
@@ -111,26 +103,27 @@ void tiku_uart_init(void)
     unsigned long pclk1;
 
     stm32f411_uart_gpio_init();
-    stm32f411_rcc_enable_apb1(STM32F411_RCC_APB1_USART2);
-    stm32f411_rcc_reset_apb1(STM32F411_RCC_APB1_USART2);
+    RCC->APB1ENR |= RCC_APB1ENR_USART2EN;
+    (void)RCC->APB1ENR;
+    RCC->APB1RSTR |= RCC_APB1RSTR_USART2RST;
+    RCC->APB1RSTR &= ~RCC_APB1RSTR_USART2RST;
 
     pclk1 = tiku_cpu_stm32f411_pclk1_get_hz();
     if (pclk1 == 0UL) {
         pclk1 = 16000000UL;
     }
 
-    uart_write(STM32F411_USART_CR1(0), 0U);
-    uart_write(STM32F411_USART_CR2(0), STM32F411_USART_CR2_STOP_1);
-    uart_write(STM32F411_USART_CR3(0), 0U);
-    uart_write(STM32F411_USART_BRR(0),
-               stm32f411_uart_brr(pclk1, (unsigned long)TIKU_BOARD_UART_BAUD));
+    USART2->CR1 = 0U;
+    USART2->CR2 = 0U;
+    USART2->CR3 = 0U;
+    USART2->BRR = stm32f411_uart_brr(pclk1,
+                                     (unsigned long)TIKU_BOARD_UART_BAUD);
 
-    uart_write(STM32F411_USART_CR3(0), STM32F411_USART_CR3_EIE);
-    uart_write(STM32F411_USART_CR1(0),
-               STM32F411_USART_CR1_UE
-               | STM32F411_USART_CR1_TE
-               | STM32F411_USART_CR1_RE
-               | STM32F411_USART_CR1_RXNEIE);
+    USART2->CR3 = USART_CR3_EIE;
+    USART2->CR1 = USART_CR1_UE
+                | USART_CR1_TE
+                | USART_CR1_RE
+                | USART_CR1_RXNEIE;
 
     uart_drain_rx();
 
@@ -138,16 +131,16 @@ void tiku_uart_init(void)
     rx.tail = 0U;
     rx.overrun_count = 0U;
 
-    stm32f411_nvic_clear_pending(STM32F411_IRQ_USART2);
-    stm32f411_nvic_enable(STM32F411_IRQ_USART2);
+    NVIC_ClearPendingIRQ(USART2_IRQn);
+    NVIC_EnableIRQ(USART2_IRQn);
 }
 
 void tiku_uart_putc(char c)
 {
-    while ((uart_read(STM32F411_USART_SR(0)) & STM32F411_USART_SR_TXE) == 0U) {
+    while ((USART2->SR & USART_SR_TXE) == 0U) {
         /* spin */
     }
-    uart_write(STM32F411_USART_DR(0), (uint32_t)(uint8_t)c);
+    USART2->DR = (uint32_t)(uint8_t)c;
 }
 
 void tiku_uart_puts(const char *s)
@@ -192,24 +185,24 @@ void tiku_uart_overrun_reset(void)
 
 void tiku_stm32f411_usart2_irq_handler(void)
 {
-    while (uart_read(STM32F411_USART_SR(0))
-           & (STM32F411_USART_SR_RXNE
-            | STM32F411_USART_SR_ORE
-            | STM32F411_USART_SR_FE
-            | STM32F411_USART_SR_PE
-            | STM32F411_USART_SR_NF)) {
-        uint32_t sr = uart_read(STM32F411_USART_SR(0));
-        uint32_t dr = uart_read(STM32F411_USART_DR(0));
+    while (USART2->SR
+           & (USART_SR_RXNE
+            | USART_SR_ORE
+            | USART_SR_FE
+            | USART_SR_PE
+            | USART_SR_NE)) {
+        uint32_t sr = USART2->SR;
+        uint32_t dr = USART2->DR;
         uint16_t next;
 
-        if (sr & STM32F411_USART_SR_ORE) {
+        if (sr & USART_SR_ORE) {
             rx.overrun_count++;
         }
 
-        if (sr & STM32F411_USART_SR_RXNE) {
+        if (sr & USART_SR_RXNE) {
             next = (rx.head + 1U) & TIKU_UART_RXBUF_MASK;
             if (next != rx.tail) {
-                rx.buf[rx.head] = (uint8_t)(dr & STM32F411_USART_DR_MASK);
+                rx.buf[rx.head] = (uint8_t)(dr & USART_DR_DR_Msk);
                 rx.head = next;
             } else {
                 rx.overrun_count++;

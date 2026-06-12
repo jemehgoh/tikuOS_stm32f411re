@@ -11,8 +11,19 @@
  */
 
 #include "tiku_pinmux_arch.h"
-#include "tiku_stm32f411_regs.h"
+#include <stm32f411xe.h>
 #include <stdint.h>
+
+static GPIO_TypeDef *stm32f411_gpio_from_base(uint32_t gpio_base)
+{
+    return (GPIO_TypeDef *)(uintptr_t)gpio_base;
+}
+
+static void stm32f411_rcc_enable_gpio(uint32_t rcc_bit)
+{
+    RCC->AHB1ENR |= rcc_bit;
+    (void)RCC->AHB1ENR;
+}
 
 int
 tiku_stm32f411_pinmux_resolve(uint8_t port, uint8_t pin,
@@ -24,20 +35,20 @@ tiku_stm32f411_pinmux_resolve(uint8_t port, uint8_t pin,
 
     switch (port) {
     case 1U:
-        *gpio_base = STM32F411_GPIOA_BASE;
-        *rcc_bit   = STM32F411_RCC_AHB1_GPIOA;
+        *gpio_base = GPIOA_BASE;
+        *rcc_bit   = RCC_AHB1ENR_GPIOAEN;
         return 0;
     case 2U:
-        *gpio_base = STM32F411_GPIOB_BASE;
-        *rcc_bit   = STM32F411_RCC_AHB1_GPIOB;
+        *gpio_base = GPIOB_BASE;
+        *rcc_bit   = RCC_AHB1ENR_GPIOBEN;
         return 0;
     case 3U:
-        *gpio_base = STM32F411_GPIOC_BASE;
-        *rcc_bit   = STM32F411_RCC_AHB1_GPIOC;
+        *gpio_base = GPIOC_BASE;
+        *rcc_bit   = RCC_AHB1ENR_GPIOCEN;
         return 0;
     case 4U:
-        *gpio_base = STM32F411_GPIOD_BASE;
-        *rcc_bit   = STM32F411_RCC_AHB1_GPIOD;
+        *gpio_base = GPIOD_BASE;
+        *rcc_bit   = RCC_AHB1ENR_GPIODEN;
         return 0;
     default:
         return -1;
@@ -50,6 +61,7 @@ tiku_stm32f411_pinmux_config(uint8_t port, uint8_t pin,
 {
     uint32_t gpio_base;
     uint32_t rcc_bit;
+    GPIO_TypeDef *gpio;
     uint32_t moder;
     uint32_t ospeedr;
     uint32_t pull;
@@ -58,22 +70,23 @@ tiku_stm32f411_pinmux_config(uint8_t port, uint8_t pin,
         return -1;
     }
 
-    stm32f411_rcc_enable_ahb1(rcc_bit);
+    stm32f411_rcc_enable_gpio(rcc_bit);
+    gpio = stm32f411_gpio_from_base(gpio_base);
 
-    moder = _STM32F411_REG(STM32F411_GPIO_MODER(gpio_base));
-    moder &= ~STM32F411_GPIO_MODE(pin, 3U);
-    moder |= STM32F411_GPIO_MODE(pin, mode);
-    _STM32F411_REG(STM32F411_GPIO_MODER(gpio_base)) = moder;
+    moder = gpio->MODER;
+    moder &= ~(0x3UL << (pin * 2U));
+    moder |= ((mode & 0x3UL) << (pin * 2U));
+    gpio->MODER = moder;
 
-    ospeedr = _STM32F411_REG(STM32F411_GPIO_OSPEEDR(gpio_base));
-    ospeedr &= ~STM32F411_GPIO_SPEED(pin, 3U);
-    ospeedr |= STM32F411_GPIO_SPEED(pin, speed);
-    _STM32F411_REG(STM32F411_GPIO_OSPEEDR(gpio_base)) = ospeedr;
+    ospeedr = gpio->OSPEEDR;
+    ospeedr &= ~(0x3UL << (pin * 2U));
+    ospeedr |= ((speed & 0x3UL) << (pin * 2U));
+    gpio->OSPEEDR = ospeedr;
 
-    pull = _STM32F411_REG(STM32F411_GPIO_PUPDR(gpio_base));
-    pull &= ~STM32F411_GPIO_PUPD(pin, 3U);
-    pull |= STM32F411_GPIO_PUPD(pin, pupd);
-    _STM32F411_REG(STM32F411_GPIO_PUPDR(gpio_base)) = pull;
+    pull = gpio->PUPDR;
+    pull &= ~(0x3UL << (pin * 2U));
+    pull |= ((pupd & 0x3UL) << (pin * 2U));
+    gpio->PUPDR = pull;
 
     return 0;
 }
@@ -83,21 +96,23 @@ tiku_stm32f411_pinmux_set_drive(uint8_t port, uint8_t pin, uint8_t open_drain)
 {
     uint32_t gpio_base;
     uint32_t rcc_bit;
+    GPIO_TypeDef *gpio;
     uint32_t otyper;
 
     if (tiku_stm32f411_pinmux_resolve(port, pin, &gpio_base, &rcc_bit) != 0) {
         return -1;
     }
 
-    stm32f411_rcc_enable_ahb1(rcc_bit);
+    stm32f411_rcc_enable_gpio(rcc_bit);
+    gpio = stm32f411_gpio_from_base(gpio_base);
 
-    otyper = _STM32F411_REG(STM32F411_GPIO_OTYPER(gpio_base));
+    otyper = gpio->OTYPER;
     if (open_drain != 0U) {
-        otyper |= STM32F411_GPIO_OTYPE_OD(pin);
+        otyper |= (1UL << pin);
     } else {
-        otyper &= ~STM32F411_GPIO_OTYPE_OD(pin);
+        otyper &= ~(1UL << pin);
     }
-    _STM32F411_REG(STM32F411_GPIO_OTYPER(gpio_base)) = otyper;
+    gpio->OTYPER = otyper;
 
     return 0;
 }
@@ -107,13 +122,23 @@ tiku_stm32f411_pinmux_set_af(uint8_t port, uint8_t pin, uint8_t af)
 {
     uint32_t gpio_base;
     uint32_t rcc_bit;
+    GPIO_TypeDef *gpio;
+    uint32_t shift;
+    uint32_t index;
+    uint32_t afr;
 
     if (tiku_stm32f411_pinmux_resolve(port, pin, &gpio_base, &rcc_bit) != 0) {
         return -1;
     }
 
-    stm32f411_rcc_enable_ahb1(rcc_bit);
-    stm32f411_gpio_set_af(gpio_base, pin, af);
+    stm32f411_rcc_enable_gpio(rcc_bit);
+    gpio = stm32f411_gpio_from_base(gpio_base);
+    index = (uint32_t)pin >> 3U;
+    shift = ((uint32_t)pin & 0x7UL) * 4U;
+    afr = gpio->AFR[index];
+    afr &= ~(0xFUL << shift);
+    afr |= ((uint32_t)af & 0xFUL) << shift;
+    gpio->AFR[index] = afr;
 
     return 0;
 }
@@ -122,9 +147,9 @@ int
 tiku_stm32f411_pinmux_init_output(uint8_t port, uint8_t pin)
 {
     return tiku_stm32f411_pinmux_config(port, pin,
-                                        STM32F411_GPIO_MODE_OUTPUT,
-                                        STM32F411_GPIO_PUPD_NONE,
-                                        STM32F411_GPIO_SPEED_HIGH)
+                                        1U,
+                                        0U,
+                                        3U)
         || tiku_stm32f411_pinmux_set_drive(port, pin, 0U);
 }
 
@@ -132,7 +157,7 @@ int
 tiku_stm32f411_pinmux_init_input(uint8_t port, uint8_t pin, uint32_t pupd)
 {
     return tiku_stm32f411_pinmux_config(port, pin,
-                                        STM32F411_GPIO_MODE_INPUT,
+                                        0U,
                                         pupd,
-                                        STM32F411_GPIO_SPEED_HIGH);
+                                        3U);
 }

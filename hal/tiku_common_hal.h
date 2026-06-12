@@ -46,7 +46,7 @@
 #define tiku_common_arch_reset_reason() tiku_cpu_rp2350_reset_reason()
 
 #elif defined(PLATFORM_STM32F411)
-#include "arch/stm32f411re/tiku_cpu_common.h"
+#include "arch/st/stm32f411re/tiku_cpu_common.h"
 
 #define tiku_common_arch_delay_ms(ms)   tiku_cpu_stm32f411_delay_ms(ms)
 #define tiku_common_arch_delay_us(us)   tiku_cpu_stm32f411_delay_us(us)

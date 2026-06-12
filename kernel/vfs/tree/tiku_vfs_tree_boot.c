@@ -56,7 +56,7 @@
 #include <kernel/memory/tiku_mem.h>
 #include <boot/tiku_boot.h>
 #if defined(PLATFORM_STM32F411)
-#include <arch/stm32f411re/tiku_stm32f411_regs.h>
+#include <stm32f411xe.h>
 #endif
 #include <stdio.h>
 
@@ -93,13 +93,13 @@ static const char *
 reset_cause_str(uint16_t iv)
 {
 #if defined(PLATFORM_STM32F411)
-    if (iv & (STM32F411_RCC_CSR_BORRSTF >> 16))  return "brownout";
-    if (iv & (STM32F411_RCC_CSR_IWDGRSTF >> 16)) return "iwdg";
-    if (iv & (STM32F411_RCC_CSR_WWDGRSTF >> 16)) return "wwdg";
-    if (iv & (STM32F411_RCC_CSR_SFTRSTF >> 16))  return "software";
-    if (iv & (STM32F411_RCC_CSR_PINRSTF >> 16))  return "pin";
-    if (iv & (STM32F411_RCC_CSR_PORRSTF >> 16))  return "power-on";
-    if (iv & (STM32F411_RCC_CSR_LPWRRSTF >> 16)) return "low-power";
+    if (iv & (RCC_CSR_BORRSTF >> 16))  return "brownout";
+    if (iv & (RCC_CSR_IWDGRSTF >> 16)) return "iwdg";
+    if (iv & (RCC_CSR_WWDGRSTF >> 16)) return "wwdg";
+    if (iv & (RCC_CSR_SFTRSTF >> 16))  return "software";
+    if (iv & (RCC_CSR_PINRSTF >> 16))  return "pin";
+    if (iv & (RCC_CSR_PORRSTF >> 16))  return "power-on";
+    if (iv & (RCC_CSR_LPWRRSTF >> 16)) return "low-power";
     return "none";
 #else
     switch (iv) {
@@ -222,17 +222,17 @@ static const char *
 last_reset_str(uint16_t iv)
 {
 #if defined(PLATFORM_STM32F411)
-    if (iv & ((STM32F411_RCC_CSR_IWDGRSTF |
-               STM32F411_RCC_CSR_WWDGRSTF) >> 16)) {
+    if (iv & ((RCC_CSR_IWDGRSTF |
+               RCC_CSR_WWDGRSTF) >> 16)) {
         return "watchdog";
     }
-    if (iv & ((STM32F411_RCC_CSR_BORRSTF |
-               STM32F411_RCC_CSR_PORRSTF |
-               STM32F411_RCC_CSR_LPWRRSTF) >> 16)) {
+    if (iv & ((RCC_CSR_BORRSTF |
+               RCC_CSR_PORRSTF |
+               RCC_CSR_LPWRRSTF) >> 16)) {
         return "power";
     }
-    if (iv & ((STM32F411_RCC_CSR_SFTRSTF |
-               STM32F411_RCC_CSR_PINRSTF) >> 16)) {
+    if (iv & ((RCC_CSR_SFTRSTF |
+               RCC_CSR_PINRSTF) >> 16)) {
         return "reboot";
     }
     return "other";
