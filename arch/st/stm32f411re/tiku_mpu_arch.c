@@ -12,6 +12,7 @@
 
 #include "tiku_mpu_arch.h"
 #include <stm32f411xe.h>
+#include <mpu_armv7.h>
 #include <stdint.h>
 
 struct tiku_stm32f411_mpu_diag {
@@ -30,6 +31,17 @@ static uint32_t g_saved_primask;
 
 __attribute__((section(".mpu_diag")))
 static volatile struct tiku_stm32f411_mpu_diag g_mpu_diag;
+
+static void stm32f411_mpu_clear_all_regions(void)
+{
+    uint32_t regions =
+        (MPU->TYPE & MPU_TYPE_DREGION_Msk) >> MPU_TYPE_DREGION_Pos;
+    uint32_t i;
+
+    for (i = 0U; i < regions; ++i) {
+        ARM_MPU_ClrRegion(i);
+    }
+}
 
 static void stm32f411_mpu_diag_init(void)
 {
@@ -70,13 +82,19 @@ void tiku_mpu_arch_enable_irq(void)
 void tiku_mpu_arch_init_segments(void)
 {
     stm32f411_mpu_diag_init();
+    ARM_MPU_Disable();
+    stm32f411_mpu_clear_all_regions();
+    g_mpu_sam = TIKU_MPU_DEFAULT_SAM;
+    g_mpu_ctl = 0U;
 }
 
 void tiku_mpu_arch_set_default_protection(void)
 {
+    /* Neutral bring-up mode: enable the MPU while leaving all regions
+     * disabled so privileged code continues to use the default memory map. */
     g_mpu_sam = TIKU_MPU_DEFAULT_SAM;
-    g_mpu_ctl = 1U;
-    SCB->SHCSR |= SCB_SHCSR_MEMFAULTENA_Msk;
+    ARM_MPU_Enable(MPU_CTRL_PRIVDEFENA_Msk);
+    g_mpu_ctl = (uint16_t)(MPU_CTRL_ENABLE_Msk | MPU_CTRL_PRIVDEFENA_Msk);
 }
 
 void tiku_mpu_arch_set_seg_perm(uint8_t seg, uint8_t perm)
