@@ -83,6 +83,9 @@ SECTIONS
         *(.gnu.linkonce.r.*)
     } > FLASH
 
+    _etext = .;
+    etext  = .;
+
     .preinit_array : ALIGN(4)
     {
         PROVIDE_HIDDEN(__preinit_array_start = .);

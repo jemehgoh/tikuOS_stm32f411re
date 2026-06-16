@@ -44,12 +44,8 @@
  * If nothing is set we fall back to MSP430 to keep the historical
  * default working out-of-the-box for legacy targets.
  */
-<<<<<<< HEAD
-#if !defined(PLATFORM_MSP430) && !defined(PLATFORM_RP2350) && \
-    !defined(PLATFORM_STM32F411)
-=======
-#if !defined(PLATFORM_MSP430) && !defined(PLATFORM_RP2350) && !defined(PLATFORM_AMBIQ)
->>>>>>> main
+
+#if !defined(PLATFORM_MSP430) && !defined(PLATFORM_RP2350) && !defined(PLATFORM_STM32F411) && !defined(PLATFORM_AMBIQ)
 #define PLATFORM_MSP430 1
 #endif
 
@@ -93,12 +89,15 @@
 #define TIKU_DEVICE_RP2350 1
 #endif
 
-<<<<<<< HEAD
 #elif defined(PLATFORM_STM32F411)
 
+/* STM32F411RE (used on Nucleo-F411RE). Only one
+ * silicon variant for now; a board define (TIKU_BOARD_STM32F411RE)
+ * comes from the Makefile and selects the matching board header. */
 #ifndef TIKU_DEVICE_STM32F411RE
 #define TIKU_DEVICE_STM32F411RE 1
-=======
+#endif
+
 #elif defined(PLATFORM_AMBIQ)
 
 /*
@@ -107,7 +106,6 @@
  */
 #ifndef TIKU_DEVICE_APOLLO510
 #define TIKU_DEVICE_APOLLO510 1
->>>>>>> main
 #endif
 
 #endif /* PLATFORM_* */
@@ -138,7 +136,6 @@
 #ifndef MAIN_CPU_FREQ
 #define MAIN_CPU_FREQ 150
 #endif
-<<<<<<< HEAD
 #elif defined(PLATFORM_STM32F411)
 /* STM32F411 SYSCLK/HCLK target in MHz. Supported values:
  *   16, 48, 84, 100
@@ -146,7 +143,7 @@
  * clock-fault flag. PLL failures fall back to HSI at 16 MHz. */
 #ifndef MAIN_CPU_FREQ
 #define MAIN_CPU_FREQ 100
-=======
+#endif
 #elif defined(PLATFORM_AMBIQ)
 /* Apollo510: the CPU core runs at 96 MHz (Low-Power mode; 250 MHz in the
  * High-Performance "turbo" mode). The Cortex-M55 SysTick is driven from the
@@ -159,7 +156,6 @@
  * see tiku_cpu_ambiq_clock_get_hz(). */
 #ifndef MAIN_CPU_FREQ
 #define MAIN_CPU_FREQ 96
->>>>>>> main
 #endif
 #else
 #define MAIN_CPU_FREQ 7    /* MSP430: 8 MHz (maximum supported) */
@@ -169,11 +165,7 @@
  *  and other subsystems that need the clock frequency as a compile-time
  *  constant.
  */
-<<<<<<< HEAD
-#if defined(PLATFORM_RP2350) || defined(PLATFORM_STM32F411)
-=======
-#if defined(PLATFORM_RP2350) || defined(PLATFORM_AMBIQ)
->>>>>>> main
+#if defined(PLATFORM_RP2350) || defined(PLATFORM_STM32F411) || defined(PLATFORM_AMBIQ)
 #define TIKU_MAIN_CPU_HZ  ((unsigned long)MAIN_CPU_FREQ * 1000000UL)
 #elif MAIN_CPU_FREQ == 1
 #define TIKU_MAIN_CPU_HZ  1000000UL
@@ -206,13 +198,10 @@
 #include <arch/msp430/tiku_device_select.h>    /* Device + board headers */
 #elif defined(PLATFORM_RP2350)
 #include <arch/arm-rp2350/tiku_device_select.h>
-<<<<<<< HEAD
 #elif defined(PLATFORM_STM32F411)
 #include <arch/st/stm32f411re/tiku_device_select.h>
-=======
 #elif defined(PLATFORM_AMBIQ)
 #include <arch/ambiq/tiku_device_select.h>
->>>>>>> main
 #endif
 
 /*---------------------------------------------------------------------------*/
@@ -251,13 +240,10 @@
 #include <arch/msp430/tiku_timer_arch.h>     /* TIKU_CLOCK_ARCH_SECOND et al. */
 #elif defined(PLATFORM_RP2350)
 #include <arch/arm-rp2350/tiku_timer_arch.h>
-<<<<<<< HEAD
 #elif defined(PLATFORM_STM32F411)
 #include <arch/st/stm32f411re/tiku_timer_arch.h>
-=======
 #elif defined(PLATFORM_AMBIQ)
 #include <arch/ambiq/tiku_timer_arch.h>
->>>>>>> main
 #endif
 #include <kernel/timers/tiku_clock.h>
 #include <kernel/timers/tiku_htimer.h>

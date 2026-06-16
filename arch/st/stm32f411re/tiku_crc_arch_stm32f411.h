@@ -3,7 +3,7 @@
  * Simple. Ubiquitous. Intelligence, Everywhere.
  * http://tiku-os.org
  *
- * Authors: OpenAI Codex
+ * Authors: Jeremy Goh
  *
  * tiku_crc_arch_stm32f411.h - STM32F411 hardware CRC helper
  *

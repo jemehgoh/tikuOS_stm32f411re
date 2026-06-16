@@ -244,11 +244,7 @@ mem_free_read(char *buf, size_t max)
         return snprintf(buf, max, "%u\n", sp - end_addr);
     }
     return snprintf(buf, max, "0\n");
-<<<<<<< HEAD
-#elif defined(PLATFORM_RP2350) || defined(PLATFORM_STM32F411)
-=======
-#elif defined(PLATFORM_RP2350) || defined(PLATFORM_AMBIQ)
->>>>>>> main
+#elif defined(PLATFORM_RP2350) || defined(PLATFORM_STM32F411) || defined(PLATFORM_AMBIQ)
     /* Cortex-M: 32-bit SP. The stack grows down from __stack toward
      * _end; live free space is (SP - _end). */
     uintptr_t sp;

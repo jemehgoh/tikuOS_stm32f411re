@@ -3,7 +3,7 @@
  * Simple. Ubiquitous. Intelligence, Everywhere.
  * http://tiku-os.org
  *
- * Authors: OpenAI Codex
+ * Authors: Jeremy Goh
  *
  * tiku_flash_persist_backend.h - STM32F411 flash persistence backend
  *
