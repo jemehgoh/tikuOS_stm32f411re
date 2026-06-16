@@ -16,7 +16,8 @@
  *   .data       (initialised variables, copied from flash at boot)
  *   .bss        (zeroed at boot)
  *   .mpu_diag   (NOLOAD, 32-byte aligned — fault state across warm reset)
- *   .uninit     (NOLOAD, 32-byte aligned — persistent warm-reset state)
+ *   .uninit     (NOLOAD, 4 KB aligned/padded MPU window containing the
+ *                logical persistent warm-reset payload)
  *   __stack     (top of SRAM, grows downward)
  *
  * SPDX-License-Identifier: Apache-2.0
@@ -143,14 +144,28 @@ SECTIONS
         __mpu_diag_end = .;
     } > SRAM
 
-    /* -------- 6. Persistent warm-reset state (NOLOAD) ---------------- */
-    .uninit (NOLOAD) : ALIGN(32)
+    /* -------- 6. Persistent warm-reset state (NOLOAD) ----------------
+     *
+     * The logical payload bounds remain __uninit_start/__uninit_end so
+     * the persistence backend continues to restore/commit only the real
+     * .uninit/.persistent bytes.  A second symbol pair
+     * (__uninit_mpu_start/__uninit_mpu_end) reserves a dedicated 4 KB
+     * MPU-aligned envelope around that payload for future RO/RW
+     * protection. */
+    .uninit (NOLOAD) : ALIGN(4096)
     {
+        __uninit_mpu_start = .;
         __uninit_start = .;
         *(.uninit*)
         *(.persistent*)
         . = ALIGN(32);
         __uninit_end = .;
+
+        ASSERT((__uninit_end - __uninit_start) <= 0x1000,
+               "ERROR: .uninit payload exceeds 4 KB MPU window");
+
+        . = __uninit_mpu_start + 0x1000;
+        __uninit_mpu_end = .;
     } > SRAM
 
     /* Heap start aliases */
@@ -162,6 +177,10 @@ SECTIONS
     /* Sanity checks */
     ASSERT((__stack - _end) >= 0x1000,
            "ERROR: SRAM exhausted — less than 4 KB free for stack")
+    ASSERT((__uninit_mpu_start & 0xFFF) == 0,
+           "ERROR: .uninit MPU window is not 4 KB aligned")
+    ASSERT((__uninit_mpu_end - __uninit_mpu_start) == 0x1000,
+           "ERROR: .uninit MPU window is not exactly 4 KB")
     ASSERT(__data_load < ORIGIN(PERSIST_FLASH),
            "ERROR: flash image spills into reserved persistence sector")
 

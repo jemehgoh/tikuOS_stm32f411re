@@ -15,6 +15,9 @@
 #include <mpu_armv7.h>
 #include <stdint.h>
 
+extern uint32_t __uninit_mpu_start;
+extern uint32_t __uninit_mpu_end;
+
 struct tiku_stm32f411_mpu_diag {
     uint32_t magic;
     uint32_t violation_count;
@@ -24,10 +27,16 @@ struct tiku_stm32f411_mpu_diag {
 };
 
 #define TIKU_STM32F411_MPU_MAGIC  0x53544D50UL
+#define TIKU_STM32F411_MPU_REGION_PERSIST      0U
+#define TIKU_STM32F411_MPU_UNINIT_WINDOW_BYTES 0x1000UL
+#define TIKU_STM32F411_MPU_SEG3_WRITE_BIT      0x0200U
 
 static uint16_t g_mpu_sam = TIKU_MPU_DEFAULT_SAM;
 static uint16_t g_mpu_ctl;
 static uint32_t g_saved_primask;
+static uint32_t g_persist_region_rbar;
+static uint32_t g_persist_region_rasr_ro;
+static uint32_t g_persist_region_rasr_rw;
 
 __attribute__((section(".mpu_diag")))
 static volatile struct tiku_stm32f411_mpu_diag g_mpu_diag;
@@ -53,6 +62,85 @@ static void stm32f411_mpu_diag_init(void)
     }
 }
 
+static uint32_t stm32f411_mpu_persist_base(void)
+{
+    return (uint32_t)(uintptr_t)&__uninit_mpu_start;
+}
+
+static uint32_t stm32f411_mpu_persist_window_bytes(void)
+{
+    return (uint32_t)((uintptr_t)&__uninit_mpu_end
+                    - (uintptr_t)&__uninit_mpu_start);
+}
+
+static uint32_t stm32f411_mpu_persist_rasr(uint32_t access_permission)
+{
+    return ARM_MPU_RASR_EX(
+        1U,  /* XN: persistent SRAM must never be executable */
+        access_permission,
+        ARM_MPU_ACCESS_NORMAL(ARM_MPU_CACHEP_NOCACHE,
+                              ARM_MPU_CACHEP_NOCACHE,
+                              1U),
+        0U,
+        ARM_MPU_REGION_SIZE_4KB);
+}
+
+static void stm32f411_mpu_prepare_persist_region(void)
+{
+    if (stm32f411_mpu_persist_window_bytes() !=
+        TIKU_STM32F411_MPU_UNINIT_WINDOW_BYTES) {
+        g_persist_region_rbar    = 0U;
+        g_persist_region_rasr_ro = 0U;
+        g_persist_region_rasr_rw = 0U;
+        return;
+    }
+
+    g_persist_region_rbar =
+        ARM_MPU_RBAR(TIKU_STM32F411_MPU_REGION_PERSIST,
+                     stm32f411_mpu_persist_base());
+    g_persist_region_rasr_ro = stm32f411_mpu_persist_rasr(ARM_MPU_AP_RO);
+    g_persist_region_rasr_rw = stm32f411_mpu_persist_rasr(ARM_MPU_AP_FULL);
+}
+
+static uint8_t stm32f411_mpu_persist_region_ready(void)
+{
+    return (g_persist_region_rbar    != 0U &&
+            g_persist_region_rasr_ro != 0U &&
+            g_persist_region_rasr_rw != 0U) ? 1U : 0U;
+}
+
+static void stm32f411_mpu_program_persist_region(uint32_t rasr)
+{
+    if (!stm32f411_mpu_persist_region_ready()) {
+        return;
+    }
+
+    ARM_MPU_SetRegion(g_persist_region_rbar, rasr);
+    __DSB();
+    __ISB();
+}
+
+static void stm32f411_mpu_apply_sam(uint16_t sam)
+{
+    uint32_t rasr;
+
+    if (!stm32f411_mpu_persist_region_ready()) {
+        return;
+    }
+
+    rasr = (sam & TIKU_STM32F411_MPU_SEG3_WRITE_BIT) != 0U
+         ? g_persist_region_rasr_rw
+         : g_persist_region_rasr_ro;
+    stm32f411_mpu_program_persist_region(rasr);
+}
+
+static void stm32f411_mpu_enable_memmanage(void)
+{
+    SCB->SHCSR |= SCB_SHCSR_MEMFAULTENA_Msk;
+    __DSB();
+    __ISB();
+}
+
 uint16_t tiku_mpu_arch_get_sam(void)
 {
     return g_mpu_sam;
@@ -61,6 +149,7 @@ uint16_t tiku_mpu_arch_get_sam(void)
 void tiku_mpu_arch_set_sam(uint16_t sam)
 {
     g_mpu_sam = sam;
+    stm32f411_mpu_apply_sam(sam);
 }
 
 uint16_t tiku_mpu_arch_get_ctl(void)
@@ -82,40 +171,50 @@ void tiku_mpu_arch_enable_irq(void)
 void tiku_mpu_arch_init_segments(void)
 {
     stm32f411_mpu_diag_init();
+    stm32f411_mpu_prepare_persist_region();
     ARM_MPU_Disable();
     stm32f411_mpu_clear_all_regions();
     g_mpu_sam = TIKU_MPU_DEFAULT_SAM;
     g_mpu_ctl = 0U;
+
+    if (!stm32f411_mpu_persist_region_ready()) {
+        return;
+    }
 }
 
 void tiku_mpu_arch_set_default_protection(void)
 {
-    /* Neutral bring-up mode: enable the MPU while leaving all regions
-     * disabled so privileged code continues to use the default memory map. */
+    /* Program the persistent SRAM window as RO + XN by default, while
+     * leaving every other address range on the privileged default map. */
     g_mpu_sam = TIKU_MPU_DEFAULT_SAM;
+    stm32f411_mpu_apply_sam(g_mpu_sam);
     ARM_MPU_Enable(MPU_CTRL_PRIVDEFENA_Msk);
+    stm32f411_mpu_enable_memmanage();
     g_mpu_ctl = (uint16_t)(MPU_CTRL_ENABLE_Msk | MPU_CTRL_PRIVDEFENA_Msk);
 }
 
 void tiku_mpu_arch_set_seg_perm(uint8_t seg, uint8_t perm)
 {
-    uint16_t shift = (uint16_t)(seg * 3U);
+    uint16_t shift = (uint16_t)(seg * 4U);
     uint16_t mask = (uint16_t)(0x7U << shift);
 
     g_mpu_sam = (uint16_t)((g_mpu_sam & ~mask)
               | (((uint16_t)perm & 0x7U) << shift));
+    stm32f411_mpu_apply_sam(g_mpu_sam);
 }
 
 uint16_t tiku_mpu_arch_unlock_nvm(void)
 {
     uint16_t saved = g_mpu_sam;
-    g_mpu_sam |= (uint16_t)(0x2U << 6);
+    g_mpu_sam |= 0x0222U;
+    stm32f411_mpu_apply_sam(g_mpu_sam);
     return saved;
 }
 
 void tiku_mpu_arch_lock_nvm(uint16_t saved_state)
 {
     g_mpu_sam = saved_state;
+    stm32f411_mpu_apply_sam(g_mpu_sam);
 }
 
 uint16_t tiku_mpu_arch_get_violation_flags(void)
@@ -133,7 +232,7 @@ void tiku_mpu_arch_clear_violation_flags(void)
 
 void tiku_mpu_arch_enable_violation_nmi(void)
 {
-    SCB->SHCSR |= SCB_SHCSR_MEMFAULTENA_Msk;
+    stm32f411_mpu_enable_memmanage();
 }
 
 uint32_t tiku_mpu_arch_violation_count(void)
