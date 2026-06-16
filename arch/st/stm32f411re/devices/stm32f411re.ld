@@ -10,6 +10,7 @@
  *   0x08000xxx  .text      (kernel + app code)
  *   0x08xxxxx   .rodata    (read-only data)
  *   [LMA]       .data      (load address; copied to SRAM at boot)
+ *   0x08060000  Sector 7 reserved for persistence write-back slots
  *
  * Layout in SRAM:
  *   .data       (initialised variables, copied from flash at boot)
@@ -27,14 +28,17 @@ ENTRY(Reset_Handler)
 
 MEMORY
 {
-    FLASH (rx)  : ORIGIN = 0x08000000, LENGTH = 512K
-    SRAM  (rwx) : ORIGIN = 0x20000000, LENGTH = 128K
+    FLASH         (rx)  : ORIGIN = 0x08000000, LENGTH = 384K
+    PERSIST_FLASH (rx)  : ORIGIN = 0x08060000, LENGTH = 128K
+    SRAM          (rwx) : ORIGIN = 0x20000000, LENGTH = 128K
 }
 
 __sram_start  = ORIGIN(SRAM);
 __sram_end    = ORIGIN(SRAM) + LENGTH(SRAM);
 __flash_start = ORIGIN(FLASH);
 __flash_end   = ORIGIN(FLASH) + LENGTH(FLASH);
+__flash_device_start = ORIGIN(FLASH);
+__flash_device_end   = ORIGIN(PERSIST_FLASH) + LENGTH(PERSIST_FLASH);
 
 /* The Cortex-M loads the initial SP from the first vector entry.
  * Place it at the very top of SRAM and let the stack grow downward. */
@@ -42,13 +46,15 @@ __stack = __sram_end;
 _estack = __stack;
 
 /*
- * No NVM backup sector on STM32F411RE internal flash.
- * NVM symbols set to 0 to mitigate errors.
+ * Sector 7 is reserved for the STM32 flash-backed persistence store.
+ * Export it through the generic __tiku_nvm_flash_* linker symbol
+ * convention used by the shared memory code.
  */
-__tiku_nvm_flash_size   = 0;
-__tiku_nvm_flash_offset = 0;
-__tiku_nvm_flash_start  = 0;
-__tiku_nvm_flash_end    = 0;
+__tiku_nvm_flash_sector = 7;
+__tiku_nvm_flash_start  = ORIGIN(PERSIST_FLASH);
+__tiku_nvm_flash_size   = LENGTH(PERSIST_FLASH);
+__tiku_nvm_flash_end    = ORIGIN(PERSIST_FLASH) + LENGTH(PERSIST_FLASH);
+__tiku_nvm_flash_offset = ORIGIN(PERSIST_FLASH) - ORIGIN(FLASH);
 
 SECTIONS
 {
@@ -156,6 +162,8 @@ SECTIONS
     /* Sanity checks */
     ASSERT((__stack - _end) >= 0x1000,
            "ERROR: SRAM exhausted — less than 4 KB free for stack")
+    ASSERT(__data_load < ORIGIN(PERSIST_FLASH),
+           "ERROR: flash image spills into reserved persistence sector")
 
     /DISCARD/ :
     {

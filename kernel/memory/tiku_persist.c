@@ -360,9 +360,10 @@ int tiku_persist_wear_check(tiku_persist_store_t *store,
  * are the atomicity-critical stores, and a single aligned word
  * store is power-cut-atomic where the HAL's byte loop is not.
  * Durability is platform-owned either way — tiku_mpu_lock_nvm()
- * calls tiku_mem_arch_nvm_flush(), which commits everything written
- * inside the window (no-op on FRAM, flash-sector snapshot on
- * RP2350); direct stores and HAL writes are equally covered.
+ * calls tiku_mem_arch_nvm_flush(), which either commits immediately
+ * (RP2350), is already durable (FRAM), or marks the SRAM working
+ * copy dirty for a later interval-driven flash commit (STM32F411).
+ * Direct stores and HAL writes are equally covered.
  */
 
 /** Zero source for chunked default-fill through the NVM HAL */

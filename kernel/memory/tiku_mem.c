@@ -293,6 +293,53 @@ tiku_mem_err_t tiku_arena_stats(const tiku_arena_t *arena,
 }
 
 /*---------------------------------------------------------------------------*/
+/* FLASH-BACKED PERSISTENCE CONTROL                                          */
+/*---------------------------------------------------------------------------*/
+
+static void persist_status_clear(tiku_mem_persist_status_t *out)
+{
+    if (out == NULL) {
+        return;
+    }
+
+    out->supported          = 0U;
+    out->have_valid_slot    = 0U;
+    out->dirty              = 0U;
+    out->sector_full        = 0U;
+    out->current_slot_index = 0xFFFFU;
+    out->next_slot_index    = 0xFFFFU;
+    out->current_sequence   = 0U;
+    out->last_status        = TIKU_MEM_ERR_INVALID;
+}
+
+void tiku_mem_persist_service(uint32_t now_ticks)
+{
+#if defined(PLATFORM_STM32F411)
+    tiku_mem_arch_persist_service(now_ticks);
+#else
+    (void)now_ticks;
+#endif
+}
+
+int tiku_mem_persist_commit_now(void)
+{
+#if defined(PLATFORM_STM32F411)
+    return tiku_mem_arch_persist_commit_now();
+#else
+    return TIKU_MEM_ERR_INVALID;
+#endif
+}
+
+void tiku_mem_persist_status(tiku_mem_persist_status_t *out)
+{
+    persist_status_clear(out);
+
+#if defined(PLATFORM_STM32F411)
+    tiku_mem_arch_persist_status(out);
+#endif
+}
+
+/*---------------------------------------------------------------------------*/
 /* MODULE INIT                                                               */
 /*---------------------------------------------------------------------------*/
 

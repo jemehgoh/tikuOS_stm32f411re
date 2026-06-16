@@ -53,6 +53,7 @@
 #include "hal/tiku_mem_hal.h"
 #include "hal/tiku_mpu_hal.h"
 #include "hal/tiku_region_hal.h"
+#include "tiku_mem_persist.h"
 
 /*---------------------------------------------------------------------------*/
 /* HIFRAM PLACEMENT MACROS                                                   */
@@ -1574,6 +1575,32 @@ typedef struct {
     uint32_t boot_count;  /**< Monotonic hibernate cycle counter */
     uint32_t timestamp;   /**< Caller-supplied timestamp */
 } tiku_hibernate_marker_t;
+
+/*---------------------------------------------------------------------------*/
+/* FLASH-BACKED PERSISTENCE CONTROL                                          */
+/*---------------------------------------------------------------------------*/
+
+/**
+ * @brief Give the platform persistence backend a periodic service tick.
+ *
+ * @param now_ticks  Caller-supplied monotonic tick count
+ */
+void tiku_mem_persist_service(uint32_t now_ticks);
+
+/**
+ * @brief Request an immediate persistence commit if supported.
+ *
+ * @return 0 or a platform-specific backend status on handled platforms,
+ *         TIKU_MEM_ERR_INVALID when unsupported
+ */
+int tiku_mem_persist_commit_now(void);
+
+/**
+ * @brief Read the current flash-backed persistence status snapshot.
+ *
+ * @param out  Caller-provided output structure
+ */
+void tiku_mem_persist_status(tiku_mem_persist_status_t *out);
 
 /**
  * @brief Prepare the memory subsystem for hibernation

@@ -31,6 +31,8 @@
 /*---------------------------------------------------------------------------*/
 
 #include "tiku_sched.h"
+#include "../memory/tiku_mem.h"
+#include "../timers/tiku_clock.h"
 #include "../timers/tiku_htimer.h"
 #include <hal/tiku_cpu.h>
 
@@ -140,6 +142,7 @@ void tiku_sched_loop(void)
         while (tiku_sched_run_once()) {
             /* keep dispatching */
         }
+        tiku_mem_persist_service((uint32_t)tiku_clock_time());
 
         /*
          * No more events — enter idle.
