@@ -28,13 +28,20 @@ ENTRY(tiku_ambiq_reset_handler)
 
 MEMORY
 {
-    MRAM  (rx)  : ORIGIN = 0x00410000, LENGTH = 4128768   /* ~3.94 MB user MRAM above the SBL */
+    MRAM  (rx)  : ORIGIN = 0x00410000, LENGTH = 4128768 - 0x8000  /* ~3.9 MB; top 32 KB reserved below for the NVM mirror (mem port C) */
     TCM   (rwx) : ORIGIN = 0x20000000, LENGTH = 512K      /* DTCM: .data/.bss/heap/stack    */
     SSRAM (rwx) : ORIGIN = 0x20080000, LENGTH = 3M        /* shared SRAM (unused at bring-up) */
 }
 
 __flash_start = ORIGIN(MRAM);
 __flash_end   = ORIGIN(MRAM) + LENGTH(MRAM);
+
+/* NVM mirror page (mem port C): 32 KB reserved just above the shrunk MRAM
+ * region (0x7F8000..0x800000), where tiku_mem_arch_nvm_flush() programs the
+ * .uninit snapshot for power-cycle durability. Far above the firmware code; the
+ * SBL (0x400000) is never touched. */
+__tiku_nvm_mram_start = ORIGIN(MRAM) + LENGTH(MRAM);   /* 0x7F8000 */
+__tiku_nvm_mram_size  = 0x8000;                        /* 32 KB */
 __sram_start  = ORIGIN(TCM);
 __sram_end    = ORIGIN(TCM) + LENGTH(TCM);
 
@@ -74,6 +81,12 @@ SECTIONS
         KEEP(*(.fini))
     } > MRAM
 
+    /* End of .text. tikuOS's `free`/ /sys/mem/free use _etext to size the
+     * FRAM-resident (here MRAM-resident) code region. Standard newlib name;
+     * `etext` aliased for code that uses the historic spelling. */
+    _etext = .;
+    etext  = .;
+
     .rodata : ALIGN(4)
     {
         *(.rodata*)
@@ -103,6 +116,19 @@ SECTIONS
         __bss_end = .;
     } > TCM
 
+    /* -------- 4b. MPU diagnostics (NOLOAD, warm-reset durable) -------- */
+    /* The MemManage/HardFault handler records the violation here. After .bss
+     * (the crt zero-loop stops at __bss_end, so this survives) and before
+     * .uninit (so it lands in the SRAM_LO RW region, not the RO NVM region);
+     * outside .uninit so it is NOT mirrored to MRAM. */
+    .mpu_diag (NOLOAD) : ALIGN(32)
+    {
+        __mpu_diag_start = .;
+        *(.mpu_diag*)
+        . = ALIGN(32);
+        __mpu_diag_end = .;
+    } > TCM
+
     /* -------- 5. Persistent (skipped by zero-init) ------------------- */
     /* Mirrors the RP2350 .uninit model: survives warm reset, reseeded
      * on power cycle. ALIGN(32) for the ARMv8-M MPU region base.
@@ -124,8 +150,20 @@ SECTIONS
     __end__ = .;
     __datastart = __data_start;
 
-    /* Shared SRAM: unused at bring-up. NOLOAD catch so any Ambiq HAL
-     * .shared / .resource_table symbols resolve cleanly. */
+    /* Shared SRAM (3 MB at 0x20080000), powered in tiku_crt_early.c. Holds the
+     * large volatile tier backing buffers (.ssram), zero-initialised by the
+     * reset handler after the SSRAM is powered. ALIGN(32) for an MPU region
+     * base (mem port D). */
+    .ssram (NOLOAD) : ALIGN(32)
+    {
+        __ssram_start = .;
+        *(.ssram*)
+        . = ALIGN(32);
+        __ssram_end = .;
+    } > SSRAM
+
+    /* NOLOAD catch so any Ambiq HAL .shared / .resource_table symbols
+     * resolve cleanly. */
     .shared (NOLOAD) :
     {
         KEEP(*(.resource_table))
@@ -135,6 +173,10 @@ SECTIONS
     /* Sanity: leave >=4 KB between end-of-statics and the stack top. */
     ASSERT((__stack - _end) >= 0x1000,
            "ERROR: DTCM exhausted — less than 4 KB free for stack")
+
+    /* The NVM mirror page must hold the magic word + the whole .uninit image. */
+    ASSERT((__uninit_end - __uninit_start) <= (__tiku_nvm_mram_size - 4),
+           "ERROR: .uninit too large for the 32 KB NVM mirror page (mem port C)")
 
     /DISCARD/ :
     {
