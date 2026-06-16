@@ -38,8 +38,13 @@
 #include "arch/msp430/tiku_uart_arch.h"
 #elif defined(PLATFORM_RP2350)
 #include "arch/arm-rp2350/tiku_uart_arch.h"
+#if defined(TIKU_CONSOLE_USB)
+#include "arch/arm-rp2350/tiku_usb_cdc_arch.h"
+#endif
 #elif defined(PLATFORM_STM32F411)
 #include "arch/st/stm32f411re/tiku_uart_arch.h"
+#elif defined(PLATFORM_AMBIQ)
+#include "arch/ambiq/tiku_uart_arch.h"
 #endif
 
 
@@ -193,6 +198,14 @@ tiku_boot_init_memory(void)
     /* Initialize memory subsystem (arch-specific setup + module state) */
     tiku_mem_init();
 
+#if defined(PLATFORM_AMBIQ)
+    /* Bring up the tier allocator at boot so tier-backed allocations (per-
+     * process memory, etc.) work without relying on a lazy first-touch init.
+     * tiku_tier_init is idempotent, so BASIC's later lazy call is a no-op.
+     * (MSP430 / RP2350 keep their existing lazy init until validated there.) */
+    (void)tiku_tier_init();
+#endif
+
     return TIKU_BOOT_SUCCESS;
 }
 
@@ -206,6 +219,13 @@ tiku_boot_init_peripherals(void)
     /* UART must be initialized before clock so printf is available
      * as early as possible (GPIO is already unlocked by init_cpu). */
     tiku_uart_init();
+
+#if defined(TIKU_CONSOLE_USB)
+    /* Native USB CDC-ACM console (TIKU_CONSOLE=usb/both). Polled: serviced
+     * whenever the scheduler is idle, and also nudged from putc/getc. */
+    tiku_usb_cdc_init();
+    tiku_sched_set_idle_hook(tiku_usb_cdc_poll);
+#endif
 
     /* System clock must be up before timers or scheduler */
     tiku_clock_init();

@@ -1,0 +1,56 @@
+/*
+ * Tiku Operating System v0.05
+ * Simple. Ubiquitous. Intelligence, Everywhere.
+ * http://tiku-os.org
+ *
+ * Authors: Ambuj Varshney <ambuj@tiku-os.org>
+ *
+ * tiku_device_select.h - Apollo 510 device + board include router
+ *
+ * Mirrors arch/arm-rp2350/tiku_device_select.h. The Makefile sets:
+ *   TIKU_DEVICE_APOLLO510       (silicon)
+ *   TIKU_BOARD_APOLLO510_EVB    (board pin definitions)
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+#ifndef TIKU_AMBIQ_DEVICE_SELECT_H_
+#define TIKU_AMBIQ_DEVICE_SELECT_H_
+
+/*---------------------------------------------------------------------------*/
+/* DEVICE                                                                    */
+/*---------------------------------------------------------------------------*/
+
+/**
+ * @brief Pull in silicon-level constants for the selected Ambiq device.
+ *
+ * The Makefile defines exactly one TIKU_DEVICE_* symbol. This block maps
+ * that symbol to the corresponding device header. Add a new @c elif branch
+ * here when porting to a new Ambiq silicon variant.
+ */
+#if defined(TIKU_DEVICE_APOLLO510)
+#include <arch/ambiq/devices/tiku_device_apollo510.h>
+#else
+#error "No TikuOS Ambiq device selected. Define TIKU_DEVICE_APOLLO510."
+#endif
+
+/*---------------------------------------------------------------------------*/
+/* BOARD                                                                     */
+/*---------------------------------------------------------------------------*/
+
+/**
+ * @brief Pull in board-level GPIO pin assignments for the selected board.
+ *
+ * The Makefile may define TIKU_BOARD_APOLLO510_EVB. If no board is
+ * specified the Apollo510 EVB is assumed — it is the only supported
+ * board for this silicon at this milestone.
+ */
+#if defined(TIKU_BOARD_APOLLO510_EVB)
+#include <arch/ambiq/boards/tiku_board_apollo510_evb.h>
+#else
+/* Default to the Apollo510 EVB — the only supported board for now. */
+#define TIKU_BOARD_APOLLO510_EVB 1
+#include <arch/ambiq/boards/tiku_board_apollo510_evb.h>
+#endif
+
+#endif /* TIKU_AMBIQ_DEVICE_SELECT_H_ */

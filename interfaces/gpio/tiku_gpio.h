@@ -36,6 +36,10 @@
 #include <arch/arm-rp2350/tiku_gpio_arch.h>
 #elif defined(PLATFORM_STM32F411)
 #include <arch/st/stm32f411re/tiku_gpio_arch.h>
+#elif defined(PLATFORM_AMBIQ)
+#include <arch/ambiq/tiku_gpio_arch.h>
+#else
+#include <arch/msp430/tiku_gpio_arch.h>
 #endif
 #include <hal/tiku_gpio_irq_hal.h>
 

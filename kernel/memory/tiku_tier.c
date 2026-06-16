@@ -95,8 +95,18 @@ static tiku_mem_arch_size_t align_up(tiku_mem_arch_size_t size)
  * TIKU_TIER_SRAM_SIZE (default 128 bytes). tiku_tier_init() points
  * tier_state[TIKU_MEM_SRAM].buf at this array.
  */
+#if defined(PLATFORM_AMBIQ)
+/* Apollo510: the SRAM tier (large, volatile) lives in the 3 MB shared SRAM
+ * (.ssram, powered + zeroed in tiku_crt_early.c), keeping the 512 KB DTCM for
+ * hot data + stack. SSRAM is cacheable so access is fast in the common case;
+ * the region table classifies it SRAM so the tier's sub-arenas validate. */
+static uint8_t __attribute__((section(".ssram"),
+                              aligned(TIKU_MEM_ARCH_ALIGNMENT)))
+    tier_sram_buf[TIKU_TIER_SRAM_SIZE];
+#else
 static uint8_t __attribute__((aligned(TIKU_MEM_ARCH_ALIGNMENT)))
     tier_sram_buf[TIKU_TIER_SRAM_SIZE];
+#endif
 
 /**
  * @brief Backing store for the NVM tier
@@ -111,6 +121,16 @@ static uint8_t __attribute__((aligned(TIKU_MEM_ARCH_ALIGNMENT)))
 static uint8_t __attribute__((section(".persistent"),
                               aligned(TIKU_MEM_ARCH_ALIGNMENT)))
     tier_nvm_buf[TIKU_TIER_NVM_SIZE] = {0};
+#elif defined(PLATFORM_AMBIQ)
+/* Apollo510: the NVM tier lives in the NOLOAD .uninit area (DTCM) so its pool
+ * survives a warm reset and the buffer sits inside the NVM region the region
+ * table overlays on .uninit (mem port A). NOLOAD -> no boot zero-init (the
+ * area is reseeded only on a power cycle); the persist layer is magic-gated,
+ * so cold-boot garbage is rejected. Power-cycle durability via an MRAM mirror
+ * is mem port C. */
+static uint8_t __attribute__((section(".uninit"),
+                              aligned(TIKU_MEM_ARCH_ALIGNMENT)))
+    tier_nvm_buf[TIKU_TIER_NVM_SIZE];
 #else
 static uint8_t __attribute__((aligned(TIKU_MEM_ARCH_ALIGNMENT)))
     tier_nvm_buf[TIKU_TIER_NVM_SIZE];
@@ -210,13 +230,23 @@ static tier_pool_state_t tier_state[TIKU_MEM_TIER_COUNT];
  * "not available". The AUTO slot is deliberately left untouched — AUTO
  * is resolved to a concrete tier before tier_state[] is ever indexed.
  *
- * Idempotent in effect but destructive: calling it again rewinds all
- * bump pointers, orphaning any sub-buffers already handed out. It does
- * not zero the NVM backing array, so persistent FRAM contents survive.
+ * Idempotent: the first call wires the tier pools to their backing arrays;
+ * a later call returns immediately (the per-tier `initialized` flag guards
+ * the rewind), so a boot-time init followed by a lazy caller such as BASIC
+ * does not orphan live allocations. Does not zero the NVM backing array, so
+ * persistent FRAM contents survive.
  *
  * @return TIKU_MEM_OK (always succeeds)
  */
-tiku_mem_err_t tiku_tier_init(void)
+/*
+ * Wire every tier pool to its backing array and rewind all bump pointers
+ * (offset/peak/alloc_count -> 0).  UNCONDITIONAL and destructive: any
+ * sub-arena previously handed out by tiku_tier_alloc/arena_create is
+ * orphaned.  Shared by tiku_tier_init() (guarded, once at boot) and
+ * tiku_tier_reset() (on demand, teardown / test isolation).  Does not zero
+ * the NVM backing array, so persistent FRAM contents survive.
+ */
+static void tier_wire_all(void)
 {
     tier_state[TIKU_MEM_SRAM].buf         = tier_sram_buf;
     tier_state[TIKU_MEM_SRAM].capacity    = TIKU_TIER_SRAM_SIZE;
@@ -240,7 +270,35 @@ tiku_mem_err_t tiku_tier_init(void)
     tier_state[TIKU_MEM_HIFRAM].alloc_count = 0;
     tier_state[TIKU_MEM_HIFRAM].initialized = 1;
 #endif
+}
 
+tiku_mem_err_t tiku_tier_init(void)
+{
+    /* Idempotent guard: skip the (destructive) rewind if already set up, so
+     * a boot-time init followed by a lazy caller (e.g. BASIC) does not
+     * orphan live allocations.  tiku_tier_reset() is the explicit rewind. */
+    if (tier_state[TIKU_MEM_SRAM].initialized) {
+        return TIKU_MEM_OK;
+    }
+    tier_wire_all();
+    return TIKU_MEM_OK;
+}
+
+/**
+ * @brief Reset every tier pool to empty (destructive rewind)
+ *
+ * Re-wires each tier to its backing array and rewinds offset, peak, and
+ * allocation counters to zero UNCONDITIONALLY, bypassing the idempotent
+ * guard in tiku_tier_init().  Any sub-arena or sub-buffer previously handed
+ * out is orphaned, so this is for teardown and test isolation, not
+ * steady-state use.  The NVM backing array is not zeroed, so persistent
+ * FRAM contents survive.
+ *
+ * @return TIKU_MEM_OK (always succeeds)
+ */
+tiku_mem_err_t tiku_tier_reset(void)
+{
+    tier_wire_all();
     return TIKU_MEM_OK;
 }
 

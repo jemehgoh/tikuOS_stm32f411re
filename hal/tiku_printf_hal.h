@@ -66,10 +66,25 @@
 
 #elif defined(PLATFORM_RP2350)
 
+/* Console channel selectable at build time via the TIKU_CONSOLE make var:
+ *   uart (default) -> hardware UART0 (external FT232)
+ *   usb            -> native USB CDC-ACM on the programming connector
+ *   both           -> mirror to UART and USB CDC                          */
 #include <arch/arm-rp2350/tiku_uart_arch.h>
+#if defined(TIKU_CONSOLE_BOTH)
+#include <arch/arm-rp2350/tiku_usb_cdc_arch.h>
+#define TIKU_PRINTF(...) \
+    do { tiku_uart_printf(__VA_ARGS__); tiku_usb_cdc_printf(__VA_ARGS__); } \
+    while (0)
+#elif defined(TIKU_CONSOLE_USB)
+#include <arch/arm-rp2350/tiku_usb_cdc_arch.h>
+#define TIKU_PRINTF(...) tiku_usb_cdc_printf(__VA_ARGS__)
+#else
 #define TIKU_PRINTF(...) tiku_uart_printf(__VA_ARGS__)
+#endif
 
 /*---------------------------------------------------------------------------*/
+<<<<<<< HEAD
 /* STM32F411RE                                                               */
 /*---------------------------------------------------------------------------*/
 
@@ -80,13 +95,14 @@
 
 /*---------------------------------------------------------------------------*/
 /* Future platforms: Ambiq, Nordic, RISC-V, etc.                             */
+=======
+/* Ambiq Apollo 510 (Cortex-M55) — console over SWO/ITM                       */
+>>>>>>> main
 /*---------------------------------------------------------------------------*/
 
-/*
 #elif defined(PLATFORM_AMBIQ)
 #include <arch/ambiq/tiku_uart_arch.h>
 #define TIKU_PRINTF(...) tiku_uart_printf(__VA_ARGS__)
-*/
 
 /*---------------------------------------------------------------------------*/
 /* Fallback: no platform defined — suppress output                           */

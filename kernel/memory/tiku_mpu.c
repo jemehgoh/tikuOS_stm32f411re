@@ -190,7 +190,7 @@ void tiku_mpu_clear_violation_flags(void)
  */
 uint32_t tiku_mpu_get_violation_count(void)
 {
-#if defined(PLATFORM_RP2350)
+#if defined(PLATFORM_RP2350) || defined(PLATFORM_AMBIQ)
     extern uint32_t tiku_mpu_arch_violation_count(void);
     return tiku_mpu_arch_violation_count();
 #elif defined(PLATFORM_STM32F411)
@@ -210,7 +210,7 @@ uint32_t tiku_mpu_get_violation_count(void)
  */
 uint32_t tiku_mpu_get_last_fault_addr(void)
 {
-#if defined(PLATFORM_RP2350)
+#if defined(PLATFORM_RP2350) || defined(PLATFORM_AMBIQ)
     extern uint32_t tiku_mpu_arch_last_fault_addr(void);
     return tiku_mpu_arch_last_fault_addr();
 #elif defined(PLATFORM_STM32F411)

@@ -45,6 +45,7 @@
 #define tiku_common_arch_unique_id(b,l) tiku_cpu_rp2350_unique_id((b),(l))
 #define tiku_common_arch_reset_reason() tiku_cpu_rp2350_reset_reason()
 
+<<<<<<< HEAD
 #elif defined(PLATFORM_STM32F411)
 #include "arch/st/stm32f411re/tiku_cpu_common.h"
 
@@ -52,6 +53,15 @@
 #define tiku_common_arch_delay_us(us)   tiku_cpu_stm32f411_delay_us(us)
 #define tiku_common_arch_unique_id(b,l) tiku_cpu_stm32f411_unique_id((b),(l))
 #define tiku_common_arch_reset_reason() tiku_cpu_stm32f411_reset_reason()
+=======
+#elif defined(PLATFORM_AMBIQ)
+#include "arch/ambiq/tiku_cpu_common.h"
+
+#define tiku_common_arch_delay_ms(ms)   tiku_cpu_ambiq_delay_ms(ms)
+#define tiku_common_arch_delay_us(us)   tiku_cpu_ambiq_delay_us(us)
+#define tiku_common_arch_unique_id(b,l) tiku_cpu_ambiq_unique_id((b),(l))
+#define tiku_common_arch_reset_reason() tiku_cpu_ambiq_reset_reason()
+>>>>>>> main
 #endif
 
 #endif /* TIKU_COMMON_HAL_H_ */

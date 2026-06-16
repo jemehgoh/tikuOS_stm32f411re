@@ -9,7 +9,9 @@
  *
  * Provides atomic section entry/exit, IRQ control, clock-rate
  * queries, and idle-mode hooks. On MSP430 these forward to the
- * tiku_cpu_msp430_* / tiku_cpu_boot_msp430_* arch functions.
+ * tiku_cpu_msp430_* / tiku_cpu_boot_msp430_* arch functions; the ARM
+ * ports (RP2350, Apollo510) share the PRIMASK/cpsid atomics and forward
+ * boot/clock/idle to their own arch backends.
  *
  * The atomic functions use MSP430 intrinsics directly (<msp430.h>) rather
  * than including tiku.h, because tiku.h defines PLATFORM_MSP430 which
@@ -32,16 +34,29 @@
 #if defined(PLATFORM_MSP430)
 #include <msp430.h>    /* MSP430 intrinsics for interrupt state management */
 #include "arch/msp430/tiku_cpu_freq_boot_arch.h"
+<<<<<<< HEAD
 #elif defined(PLATFORM_RP2350) || defined(PLATFORM_STM32F411)
 #if defined(PLATFORM_RP2350)
 #include "arch/arm-rp2350/tiku_cpu_freq_boot_arch.h"
 #elif defined(PLATFORM_STM32F411)
 #include "arch/st/stm32f411re/tiku_cpu_freq_boot_arch.h"
+=======
+#elif defined(PLATFORM_RP2350) || defined(PLATFORM_AMBIQ)
+#if defined(PLATFORM_RP2350)
+#include "arch/arm-rp2350/tiku_cpu_freq_boot_arch.h"
+#else
+#include "arch/ambiq/tiku_cpu_freq_boot_arch.h"
+>>>>>>> main
 #endif
 #include <stdint.h>
 
 /* ARM Cortex-M PRIMASK helpers. We intentionally avoid pulling in
+<<<<<<< HEAD
  * CMSIS core headers to keep tikuOS dependency-free. */
+=======
+ * <cmsis_gcc.h> or <core_cm33.h> to keep tikuOS dependency-free. The
+ * instructions are identical on Cortex-M33 (RP2350) and M55 (Apollo510). */
+>>>>>>> main
 static inline uint32_t tiku_arm_get_primask(void) {
     uint32_t v;
     __asm__ volatile ("mrs %0, primask" : "=r"(v));
@@ -90,7 +105,11 @@ void tiku_atomic_enter(void) {
     tiku_atomic_gie_saved = (sr & GIE) != 0;
   }
   tiku_atomic_nesting++;
+<<<<<<< HEAD
 #elif defined(PLATFORM_RP2350) || defined(PLATFORM_STM32F411)
+=======
+#elif defined(PLATFORM_RP2350) || defined(PLATFORM_AMBIQ)
+>>>>>>> main
   /* PRIMASK = 0 means IRQs enabled; PRIMASK = 1 means masked. We
    * snapshot the bit on the outermost entry and restore on the
    * outermost exit, mirroring the MSP430 GIE handling above. */
@@ -107,7 +126,11 @@ void tiku_atomic_exit(void) {
   if (--tiku_atomic_nesting == 0 && tiku_atomic_gie_saved) {
 #if defined(PLATFORM_MSP430)
     __enable_interrupt();
+<<<<<<< HEAD
 #elif defined(PLATFORM_RP2350) || defined(PLATFORM_STM32F411)
+=======
+#elif defined(PLATFORM_RP2350) || defined(PLATFORM_AMBIQ)
+>>>>>>> main
     tiku_arm_enable_irq();
 #endif
   }
@@ -120,7 +143,11 @@ void tiku_atomic_exit(void) {
 void tiku_cpu_irq_enable(void) {
 #if defined(PLATFORM_MSP430)
     __enable_interrupt();
+<<<<<<< HEAD
 #elif defined(PLATFORM_RP2350) || defined(PLATFORM_STM32F411)
+=======
+#elif defined(PLATFORM_RP2350) || defined(PLATFORM_AMBIQ)
+>>>>>>> main
     tiku_arm_enable_irq();
 #endif
 }
@@ -128,7 +155,11 @@ void tiku_cpu_irq_enable(void) {
 void tiku_cpu_irq_disable(void) {
 #if defined(PLATFORM_MSP430)
     __disable_interrupt();
+<<<<<<< HEAD
 #elif defined(PLATFORM_RP2350) || defined(PLATFORM_STM32F411)
+=======
+#elif defined(PLATFORM_RP2350) || defined(PLATFORM_AMBIQ)
+>>>>>>> main
     tiku_arm_disable_irq();
 #endif
 }
@@ -142,8 +173,13 @@ void tiku_cpu_boot_init(void) {
     tiku_cpu_boot_msp430_init();
 #elif defined(PLATFORM_RP2350)
     tiku_cpu_boot_rp2350_init();
+<<<<<<< HEAD
 #elif defined(PLATFORM_STM32F411)
     tiku_cpu_boot_stm32f411_init();
+=======
+#elif defined(PLATFORM_AMBIQ)
+    tiku_cpu_boot_ambiq_init();
+>>>>>>> main
 #endif
 }
 
@@ -152,8 +188,13 @@ void tiku_cpu_freq_init(unsigned int cpu_freq) {
     tiku_cpu_freq_msp430_init(cpu_freq);
 #elif defined(PLATFORM_RP2350)
     tiku_cpu_freq_rp2350_init(cpu_freq);
+<<<<<<< HEAD
 #elif defined(PLATFORM_STM32F411)
     tiku_cpu_freq_stm32f411_init(cpu_freq);
+=======
+#elif defined(PLATFORM_AMBIQ)
+    tiku_cpu_freq_ambiq_init(cpu_freq);
+>>>>>>> main
 #endif
 }
 
@@ -166,8 +207,13 @@ unsigned long tiku_cpu_mclk_hz(void) {
     return tiku_cpu_msp430_clock_get_hz();
 #elif defined(PLATFORM_RP2350)
     return tiku_cpu_rp2350_clock_get_hz();
+<<<<<<< HEAD
 #elif defined(PLATFORM_STM32F411)
     return tiku_cpu_stm32f411_clock_get_hz();
+=======
+#elif defined(PLATFORM_AMBIQ)
+    return tiku_cpu_ambiq_clock_get_hz();
+>>>>>>> main
 #else
     return 0;
 #endif
@@ -178,8 +224,13 @@ unsigned long tiku_cpu_smclk_hz(void) {
     return tiku_cpu_msp430_smclk_get_hz();
 #elif defined(PLATFORM_RP2350)
     return tiku_cpu_rp2350_smclk_get_hz();
+<<<<<<< HEAD
 #elif defined(PLATFORM_STM32F411)
     return tiku_cpu_stm32f411_smclk_get_hz();
+=======
+#elif defined(PLATFORM_AMBIQ)
+    return tiku_cpu_ambiq_smclk_get_hz();
+>>>>>>> main
 #else
     return 0;
 #endif
@@ -190,8 +241,13 @@ unsigned long tiku_cpu_aclk_hz(void) {
     return tiku_cpu_msp430_aclk_get_hz();
 #elif defined(PLATFORM_RP2350)
     return tiku_cpu_rp2350_aclk_get_hz();
+<<<<<<< HEAD
 #elif defined(PLATFORM_STM32F411)
     return tiku_cpu_stm32f411_aclk_get_hz();
+=======
+#elif defined(PLATFORM_AMBIQ)
+    return tiku_cpu_ambiq_aclk_get_hz();
+>>>>>>> main
 #else
     return 0;
 #endif
@@ -202,8 +258,13 @@ int tiku_cpu_clock_has_fault(void) {
     return tiku_cpu_msp430_clock_has_fault() ? 1 : 0;
 #elif defined(PLATFORM_RP2350)
     return tiku_cpu_rp2350_clock_has_fault() ? 1 : 0;
+<<<<<<< HEAD
 #elif defined(PLATFORM_STM32F411)
     return tiku_cpu_stm32f411_clock_has_fault() ? 1 : 0;
+=======
+#elif defined(PLATFORM_AMBIQ)
+    return tiku_cpu_ambiq_clock_has_fault() ? 1 : 0;
+>>>>>>> main
 #else
     return 0;
 #endif
@@ -241,12 +302,22 @@ tiku_cpu_idle_enter_t tiku_cpu_idle_hook(tiku_cpu_idle_mode_t mode) {
         default:
             return NULL;
     }
+<<<<<<< HEAD
 #elif defined(PLATFORM_STM32F411)
+=======
+#elif defined(PLATFORM_AMBIQ)
+>>>>>>> main
     switch (mode) {
         case TIKU_CPU_IDLE_LIGHT:
         case TIKU_CPU_IDLE_DEEP:
         case TIKU_CPU_IDLE_DEEPEST:
+<<<<<<< HEAD
             return tiku_cpu_boot_stm32f411_power_wfi_enter;
+=======
+            /* Plain WFI on Cortex-M55 — SysTick / STIMER / peripherals
+             * still wake us. Deeper Ambiq sleep modes land later. */
+            return tiku_cpu_boot_ambiq_power_wfi_enter;
+>>>>>>> main
         case TIKU_CPU_IDLE_OFF:
         default:
             return NULL;
@@ -266,7 +337,7 @@ const char *tiku_cpu_idle_mode_name(tiku_cpu_idle_mode_t mode) {
         case TIKU_CPU_IDLE_OFF:
         default:                    return "off";
     }
-#elif defined(PLATFORM_RP2350)
+#elif defined(PLATFORM_RP2350) || defined(PLATFORM_AMBIQ)
     switch (mode) {
         case TIKU_CPU_IDLE_LIGHT:   return "WFI";
         case TIKU_CPU_IDLE_DEEP:    return "WFI";
@@ -311,12 +382,20 @@ const char *tiku_cpu_idle_mode_desc(tiku_cpu_idle_mode_t mode) {
         default:
             return "off (busy-wait)";
     }
+<<<<<<< HEAD
 #elif defined(PLATFORM_STM32F411)
+=======
+#elif defined(PLATFORM_AMBIQ)
+>>>>>>> main
     switch (mode) {
         case TIKU_CPU_IDLE_LIGHT:
         case TIKU_CPU_IDLE_DEEP:
         case TIKU_CPU_IDLE_DEEPEST:
+<<<<<<< HEAD
             return "WFI (Cortex-M4 wait-for-interrupt)";
+=======
+            return "WFI (Cortex-M55 wait-for-interrupt)";
+>>>>>>> main
         case TIKU_CPU_IDLE_OFF:
         default:
             return "off (busy-wait)";
