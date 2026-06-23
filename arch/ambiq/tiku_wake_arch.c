@@ -5,12 +5,15 @@
  *
  * Authors: Ambuj Varshney <ambuj@tiku-os.org>
  *
- * tiku_wake_arch.c - Apollo 510 wake-source query
+ * tiku_wake_arch.c - Ambiq (Apollo510 / Apollo4 Lite) wake-source query
  *
- * Reports the interrupt sources currently armed to bring the M55 out of a WFI
- * sleep: the SysTick (system tick) via SYST_CSR.TICKINT, plus the NVIC
- * set-enable state of the STIMER (htimer), UART0 (console RX) and GPIO0 lines.
- * Pure Cortex-M register reads -- no AmbiqSuite dependency.
+ * Reports the interrupt sources currently armed to bring the core out of a WFI
+ * sleep: the system tick, plus the NVIC set-enable state of the STIMER htimer,
+ * the console UART RX and GPIO0 lines. Both Ambiq parts tick off the always-on
+ * STIMER compare-B (IRQ 33) -- SysTick freezes in sleep, so it is not the tick
+ * here -- and the STIMER-htimer (IRQ 32) and GPIO0 range match. Only the console
+ * UART IRQ differs per part (UART0=15 on apollo510, UART2=17 on apollo4l). Pure
+ * Cortex-M register reads -- no AmbiqSuite dependency.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -18,15 +21,18 @@
 #include <string.h>
 #include <hal/tiku_wake_hal.h>
 
-/** Cortex-M SysTick control/status; TICKINT (bit 1) arms the tick interrupt. */
-#define SYST_CSR          (*(volatile uint32_t *)0xE000E010UL)
-#define SYST_CSR_TICKINT  (1u << 1)
 /** NVIC Interrupt Set-Enable Registers (ISER[0..4] cover the 135 IRQs). */
 #define NVIC_ISER         ((volatile uint32_t *)0xE000E100UL)
 
-/* Apollo510 IRQ numbers for the lines tikuOS maps to wake sources. */
-#define AMBIQ_IRQ_UART0          15   /**< UART0 console RX IRQ      */
+/* IRQ numbers for the lines tikuOS maps to wake sources. The console UART
+ * differs per Ambiq part; STIMER and the GPIO0 range are identical. */
+#if defined(TIKU_DEVICE_APOLLO4L)
+#define AMBIQ_IRQ_UART           17   /**< UART2 console RX IRQ (apollo4l) */
+#else
+#define AMBIQ_IRQ_UART           15   /**< UART0 console RX IRQ (apollo510) */
+#endif
 #define AMBIQ_IRQ_STIMER_CMPR0   32   /**< STIMER Compare0 (htimer)  */
+#define AMBIQ_IRQ_STIMER_CMPR1   33   /**< STIMER Compare1 (Ambiq kernel tick) */
 #define AMBIQ_IRQ_GPIO0_FIRST    56   /**< First GPIO N0 IRQ line    */
 #define AMBIQ_IRQ_GPIO0_LAST     63   /**< Last GPIO N0 IRQ line     */
 
@@ -56,13 +62,16 @@ void tiku_wake_arch_query(tiku_wake_sources_t *out) {
     }
     memset(out, 0, sizeof(*out));
 
-    if (SYST_CSR & SYST_CSR_TICKINT) {
+    /* Both Ambiq parts drive the kernel tick from the always-on STIMER compare-B
+     * (IRQ 33), not SysTick -- SysTick freezes in WFI sleep, so it carries no
+     * TICKINT and the tick wake source is that NVIC line (tiku_timer_*.c). */
+    if (irq_enabled(AMBIQ_IRQ_STIMER_CMPR1)) {
         out->sources |= TIKU_WAKE_SYSTICK;
     }
     if (irq_enabled(AMBIQ_IRQ_STIMER_CMPR0)) {
         out->sources |= TIKU_WAKE_HTIMER;
     }
-    if (irq_enabled(AMBIQ_IRQ_UART0)) {
+    if (irq_enabled(AMBIQ_IRQ_UART)) {
         out->sources |= TIKU_WAKE_UART_RX;
     }
     for (g = AMBIQ_IRQ_GPIO0_FIRST; g <= AMBIQ_IRQ_GPIO0_LAST; g++) {

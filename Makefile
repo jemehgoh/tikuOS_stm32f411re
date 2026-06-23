@@ -38,6 +38,8 @@ else ifeq ($(MCU),stm32f411re)
 TIKU_PLATFORM := stm32f411
 else ifeq ($(MCU),apollo510)
 TIKU_PLATFORM := ambiq
+else ifeq ($(MCU),apollo4l)
+TIKU_PLATFORM := ambiq
 else
 TIKU_PLATFORM := msp430
 endif
@@ -95,8 +97,11 @@ endif
 endif
 
 ifeq ($(TIKU_PLATFORM),ambiq)
-# Apollo510 EVB is the only board for now.
+ifeq ($(MCU),apollo4l)
+TIKU_BOARD_DEFINE := TIKU_BOARD_APOLLO4L_EVB
+else
 TIKU_BOARD_DEFINE := TIKU_BOARD_APOLLO510_EVB
+endif
 endif
 
 # ---------------------------------------------------------------------------
@@ -234,10 +239,23 @@ STM32F411_FLASH_SIZE ?= 0x80000
 # MRAM 0x00410000. Override any of these on the make command line.
 JLINK           ?= JLinkExe
 JLINK_GDB       ?= JLinkGDBServer
-JLINK_DEVICE    ?= AP510NFA-CBR
 JLINK_IF        ?= SWD
 JLINK_SPEED     ?= 4000
+# J-Link device + MRAM load address differ per Ambiq part.
+ifeq ($(MCU),apollo4l)
+JLINK_DEVICE    ?= AMAP42KL-KBR
+AMBIQ_LOAD_ADDR ?= 0x00018000
+# The Apollo4 Lite secure SBL parks (PC stays inside the SBL) while a debugger
+# is attached at reset. Detaching with the target left running (qc) drops the
+# debugger so the SBL hands off to the app at 0x18000; the Sleep lets the SBL
+# reach that debug-wait before we detach. (q halts, so the app never starts.)
+JLINK_RUN_SEQ   ?= r\ng\nSleep 600\nqc
+else
+JLINK_DEVICE    ?= AP510NFA-CBR
 AMBIQ_LOAD_ADDR ?= 0x00410000
+# Apollo510 hands off cleanly: reset, go, quit.
+JLINK_RUN_SEQ   ?= r\ng\nq
+endif
 
 # Whether this MCU has HIFRAM (FRAM > 64 KB).  MSP430-only concept;
 # for other MCUs it is meaningless.
@@ -483,6 +501,13 @@ TIKU_KIT_NET_ENABLE     := 1
 TIKU_KIT_CRYPTO_ENABLE  := 1
 endif
 
+# Shell net-test mode (TikuBench net suite where there is no working APP=net,
+# e.g. Ambiq): pull the net stack into the shell firmware so it hosts the
+# UDP/TCP/CoAP test servers. Gated -- normal shell builds are unaffected.
+ifeq ($(TIKU_SHELL_NET_TEST),1)
+TIKU_KIT_NET_ENABLE     := 1
+endif
+
 # After all the cascade rules above settle, recompute the
 # UI -> GFX implication (auto-enables may have flipped UI on).
 ifeq ($(TIKU_KIT_UI_ENABLE),1)
@@ -622,10 +647,15 @@ CFLAGS += -ffunction-sections -fdata-sections -fno-common
 
 else ifeq ($(TIKU_PLATFORM),ambiq)
 
-# Cortex-M55 (Apollo510). Hard-float + Helium are derived from -mcpu and
-# must match the prebuilt libam_hal.a / libam_bsp.a ABI.
+# CPU/FPU per Ambiq part: Cortex-M55 + Helium (Apollo510) or Cortex-M4F with a
+# single-precision FPU (Apollo4 Lite). Derived from -mcpu; -Wno-psabi below.
+ifeq ($(MCU),apollo4l)
+CFLAGS  = -mcpu=cortex-m4 -mthumb
+CFLAGS += -mfpu=fpv4-sp-d16 -mfloat-abi=hard
+else
 CFLAGS  = -mcpu=cortex-m55 -mthumb
 CFLAGS += -mfpu=auto -mfloat-abi=hard
+endif
 CFLAGS += -Os -Wall -Wextra -Wno-psabi
 # newlib-nano (small integer printf) + nosys syscall stubs. AmbiqSuite used to
 # supply _sbrk/_write/_read/etc; with the SDK gone, libnosys provides them.
@@ -642,8 +672,12 @@ CFLAGS += -DPLATFORM_AMBIQ=1
 # fine. NVM tier is volatile-RAM-backed until MRAM persistence lands.
 CFLAGS += -DTIKU_TIER_SRAM_SIZE=131072   # 128 KB fast volatile tier in DTCM
 CFLAGS += -DTIKU_TIER_NVM_SIZE=16384      # 16 KB NVM tier
-# Part/package selectors that configure the vendored apollo510.h register map.
+# Part selectors that configure the vendored register map (apollo4l.h / apollo510.h).
+ifeq ($(MCU),apollo4l)
+CFLAGS += -DPART_apollo4l -DAM_PART_APOLLO4L -Dgcc
+else
 CFLAGS += -DPART_apollo510 -DAM_PART_APOLLO510 -DAM_PACKAGE_BGA -Dgcc
+endif
 CFLAGS += -I$(PROJ_DIR)
 # CMSIS register headers, VENDORED in-tree (arch/ambiq/cmsis/) so the build is
 # fully self-contained: it references nothing in temp/AmbiqSuite, only the MRAM
@@ -760,12 +794,20 @@ LDFLAGS += -Wl,-u,tiku_autostart_processes
 LDFLAGS += -Wl,-Map=$(BUILD_DIR)/main.map
 else ifeq ($(TIKU_PLATFORM),ambiq)
 
+ifeq ($(MCU),apollo4l)
+LDFLAGS  = -mcpu=cortex-m4 -mthumb -mfpu=fpv4-sp-d16 -mfloat-abi=hard
+else
 LDFLAGS  = -mcpu=cortex-m55 -mthumb -mfpu=auto -mfloat-abi=hard
+endif
 # nano.specs -> libc_nano (small printf, no heavy stdio init); nosys.specs ->
 # libnosys syscall stubs (_sbrk/_write/...), formerly supplied by AmbiqSuite.
 LDFLAGS += --specs=nano.specs --specs=nosys.specs
 LDFLAGS += -nostartfiles -static
+ifeq ($(MCU),apollo4l)
+LDFLAGS += -Tarch/ambiq/devices/apollo4l.ld
+else
 LDFLAGS += -Tarch/ambiq/devices/apollo510.ld
+endif
 LDFLAGS += -Wl,--gc-sections
 LDFLAGS += -Wl,-u,tiku_autostart_processes
 LDFLAGS += -Wl,-u,tiku_ambiq_vectors
@@ -859,11 +901,19 @@ endif
 # Use the minimal entry point and exactly the arch files it needs.
 SRCS  = main_minimal.c
 ifeq ($(TIKU_PLATFORM),ambiq)
+ifeq ($(MCU),apollo4l)
+SRCS += arch/ambiq/tiku_crt_early_apollo4l.c
+SRCS += arch/ambiq/tiku_cpu_freq_boot_apollo4l.c
+SRCS += arch/ambiq/tiku_cpu_common_apollo4l.c
+SRCS += arch/ambiq/tiku_uart_apollo4l.c
+SRCS += arch/ambiq/tiku_gpio_apollo4l.c
+else
 SRCS += arch/ambiq/tiku_crt_early.c
 SRCS += arch/ambiq/tiku_cpu_freq_boot_arch.c
 SRCS += arch/ambiq/tiku_cpu_common.c
 SRCS += arch/ambiq/tiku_uart_arch.c
 SRCS += arch/ambiq/tiku_gpio_arch.c
+endif
 # No AmbiqSuite sources compiled in (de-SDK complete): system_apollo510.c,
 # am_util_delay.c, am_util_stdio.c and am_resources.c are all dropped -- tikuOS
 # uses its own printf and never references the HAL resource tables.
@@ -947,25 +997,49 @@ else ifeq ($(TIKU_PLATFORM),ambiq)
 
 # Apollo510 arch (Cortex-M55). GPIO/SPI/LCD are bundled here (like RP2350)
 # so they aren't double-added by the MSP430-guarded blocks further down.
+# Device-agnostic ambiq backends (stubs + WFI) -- shared by both Ambiq parts.
+# (ADC is part-specific: apollo4l has a real SAR-ADC backend, apollo510 keeps
+# the stub for now -- so it is added per-part in the split below, not here.)
+SRCS += arch/ambiq/tiku_i2c_arch.c
+SRCS += arch/ambiq/tiku_onewire_arch.c
+SRCS += arch/ambiq/tiku_wake_arch.c
+SRCS += arch/ambiq/tiku_spi_arch.c
+SRCS += arch/ambiq/tiku_lcd_arch.c
+ifeq ($(MCU),apollo4l)
+# Apollo4 Lite (Cortex-M4F) device/CPU backends.
+# Apollo4 Lite drives the kernel tick from the always-on STIMER (not SysTick,
+# which freezes in WFI sleep); apollo510 keeps the shared SysTick timer below.
+SRCS += arch/ambiq/tiku_timer_apollo4l.c
+SRCS += arch/ambiq/tiku_cpu_common_apollo4l.c
+SRCS += arch/ambiq/tiku_crt_early_apollo4l.c
+SRCS += arch/ambiq/tiku_cpu_freq_boot_apollo4l.c
+SRCS += arch/ambiq/tiku_cpu_watchdog_apollo4l.c
+SRCS += arch/ambiq/tiku_htimer_apollo4l.c
+SRCS += arch/ambiq/tiku_crit_apollo4l.c
+SRCS += arch/ambiq/tiku_gpio_irq_apollo4l.c
+SRCS += arch/ambiq/tiku_uart_apollo4l.c
+SRCS += arch/ambiq/tiku_mem_apollo4l.c
+SRCS += arch/ambiq/tiku_mpu_apollo4l.c
+SRCS += arch/ambiq/tiku_region_apollo4l.c
+SRCS += arch/ambiq/tiku_gpio_apollo4l.c
+SRCS += arch/ambiq/tiku_adc_apollo4l.c
+else
+# Apollo510 (Cortex-M55) device/CPU backends.
+SRCS += arch/ambiq/tiku_adc_arch.c
+SRCS += arch/ambiq/tiku_timer_arch.c
 SRCS += arch/ambiq/tiku_cpu_common.c
 SRCS += arch/ambiq/tiku_crt_early.c
 SRCS += arch/ambiq/tiku_cpu_freq_boot_arch.c
 SRCS += arch/ambiq/tiku_cpu_watchdog_arch.c
 SRCS += arch/ambiq/tiku_htimer_arch.c
-SRCS += arch/ambiq/tiku_i2c_arch.c
-SRCS += arch/ambiq/tiku_adc_arch.c
-SRCS += arch/ambiq/tiku_onewire_arch.c
-SRCS += arch/ambiq/tiku_timer_arch.c
 SRCS += arch/ambiq/tiku_crit_arch.c
-SRCS += arch/ambiq/tiku_wake_arch.c
 SRCS += arch/ambiq/tiku_gpio_irq_arch.c
 SRCS += arch/ambiq/tiku_uart_arch.c
 SRCS += arch/ambiq/tiku_mem_arch.c
 SRCS += arch/ambiq/tiku_mpu_arch.c
 SRCS += arch/ambiq/tiku_region_arch.c
 SRCS += arch/ambiq/tiku_gpio_arch.c
-SRCS += arch/ambiq/tiku_spi_arch.c
-SRCS += arch/ambiq/tiku_lcd_arch.c
+endif
 # No AmbiqSuite sources compiled in (de-SDK complete): system_apollo510.c,
 # am_util_delay.c, am_util_stdio.c, am_resources.c all dropped.
 
@@ -1118,6 +1192,31 @@ SRCS += kernel/shell/commands/tiku_shell_cmd_start.c
 SRCS += kernel/shell/commands/tiku_shell_cmd_write.c
 SRCS += kernel/shell/commands/tiku_shell_cmd_read.c
 SRCS += kernel/shell/commands/tiku_shell_cmd_watch.c
+# slip command: only when the net stack is compiled in (it starts the net
+# process). Keeps one OS image: interactive shell by default, SLIP/IP on
+# demand via the `slip` command.
+ifeq ($(TIKU_KIT_NET_ENABLE),1)
+SRCS += kernel/shell/commands/tiku_shell_cmd_slip.c
+SRCS += kernel/shell/commands/tiku_shell_cmd_ping.c
+SRCS += kernel/shell/commands/tiku_shell_cmd_ip.c
+# ntp command (SNTP client): on by default with net.  It needs the time kit,
+# so enabling it flips TIKU_KIT_TIME_ENABLE (see the time-kit block below).
+# Drop both with EXTRA_CFLAGS="-DTIKU_SHELL_CMD_NTP=0".
+ifeq (,$(findstring TIKU_SHELL_CMD_NTP=0,$(EXTRA_CFLAGS)))
+SRCS += kernel/shell/commands/tiku_shell_cmd_ntp.c
+TIKU_KIT_TIME_ENABLE := 1
+endif
+# dns command (A-record lookup): on by default with net.  The DNS stub
+# resolver is already compiled via the net-kit wildcard, so no extra kit.
+ifeq (,$(findstring TIKU_SHELL_CMD_DNS=0,$(EXTRA_CFLAGS)))
+SRCS += kernel/shell/commands/tiku_shell_cmd_dns.c
+endif
+# syslog command (RFC 3164 remote log): on by default with net.  The syslog
+# client is already compiled via the net-kit wildcard.
+ifeq (,$(findstring TIKU_SHELL_CMD_SYSLOG=0,$(EXTRA_CFLAGS)))
+SRCS += kernel/shell/commands/tiku_shell_cmd_syslog.c
+endif
+endif
 ifeq (,$(findstring TIKU_SHELL_CMD_CALC=0,$(EXTRA_CFLAGS)))
 SRCS += kernel/shell/commands/tiku_shell_cmd_calc.c
 endif
@@ -1154,6 +1253,7 @@ SRCS += kernel/shell/commands/tiku_shell_cmd_adc.c
 SRCS += kernel/shell/commands/tiku_shell_cmd_free.c
 SRCS += kernel/shell/commands/tiku_shell_cmd_sleep.c
 SRCS += kernel/shell/commands/tiku_shell_cmd_wake.c
+SRCS += kernel/shell/commands/tiku_shell_cmd_freq.c
 SRCS += kernel/shell/commands/tiku_shell_cmd_name.c
 ifeq (,$(findstring TIKU_SHELL_CMD_IF=0,$(EXTRA_CFLAGS)))
 SRCS += kernel/shell/commands/tiku_shell_cmd_if.c
@@ -1385,8 +1485,23 @@ endif
 ifeq ($(APP),net)
 CFLAGS += -DTIKU_APP_NET=1
 SRCS += apps/net/tiku_app_net.c
-SRCS += labs/coap/tiku_kits_net_coap.c
-SRCS += labs/coap/tiku_kits_net_coap_process.c
+# CoAP client/server (library + demo process) lives in tikukits/net/coap/.
+# Pull it in and define TIKU_KITS_NET_COAP so the net app starts the CoAP
+# server process; the C side #if's its use on the same flag.
+SRCS   += $(wildcard tikukits/net/coap/*.c)
+CFLAGS += -DTIKU_KITS_NET_COAP=1
+endif
+
+# Shell net-test mode: activate TCP and pull in the CoAP server so the shell
+# firmware can answer the TikuBench net suite (gated; see TIKU_SHELL_NET_TEST).
+ifeq ($(TIKU_SHELL_NET_TEST),1)
+CFLAGS += -DTIKU_SHELL_NET_TEST=1 -DTIKU_KITS_NET_TCP_ENABLE=1
+CFLAGS += -DTIKU_KITS_NET_MQTT_ENABLE=1
+CFLAGS += -DTIKU_SHELL_TCP_ENABLE=1
+SRCS   += $(wildcard tikukits/net/coap/*.c)
+CFLAGS += -DTIKU_KITS_NET_COAP=1
+SRCS += kernel/shell/commands/tiku_shell_cmd_mqtt.c
+SRCS += kernel/shell/tiku_shell_io_tcp.c
 endif
 
 # Optional out-of-tree overlay hook.  Silently included if present
@@ -1401,6 +1516,20 @@ endif
 # Only enabled kits compile their sources. A kernel-only build
 # (no apps, no examples) compiles ZERO files from tikukits/.
 # ---------------------------------------------------------------------------
+
+# Turbo benchmark (TIKU_TURBO_BENCH=1): an app-layer firmware that runs heavy
+# TikuKits workloads at 96 MHz (LP) and 192 MHz (HP) and emits serial markers
+# so the host times the wall-clock speedup. Enable the crypto/maths/ml kits and
+# add the benchmark source (after the SRCS=main.c reset, so it sticks); main.c
+# calls turbo_bench_run() then halts. kernel/ is untouched.
+ifeq ($(TIKU_TURBO_BENCH),1)
+CFLAGS += -DTIKU_TURBO_BENCH=1
+TIKU_KIT_CRYPTO_ENABLE := 1
+TIKU_KIT_MATHS_ENABLE  := 1
+TIKU_KIT_ML_ENABLE     := 1
+SRCS   += apps/turbo_bench/turbo_bench.c
+endif
+
 ifeq ($(HAS_TIKUKITS),1)
 
 ifeq ($(TIKU_KIT_GFX_ENABLE),1)
@@ -1424,6 +1553,15 @@ endif
 
 ifeq ($(TIKU_KIT_NET_ENABLE),1)
 CFLAGS += -DTIKU_KIT_NET_ENABLE=1
+# Override the device IPv4 address at build time, e.g. `make ... IP=10.0.0.5`.
+# tiku_kits_net.h defaults TIKU_KITS_NET_IP_ADDR to {172,16,7,2} behind an
+# #ifndef; turn a dotted quad into that brace-list (quoted so the shell does
+# not brace-expand it).  NOTE: CFLAGS changes are not dependency-tracked, so
+# `make clean` when you change IP.
+ifdef IP
+comma := ,
+CFLAGS += -DTIKU_KITS_NET_IP_ADDR="{$(subst .,$(comma),$(IP))}"
+endif
 SRCS   += $(wildcard tikukits/net/slip/*.c)
 # IPv4 base set. Drops the heavy protocol modules when their per-flag
 # is off — each declares static buffers via __attribute__((section(
@@ -1771,7 +1909,7 @@ JLINK_ERASE_SCRIPT = $(BUILD_DIR)/erase.jlink
 
 flash: all
 	@mkdir -p $(BUILD_DIR)
-	@printf 'device %s\nif %s\nspeed %s\nconnect\nloadbin %s %s\nr\ng\nq\n' "$(JLINK_DEVICE)" "$(JLINK_IF)" "$(JLINK_SPEED)" "$(TARGET_BIN)" "$(AMBIQ_LOAD_ADDR)" > $(JLINK_FLASH_SCRIPT)
+	@printf 'device %s\nif %s\nspeed %s\nconnect\nloadbin %s %s\n$(JLINK_RUN_SEQ)\n' "$(JLINK_DEVICE)" "$(JLINK_IF)" "$(JLINK_SPEED)" "$(TARGET_BIN)" "$(AMBIQ_LOAD_ADDR)" > $(JLINK_FLASH_SCRIPT)
 	@echo "Flashing $(TARGET_BIN) -> MRAM $(AMBIQ_LOAD_ADDR) via $(JLINK) ($(JLINK_DEVICE))..."
 	$(JLINK) -CommanderScript $(JLINK_FLASH_SCRIPT)
 
@@ -1822,20 +1960,32 @@ endif
 # Prefer /dev/ttyUSB* (FTDI/CP2102 external adapter) over ttyACM*
 # (eZ-FET backchannel) since external adapters are used for SLIP
 # networking and avoid the eZ-FET DTR-reset bug.
+# NOTE: do NOT use "ls GLOB | head -1" here -- a pipeline's exit status is
+# head's, which is 0 even when the glob matched nothing, so a "|| fallback"
+# chain short-circuits on the first (empty) clause and never reaches the
+# Linux device names.  Loop with [ -e ] instead: a non-matching glob stays
+# literal and fails the test, so it is skipped cleanly (works on Linux +
+# macOS).  Priority: external USB-serial -> TI/2047 ACM backchannel ->
+# any ACM (incl. the SEGGER J-Link VCOM, VID 1366) / macOS usbmodem.
 PORT ?= $(shell \
-	ls /dev/tty.usbmodem* /dev/tty.usbserial* 2>/dev/null | head -1 || \
-	ls /dev/ttyUSB* 2>/dev/null | head -1 || \
-	(for dev in /dev/ttyACM*; do \
+	for p in /dev/ttyUSB* /dev/tty.usbserial*; do \
+		[ -e "$$p" ] && { echo "$$p"; exit 0; }; \
+	done; \
+	for dev in /dev/ttyACM*; do \
 		[ -e "$$dev" ] || continue; \
 		vid=$$(cat "/sys/class/tty/$$(basename $$dev)/device/../idVendor" 2>/dev/null); \
 		if [ "$$vid" = "0451" ] || [ "$$vid" = "2047" ]; then echo "$$dev"; exit 0; fi; \
 	done; \
-	ls /dev/ttyACM* 2>/dev/null | head -1))
+	for p in /dev/ttyACM* /dev/tty.usbmodem*; do \
+		[ -e "$$p" ] && { echo "$$p"; exit 0; }; \
+	done)
 
 monitor:
 	@if [ -z "$(PORT)" ]; then \
 		echo "Error: No serial port found (/dev/ttyUSB* or /dev/ttyACM*)"; \
-		echo "  Is the FTDI adapter or LaunchPad plugged in?"; \
+		echo "  Plug in the USB-serial adapter / LaunchPad, or the board's"; \
+		echo "  J-Link VCOM (shows up as /dev/ttyACM*)."; \
+		echo "  Or point it at a specific port: make monitor PORT=/dev/ttyACM0"; \
 		exit 1; \
 	fi; \
 	if command -v picocom >/dev/null 2>&1; then \

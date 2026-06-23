@@ -27,9 +27,9 @@
  *
  * To add a new command:
  *   1. Add a TIKU_SHELL_CMD_xxx flag here (set to 1)
- *   2. Create apps/cli/commands/tiku_shell_cmd_xxx.h and .c
- *   3. Add #include and table entry in tiku_cli.c
- *   4. Add the .c file to the Makefile APP=cli section
+ *   2. Create kernel/shell/commands/tiku_shell_cmd_xxx.h and .c
+ *   3. Add #include and table entry in tiku_shell.c
+ *   4. Add the .c file to the Makefile TIKU_SHELL_ENABLE section
  */
 
 #ifndef TIKU_SHELL_CONFIG_H_
@@ -125,6 +125,9 @@
 #ifndef TIKU_SHELL_CMD_WAKE
 #define TIKU_SHELL_CMD_WAKE    1  /**< wake    - Show active wake sources */
 #endif
+#ifndef TIKU_SHELL_CMD_FREQ
+#define TIKU_SHELL_CMD_FREQ    1  /**< freq    - Show/set CPU core frequency */
+#endif
 #ifndef TIKU_SHELL_CMD_NAME
 #define TIKU_SHELL_CMD_NAME    1  /**< name    - Read or set device name */
 #endif
@@ -162,6 +165,69 @@
 #endif
 #ifndef TIKU_SHELL_CMD_WATCH
 #define TIKU_SHELL_CMD_WATCH   1  /**< watch   - Periodic VFS read until Ctrl+C */
+#endif
+/* slip: hand the console UART to SLIP/IP networking.  Auto-on only when the
+ * net stack is compiled in (TIKU_KIT_NET_ENABLE=1) -- the command starts the
+ * net process, which does not exist otherwise. */
+#ifndef TIKU_SHELL_CMD_SLIP
+#if defined(TIKU_KIT_NET_ENABLE) && TIKU_KIT_NET_ENABLE
+#define TIKU_SHELL_CMD_SLIP    1  /**< slip    - Hand the UART to SLIP/IP net */
+#else
+#define TIKU_SHELL_CMD_SLIP    0
+#endif
+#endif
+/* ping: ICMP echo over SLIP.  Same gating as slip (needs the net stack). */
+#ifndef TIKU_SHELL_CMD_PING
+#if defined(TIKU_KIT_NET_ENABLE) && TIKU_KIT_NET_ENABLE
+#define TIKU_SHELL_CMD_PING    1  /**< ping    - ICMP echo a host over SLIP */
+#else
+#define TIKU_SHELL_CMD_PING    0
+#endif
+#endif
+/* ip: print the device's IPv4 address.  Same gating as slip/ping. */
+#ifndef TIKU_SHELL_CMD_IP
+#if defined(TIKU_KIT_NET_ENABLE) && TIKU_KIT_NET_ENABLE
+#define TIKU_SHELL_CMD_IP      1  /**< ip      - Print the device IPv4 address */
+#else
+#define TIKU_SHELL_CMD_IP      0
+#endif
+#endif
+/* ntp: fetch wall-clock time over SLIP (SNTP).  Same gating as slip/ping/ip;
+ * the Makefile pulls in the time kit (TIKU_KIT_TIME_ENABLE) when it compiles. */
+#ifndef TIKU_SHELL_CMD_NTP
+#if defined(TIKU_KIT_NET_ENABLE) && TIKU_KIT_NET_ENABLE
+#define TIKU_SHELL_CMD_NTP     1  /**< ntp     - Fetch network time (SNTP) */
+#else
+#define TIKU_SHELL_CMD_NTP     0
+#endif
+#endif
+/* dns: resolve a hostname (A record) over SLIP.  Same gating as slip/ping/ip;
+ * the DNS stub resolver is already compiled with the net kit. */
+#ifndef TIKU_SHELL_CMD_DNS
+#if defined(TIKU_KIT_NET_ENABLE) && TIKU_KIT_NET_ENABLE
+#define TIKU_SHELL_CMD_DNS     1  /**< dns     - Resolve a hostname (A record) */
+#else
+#define TIKU_SHELL_CMD_DNS     0
+#endif
+#endif
+/* syslog: send a remote log line (UDP 514) over SLIP.  Same gating as
+ * slip/ping/ip; the syslog client is already compiled with the net kit. */
+#ifndef TIKU_SHELL_CMD_SYSLOG
+#if defined(TIKU_KIT_NET_ENABLE) && TIKU_KIT_NET_ENABLE
+#define TIKU_SHELL_CMD_SYSLOG  1  /**< syslog  - Send a remote log line (514) */
+#else
+#define TIKU_SHELL_CMD_SYSLOG  0
+#endif
+#endif
+/* mqtt: connect/publish to an MQTT broker over SLIP+TCP.  Opt-in -- it needs
+ * the heavier MQTT kit + TCP, so it tracks TIKU_KITS_NET_MQTT_ENABLE rather
+ * than auto-on with net.  TikuBench's net-test build turns the kit on. */
+#ifndef TIKU_SHELL_CMD_MQTT
+#if defined(TIKU_KITS_NET_MQTT_ENABLE) && TIKU_KITS_NET_MQTT_ENABLE
+#define TIKU_SHELL_CMD_MQTT    1  /**< mqtt    - Connect/publish to an MQTT broker */
+#else
+#define TIKU_SHELL_CMD_MQTT    0
+#endif
 #endif
 #ifndef TIKU_SHELL_CMD_CALC
 #define TIKU_SHELL_CMD_CALC    1  /**< calc    - Integer arithmetic */
@@ -304,6 +370,20 @@
  */
 #ifndef TIKU_SHELL_TCP_ENABLE
 #define TIKU_SHELL_TCP_ENABLE 0
+#endif
+
+/**
+ * @brief Bring the net test servers (UDP echo + TCP + CoAP) up inside the shell.
+ *
+ * Off by default so the normal shell stays lean.  When set -- TikuBench's net
+ * suite enables it on boards without a working APP=net (Ambiq) -- the shell
+ * inits UDP/TCP and registers the CoAP server; the existing `slip` RX demux
+ * feeds tiku_kits_net_ipv4_input(), which then dispatches to them, so the
+ * device answers the suite's UDP/TCP/CoAP tests over SLIP.  No net process is
+ * started (the shell owns the UART RX, so a second reader would conflict).
+ */
+#ifndef TIKU_SHELL_NET_TEST
+#define TIKU_SHELL_NET_TEST 0
 #endif
 
 /** @} */

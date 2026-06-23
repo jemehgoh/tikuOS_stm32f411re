@@ -59,6 +59,7 @@
 #include "tiku_shell.h"
 #include "tiku_shell_config.h"
 #include "tiku_shell_parser.h"
+#include "tiku_shell_cwd.h"          /* working directory for the path-aware prompt */
 #include <kernel/timers/tiku_timer.h>
 #include <kernel/timers/tiku_htimer.h>   /* htimer self-test command */
 #include <kernel/timers/tiku_clock.h>
@@ -72,6 +73,16 @@
 #if TIKU_SHELL_TCP_ENABLE
 #include "tiku_shell_io_tcp.h"
 #include <tikukits/net/ipv4/tiku_kits_net_ipv4.h>  /* tiku_kits_net_process */
+#endif
+#if TIKU_SHELL_CMD_SLIP
+#include <tikukits/net/slip/tiku_kits_net_slip.h>   /* SLIP framing constants */
+#include <tikukits/net/ipv4/tiku_kits_net_ipv4.h>   /* tiku_kits_net_ipv4_input */
+#endif
+#if TIKU_SHELL_NET_TEST
+#include <tikukits/net/ipv4/tiku_kits_net_udp.h>     /* udp_init (+ echo port 7) */
+#if TIKU_KITS_NET_TCP_ENABLE
+#include <tikukits/net/ipv4/tiku_kits_net_tcp.h>     /* tcp_init/periodic */
+#endif
 #endif
 
 /*---------------------------------------------------------------------------*/
@@ -131,6 +142,25 @@
 #endif
 #if TIKU_SHELL_CMD_WATCH
 #include "commands/tiku_shell_cmd_watch.h"
+#endif
+#if TIKU_SHELL_CMD_SLIP
+#include "commands/tiku_shell_cmd_slip.h"
+#endif
+#if TIKU_SHELL_CMD_PING
+#include "commands/tiku_shell_cmd_ping.h"
+#include "commands/tiku_shell_cmd_ip.h"
+#endif
+#if TIKU_SHELL_CMD_NTP
+#include "commands/tiku_shell_cmd_ntp.h"
+#endif
+#if TIKU_SHELL_CMD_DNS
+#include "commands/tiku_shell_cmd_dns.h"
+#endif
+#if TIKU_SHELL_CMD_SYSLOG
+#include "commands/tiku_shell_cmd_syslog.h"
+#endif
+#if TIKU_SHELL_CMD_MQTT
+#include "commands/tiku_shell_cmd_mqtt.h"
 #endif
 #if TIKU_SHELL_CMD_CALC
 #include "commands/tiku_shell_cmd_calc.h"
@@ -203,6 +233,9 @@
 #if TIKU_SHELL_CMD_WAKE
 #include "commands/tiku_shell_cmd_wake.h"
 #endif
+#if TIKU_SHELL_CMD_FREQ
+#include "commands/tiku_shell_cmd_freq.h"
+#endif
 
 /*---------------------------------------------------------------------------*/
 /* FORWARD DECLARATIONS                                                      */
@@ -270,6 +303,81 @@ static void tiku_shell_cmd_help(uint8_t argc, const char *argv[]);
  * @param label  Static string shown as the section heading.
  */
 #define CMD_CATEGORY(label)  { label, NULL, NULL }
+
+/*
+ * Print the interactive prompt.  Single definition so every reprint
+ * (banner, after-command, Ctrl+C, watch-cancel, TCP reconnect) stays
+ * identical, and so the prompt can show the shell's current working
+ * directory -- the user always sees where they are, e.g.
+ * "tikuOS:/sys/device> ".  The cwd string (tiku_shell_cwd_get()) always
+ * starts with '/' and is at most TIKU_SHELL_CWD_SIZE bytes.
+ */
+static void shell_print_prompt(void) {
+    SHELL_PRINTF(SH_GREEN SH_BOLD "tikuOS:%s> " SH_RST, tiku_shell_cwd_get());
+}
+
+#if TIKU_SHELL_CMD_SLIP
+/*
+ * SLIP RX demultiplexer.  While SLIP mode is on the shell shares the UART
+ * with the IP stack: a 0xC0-delimited frame is reassembled (with SLIP
+ * un-escaping) and handed to tiku_kits_net_ipv4_input(); any byte outside a
+ * frame is an ordinary keystroke.  Returns 1 if the byte was consumed as part
+ * of a SLIP frame, 0 if it should fall through to the line editor.
+ */
+static uint8_t shell_net_demux(int ch) {
+    /* END (0xC0) is a frame delimiter, never an open/close parity toggle, and
+     * the byte *after* an END decides frame-vs-console: an IPv4 packet always
+     * begins 0x4N, so a post-END byte that is not 0x4N is console text. This
+     * makes the decoder self-synchronising -- a stray or duplicated END (line
+     * garbage, or the multiple ENDs a port reopen emits) can neither strand the
+     * parser mid-frame nor divert a typed command into the frame buffer.
+     * Returns 1 if the byte was consumed as SLIP, 0 to pass to the line editor. */
+    static uint8_t  armed;     /* saw an END; next byte decides frame vs console */
+    static uint8_t  in_frame;  /* collecting a frame */
+    static uint8_t  esc;
+    static uint16_t flen;
+    static uint8_t  fbuf[TIKU_KITS_NET_MTU];
+    uint8_t b;
+
+    if (ch == TIKU_KITS_NET_SLIP_END) {        /* 0xC0 frame delimiter */
+        if (in_frame && flen > 0) {
+            tiku_kits_net_ipv4_input(fbuf, flen);
+        }
+        in_frame = 0;
+        armed    = 1;          /* a frame *may* follow; the next byte decides */
+        flen     = 0;
+        esc      = 0;
+        return 1;
+    }
+
+    b = (uint8_t)ch;
+
+    if (armed) {               /* first byte after an END */
+        armed = 0;
+        if ((b & 0xF0u) == 0x40u) {            /* IPv4 version nibble -> frame */
+            in_frame = 1;
+        } else {
+            return 0;                          /* stray END -> keystroke */
+        }
+    }
+    if (!in_frame) {
+        return 0;                              /* keystroke -> line editor */
+    }
+    if (esc) {
+        esc = 0;
+        if (b == TIKU_KITS_NET_SLIP_ESC_END)      b = TIKU_KITS_NET_SLIP_END;
+        else if (b == TIKU_KITS_NET_SLIP_ESC_ESC) b = TIKU_KITS_NET_SLIP_ESC;
+        else if (b == TIKU_KITS_NET_SLIP_ESC_NUL) b = 0x00u;
+    } else if (b == TIKU_KITS_NET_SLIP_ESC) {  /* 0xDB */
+        esc = 1;
+        return 1;
+    }
+    if (flen < (uint16_t)sizeof fbuf) {
+        fbuf[flen++] = b;
+    }
+    return 1;
+}
+#endif
 
 #if TIKU_SHELL_CMD_HTIMER
 /*
@@ -450,6 +558,34 @@ static const tiku_shell_cmd_t tiku_shell_commands[] = {
     {"echo",    "Print arguments + newline",   tiku_shell_cmd_echo},
 #endif
 
+    /* ---- Networking ---- */
+#if TIKU_SHELL_CMD_SLIP || TIKU_SHELL_CMD_PING || TIKU_SHELL_CMD_IP ||      \
+    TIKU_SHELL_CMD_NTP || TIKU_SHELL_CMD_DNS || TIKU_SHELL_CMD_SYSLOG ||    \
+    TIKU_SHELL_CMD_MQTT
+    CMD_CATEGORY("Networking"),
+#endif
+#if TIKU_SHELL_CMD_SLIP
+    {"slip",    "Hand the UART to SLIP/IP net", tiku_shell_cmd_slip},
+#endif
+#if TIKU_SHELL_CMD_PING
+    {"ping",    "ICMP echo a host over SLIP",   tiku_shell_cmd_ping},
+#endif
+#if TIKU_SHELL_CMD_IP
+    {"ip",      "Print the device IPv4 address", tiku_shell_cmd_ip},
+#endif
+#if TIKU_SHELL_CMD_NTP
+    {"ntp",     "Fetch network time (SNTP)",   tiku_shell_cmd_ntp},
+#endif
+#if TIKU_SHELL_CMD_DNS
+    {"dns",     "Resolve a hostname (A record)", tiku_shell_cmd_dns},
+#endif
+#if TIKU_SHELL_CMD_SYSLOG
+    {"syslog",  "Send a remote log line (514)", tiku_shell_cmd_syslog},
+#endif
+#if TIKU_SHELL_CMD_MQTT
+    {"mqtt",    "Connect/publish to an MQTT broker", tiku_shell_cmd_mqtt},
+#endif
+
     /* ---- Hardware ---- */
     CMD_CATEGORY("Hardware"),
 #if TIKU_SHELL_CMD_GPIO
@@ -481,6 +617,9 @@ static const tiku_shell_cmd_t tiku_shell_commands[] = {
 #endif
 #if TIKU_SHELL_CMD_WAKE
     {"wake",    "Show active wake sources",    tiku_shell_cmd_wake},
+#endif
+#if TIKU_SHELL_CMD_FREQ
+    {"freq",    "Show/set CPU core frequency", tiku_shell_cmd_freq},
 #endif
 
     /* ---- Boot ---- */
@@ -645,6 +784,246 @@ shell_history_arrow(uint8_t up)
 }
 #endif /* TIKU_SHELL_CMD_HISTORY */
 
+/*---------------------------------------------------------------------------*/
+/* TAB COMPLETION                                                            */
+/*---------------------------------------------------------------------------*/
+
+/* VFS path completion is available whenever a path-consuming command (and
+ * therefore the VFS + cwd resolver) is linked in.  Without it, Tab still
+ * completes command names against the table. */
+#if TIKU_SHELL_CMD_READ || TIKU_SHELL_CMD_LS || TIKU_SHELL_CMD_CD ||         \
+    TIKU_SHELL_CMD_WRITE || TIKU_SHELL_CMD_WATCH
+#define SHELL_TAB_VFS 1
+#include <kernel/vfs/tiku_vfs.h>
+#include "tiku_shell_cwd.h"
+#endif
+
+/** @brief Length of a NUL-terminated string (libc-free, byte-bounded). */
+static uint8_t
+tab_strlen(const char *s)
+{
+    uint8_t n = 0;
+    while (s[n] != '\0') {
+        n++;
+    }
+    return n;
+}
+
+/** @brief 1 if @p s begins with the first @p n bytes of @p pfx. */
+static uint8_t
+tab_has_prefix(const char *s, const char *pfx, uint8_t n)
+{
+    uint8_t i;
+
+    for (i = 0; i < n; i++) {
+        if (s[i] != pfx[i]) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+/**
+ * @brief Append up to @p n bytes of @p s to the live line and echo them.
+ *
+ * Mirrors the printable-key path: stores into the line buffer (bounded by
+ * TIKU_SHELL_LINE_SIZE) and echoes when the backend wants local echo.
+ */
+static void
+tab_emit(const char *s, uint8_t n)
+{
+    uint8_t k;
+
+    for (k = 0; k < n && cli.pos < TIKU_SHELL_LINE_SIZE - 1; k++) {
+        cli.buf[cli.pos++] = s[k];
+        if (tiku_shell_io_has_echo()) {
+            tiku_shell_io_putc(s[k]);
+        }
+    }
+    cli.buf[cli.pos] = '\0';
+}
+
+/**
+ * @brief Fold one candidate into the running match (count + common prefix).
+ *
+ * Streaming, so completion needs no candidate array: the first match seeds
+ * @p first / @p lcp; each later match shrinks @p lcp to the longest prefix
+ * still shared with the first.
+ */
+static void
+tab_accum(const char *nm, uint8_t is_dir, const char **first,
+          uint8_t *first_dir, uint8_t *count, uint8_t *lcp)
+{
+    if (*count == 0u) {
+        *first     = nm;
+        *first_dir = is_dir;
+        *lcp       = tab_strlen(nm);
+    } else {
+        uint8_t k = 0;
+        while (k < *lcp && nm[k] != '\0' && nm[k] == (*first)[k]) {
+            k++;
+        }
+        *lcp = k;
+    }
+    (*count)++;
+}
+
+/**
+ * @brief Tab-complete the token at the end of the current line.
+ *
+ * The first token (no leading space) completes against the command table;
+ * later tokens complete against the VFS namespace -- the token is split into
+ * a directory part (resolved against the cwd) and a leaf prefix, and the
+ * directory's children supply the candidates.  A unique match is filled in
+ * (with a trailing '/' for a directory, ' ' otherwise); an ambiguous one is
+ * extended to the longest common prefix, and a second Tab (no further
+ * progress) lists the matches and redraws the line.
+ */
+static void
+shell_tab_complete(void)
+{
+    uint8_t     tok_start, tok_len, i;
+    const char *pfx;
+    uint8_t     pfx_len;
+    uint8_t     is_cmd;
+    const char *first     = (const char *)0;
+    uint8_t     first_dir = 0;
+    uint8_t     count     = 0;
+    uint8_t     lcp       = 0;
+#if SHELL_TAB_VFS
+    const tiku_vfs_node_t *dir = (const tiku_vfs_node_t *)0;
+    char                   dirbuf[TIKU_SHELL_CWD_SIZE];
+#endif
+
+    cli.buf[cli.pos] = '\0';
+
+    /* The token under the cursor is the trailing run of non-space bytes
+     * (editing is append-only, so the cursor is always at the end). */
+    tok_start = cli.pos;
+    while (tok_start > 0 && cli.buf[tok_start - 1] != ' ') {
+        tok_start--;
+    }
+    tok_len = (uint8_t)(cli.pos - tok_start);
+    is_cmd  = (uint8_t)(tok_start == 0);
+
+    if (is_cmd) {
+        pfx     = cli.buf + tok_start;
+        pfx_len = tok_len;
+    }
+#if SHELL_TAB_VFS
+    else {
+        const char *tok = cli.buf + tok_start;
+        uint8_t     have_slash = 0, slash_at = 0, j;
+
+        for (i = 0; i < tok_len; i++) {
+            if (tok[i] == '/') {
+                slash_at   = i;
+                have_slash = 1;
+            }
+        }
+        if (!have_slash) {
+            tiku_shell_cwd_resolve(".", dirbuf, sizeof(dirbuf));
+            pfx     = tok;
+            pfx_len = tok_len;
+        } else {
+            char    raw[TIKU_SHELL_CWD_SIZE];
+            uint8_t dlen = (slash_at == 0) ? 1u : slash_at;  /* "/x" -> "/" */
+
+            for (j = 0; j < dlen && j < sizeof(raw) - 1u; j++) {
+                raw[j] = tok[j];
+            }
+            raw[j]  = '\0';
+            tiku_shell_cwd_resolve(raw, dirbuf, sizeof(dirbuf));
+            pfx     = tok + slash_at + 1;
+            pfx_len = (uint8_t)(tok_len - slash_at - 1u);
+        }
+        dir = tiku_vfs_resolve(dirbuf);
+        if (dir == (const tiku_vfs_node_t *)0 || dir->type != TIKU_VFS_DIR) {
+            return;
+        }
+    }
+#else
+    else {
+        return;   /* no VFS in this build: only command names complete */
+    }
+#endif
+
+    /* Pass 1: count matches, remember the first, shrink the common prefix. */
+    if (is_cmd) {
+        const tiku_shell_cmd_t *c;
+
+        for (c = tiku_shell_commands; c->name != (const char *)0; c++) {
+            if (c->handler != (tiku_shell_handler_t)0 &&
+                tab_has_prefix(c->name, pfx, pfx_len)) {
+                tab_accum(c->name, 0, &first, &first_dir, &count, &lcp);
+            }
+        }
+    }
+#if SHELL_TAB_VFS
+    else {
+        uint8_t j;
+
+        for (j = 0; j < dir->child_count; j++) {
+            const tiku_vfs_node_t *ch = &dir->children[j];
+
+            if (tab_has_prefix(ch->name, pfx, pfx_len)) {
+                tab_accum(ch->name,
+                          (uint8_t)(ch->type == TIKU_VFS_DIR),
+                          &first, &first_dir, &count, &lcp);
+            }
+        }
+    }
+#endif
+
+    if (count == 0) {
+        return;                         /* nothing matches */
+    }
+    if (lcp > pfx_len) {
+        tab_emit(first + pfx_len, (uint8_t)(lcp - pfx_len));
+    }
+    if (count == 1) {
+        tab_emit(first_dir ? "/" : " ", 1u);   /* unique: finish the token */
+        return;
+    }
+    if (lcp != pfx_len) {
+        return;                         /* extended; Tab again to list */
+    }
+
+    /* Pass 2: ambiguous with no further common prefix -> list, then redraw. */
+    SHELL_PRINTF("\n");
+    if (is_cmd) {
+        const tiku_shell_cmd_t *c;
+
+        for (c = tiku_shell_commands; c->name != (const char *)0; c++) {
+            if (c->handler != (tiku_shell_handler_t)0 &&
+                tab_has_prefix(c->name, pfx, pfx_len)) {
+                SHELL_PRINTF("  %s", c->name);
+            }
+        }
+    }
+#if SHELL_TAB_VFS
+    else {
+        uint8_t j;
+
+        for (j = 0; j < dir->child_count; j++) {
+            const tiku_vfs_node_t *ch = &dir->children[j];
+
+            if (tab_has_prefix(ch->name, pfx, pfx_len)) {
+                SHELL_PRINTF("  %s%s", ch->name,
+                             (ch->type == TIKU_VFS_DIR) ? "/" : "");
+            }
+        }
+    }
+#endif
+    SHELL_PRINTF("\n");
+    shell_print_prompt();
+    if (tiku_shell_io_has_echo()) {
+        for (i = 0; i < cli.pos; i++) {
+            tiku_shell_io_putc(cli.buf[i]);
+        }
+    }
+}
+
 /**
  * @brief Define the shell process control block.
  *
@@ -744,7 +1123,15 @@ TIKU_PROCESS_THREAD(tiku_shell_process, ev, data)
 
 #if TIKU_SHELL_TCP_ENABLE
     tiku_shell_io_tcp_init();
-    /* Banner deferred until a TCP client connects (see loop below) */
+#if TIKU_SHELL_NET_TEST
+    /* Net-test: the UART is BOTH the local console and the SLIP transport, so
+     * keep it as the default backend now; the telnet backend is installed on
+     * connect (loop below) and reverts to UART on disconnect. */
+    tiku_shell_io_set_backend(&tiku_shell_io_uart);
+#else
+    /* APP=cli telnet-only: no local console; banner deferred until a TCP
+     * client connects (see loop below). */
+#endif
 #else
 #if defined(TIKU_CONSOLE_USB) && !defined(TIKU_CONSOLE_BOTH)
     /* usb: the interactive shell is the RP2350 USB CDC-ACM port. */
@@ -754,6 +1141,18 @@ TIKU_PROCESS_THREAD(tiku_shell_process, ev, data)
      * `both` mode USB just mirrors TIKU_PRINTF output). */
     tiku_shell_io_set_backend(&tiku_shell_io_uart);
 #endif
+#endif
+
+    /* NVM technology label is per-device: MRAM on Apollo, Flash on RP2350,
+     * FRAM on MSP430.  Fall back to the MSP430-era "FRAM" if a device header
+     * has not declared one. */
+#ifndef TIKU_DEVICE_NVM_LABEL
+#define TIKU_DEVICE_NVM_LABEL "FRAM"
+#endif
+
+#if !TIKU_SHELL_TCP_ENABLE || TIKU_SHELL_NET_TEST
+    /* Boot banner: shown whenever there is a local console at boot -- every
+     * non-telnet build, plus net-test (which keeps the UART console). */
     SHELL_PRINTF("\n");
     SHELL_PRINTF(SH_CYAN SH_BOLD);
     SHELL_PRINTF("  ___ _ _         ___  ___\n");
@@ -763,12 +1162,13 @@ TIKU_PROCESS_THREAD(tiku_shell_process, ev, data)
     SHELL_PRINTF(SH_RST SH_DIM "  v%s\n", TIKU_VERSION);
     SHELL_PRINTF("  %s" SH_RST "\n", TIKU_TAGLINE);
     SHELL_PRINTF("\n");
-    SHELL_PRINTF("  " SH_BOLD "%s" SH_RST "  |  SRAM %luB  FRAM %luKB\n",
+    SHELL_PRINTF("  " SH_BOLD "%s" SH_RST "  |  SRAM %luB  %s %luKB\n",
                  TIKU_DEVICE_NAME,
                  (unsigned long)TIKU_DEVICE_RAM_SIZE,
+                 TIKU_DEVICE_NVM_LABEL,
                  (unsigned long)(TIKU_DEVICE_FRAM_SIZE / 1024));
     SHELL_PRINTF(SH_DIM "  Type 'help' for commands." SH_RST "\n\n");
-    SHELL_PRINTF(SH_GREEN SH_BOLD "tikuOS> " SH_RST);
+    shell_print_prompt();
 #endif
 
     tiku_timer_set_event(&cli.timer, TIKU_SHELL_POLL_TICKS);
@@ -799,16 +1199,29 @@ TIKU_PROCESS_THREAD(tiku_shell_process, ev, data)
 #if TIKU_SHELL_TCP_ENABLE
         /* --- TCP connection lifecycle --- */
         if (!tiku_shell_io_tcp_is_connected()) {
-            /* Not connected — if we were, clear the backend */
+            /* No telnet client connected. */
             if (tiku_shell_io_get_backend() == &tiku_shell_io_tcp) {
+#if TIKU_SHELL_NET_TEST
+                /* Net-test: the shell still owns the UART (console + SLIP
+                 * transport), so revert to UART rather than going dark. */
+                tiku_shell_io_set_backend(&tiku_shell_io_uart);
+#else
                 tiku_shell_io_set_backend((void *)0);
+#endif
                 cli.pos = 0;
             }
+#if !TIKU_SHELL_NET_TEST
+            /* APP=cli telnet-only: idle until a client connects (a dedicated
+             * net process services the SLIP transport meanwhile). */
             tiku_timer_reset(&cli.timer);
             continue;
+#endif
+            /* Net-test falls through: the input drain below keeps pumping the
+             * UART SLIP demux -- the transport for ping/udp/tcp/telnet. */
         }
         /* New connection arrived — install backend and show banner */
-        if (tiku_shell_io_get_backend() != &tiku_shell_io_tcp) {
+        if (tiku_shell_io_tcp_is_connected() &&
+            tiku_shell_io_get_backend() != &tiku_shell_io_tcp) {
             tiku_shell_io_set_backend(&tiku_shell_io_tcp);
             cli.pos = 0;
             SHELL_PRINTF("\n");
@@ -823,7 +1236,7 @@ TIKU_PROCESS_THREAD(tiku_shell_process, ev, data)
             SHELL_PRINTF("  " SH_BOLD "%s" SH_RST "  |  Telnet Shell\n",
                          TIKU_DEVICE_NAME);
             SHELL_PRINTF(SH_DIM "  Type 'help' for commands." SH_RST "\n\n");
-            SHELL_PRINTF(SH_GREEN SH_BOLD "tikuOS> " SH_RST);
+            shell_print_prompt();
             tiku_shell_io_tcp_flush();
         }
 #endif
@@ -832,12 +1245,47 @@ TIKU_PROCESS_THREAD(tiku_shell_process, ev, data)
          * /sys/timer/count see it as active during execution. */
         tiku_timer_reset(&cli.timer);
 
-        /* Drain all available characters from the backend */
+#if TIKU_SHELL_TCP_ENABLE && TIKU_SHELL_NET_TEST && TIKU_SHELL_CMD_SLIP
+        /* Net-test telnet: the UART is the SLIP transport carrying the telnet
+         * TCP, but a connected client makes the TCP backend active -- so the
+         * per-backend drain below stops reading the UART, which would starve
+         * telnet RX.  Pump the UART through the SLIP demux here so the telnet
+         * transport keeps flowing; console keystrokes are dropped while the
+         * remote client owns the line editor. */
+        if (tiku_shell_cmd_slip_active() &&
+            tiku_shell_io_get_backend() == &tiku_shell_io_tcp) {
+            while (tiku_shell_io_uart.rx_ready()) {
+                int uch = tiku_shell_io_uart.getc();
+                if (uch < 0) {
+                    break;
+                }
+                (void)shell_net_demux(uch);
+            }
+        }
+#endif
+
+        /* Drain all available characters from the backend.  In SLIP mode the
+         * shell shares the UART: complete 0xC0 frames are routed to the IP
+         * stack, while ordinary keystrokes still reach the line editor below. */
         while (tiku_shell_io_rx_ready()) {
             ch = tiku_shell_io_getc();
             if (ch < 0) {
                 break;
             }
+#if TIKU_SHELL_CMD_SLIP
+            if (tiku_shell_cmd_slip_active()
+#if TIKU_SHELL_TCP_ENABLE
+                /* When a telnet client owns the line editor, getc() returns
+                 * its TCP bytes -- those are NOT SLIP frames, so must not go
+                 * to the demux (which is mid-frame for the UART transport and
+                 * would swallow them).  The UART SLIP transport is drained
+                 * separately above. */
+                && tiku_shell_io_get_backend() != &tiku_shell_io_tcp
+#endif
+                && shell_net_demux(ch)) {
+                continue;
+            }
+#endif
 
 #if TIKU_SHELL_CMD_WATCH
             /* A live watch is streaming: keystrokes are routed to
@@ -848,8 +1296,8 @@ TIKU_PROCESS_THREAD(tiku_shell_process, ev, data)
             if (tiku_shell_cmd_watch_active()) {
                 if (ch == 0x03) {
                     tiku_shell_cmd_watch_cancel();
-                    SHELL_PRINTF("^C\n" SH_GREEN SH_BOLD
-                                 "tikuOS> " SH_RST);
+                    SHELL_PRINTF("^C\n");
+                    shell_print_prompt();
                 }
                 continue;
             }
@@ -890,7 +1338,34 @@ TIKU_PROCESS_THREAD(tiku_shell_process, ev, data)
                 }
                 cli.pos      = 0;
                 cli.hist_age = -1;
-                SHELL_PRINTF(SH_GREEN SH_BOLD "tikuOS> " SH_RST);
+                /* Async net commands (ping/ntp) stream output and restore the
+                 * prompt when they finish -- don't print a stray one now. */
+                {
+                    uint8_t streaming = 0;
+#if TIKU_SHELL_CMD_PING
+                    if (tiku_shell_cmd_ping_active()) {
+                        streaming = 1;
+                    }
+#endif
+#if TIKU_SHELL_CMD_NTP
+                    if (tiku_shell_cmd_ntp_active()) {
+                        streaming = 1;
+                    }
+#endif
+#if TIKU_SHELL_CMD_DNS
+                    if (tiku_shell_cmd_dns_active()) {
+                        streaming = 1;
+                    }
+#endif
+#if TIKU_SHELL_CMD_MQTT
+                    if (tiku_shell_cmd_mqtt_active()) {
+                        streaming = 1;
+                    }
+#endif
+                    if (!streaming) {
+                        shell_print_prompt();
+                    }
+                }
 
             } else if (ch == '\b' || ch == 127) {
                 /* Backspace */
@@ -913,7 +1388,13 @@ TIKU_PROCESS_THREAD(tiku_shell_process, ev, data)
 #endif
                 cli.pos      = 0;
                 cli.hist_age = -1;
-                SHELL_PRINTF("^C\n" SH_GREEN SH_BOLD "tikuOS> " SH_RST);
+                SHELL_PRINTF("^C\n");
+                shell_print_prompt();
+
+            } else if (ch == '\t') {
+                /* Tab: complete the command name (first token) or a VFS
+                 * path (later tokens) against the table / namespace. */
+                shell_tab_complete();
 
             } else if (cli.pos < TIKU_SHELL_LINE_SIZE - 1) {
                 /* Printable character — store and optionally echo.
@@ -943,7 +1424,49 @@ TIKU_PROCESS_THREAD(tiku_shell_process, ev, data)
          * mode. */
         tiku_shell_cmd_watch_tick();
 #endif
+#if TIKU_SHELL_CMD_PING
+        /* Service an active ping run: send/await probes across ticks.  When
+         * the run completes the mode clears and we restore the prompt. */
+        if (tiku_shell_cmd_ping_active()) {
+            tiku_shell_cmd_ping_tick();
+            if (!tiku_shell_cmd_ping_active()) {
+                shell_print_prompt();
+            }
+        }
+#endif
+#if TIKU_SHELL_CMD_NTP
+        /* Service an active NTP query: poll for the reply across ticks. */
+        if (tiku_shell_cmd_ntp_active()) {
+            tiku_shell_cmd_ntp_tick();
+            if (!tiku_shell_cmd_ntp_active()) {
+                shell_print_prompt();
+            }
+        }
+#endif
+#if TIKU_SHELL_CMD_DNS
+        /* Service an active DNS query: poll for the reply across ticks. */
+        if (tiku_shell_cmd_dns_active()) {
+            tiku_shell_cmd_dns_tick();
+            if (!tiku_shell_cmd_dns_active()) {
+                shell_print_prompt();
+            }
+        }
+#endif
+#if TIKU_SHELL_CMD_MQTT
+        /* Service an active MQTT op: pace mqtt_periodic + act on the event. */
+        if (tiku_shell_cmd_mqtt_active()) {
+            tiku_shell_cmd_mqtt_tick();
+            if (!tiku_shell_cmd_mqtt_active()) {
+                shell_print_prompt();
+            }
+        }
+#endif
 
+#if TIKU_SHELL_NET_TEST && TIKU_KITS_NET_TCP_ENABLE
+        /* Drive TCP timers/retransmits for the net-test server (the shell's
+         * slip demux delivers RX; this handles the time-based side). */
+        tiku_kits_net_tcp_periodic();
+#endif
 #if TIKU_SHELL_TCP_ENABLE
         tiku_shell_io_tcp_flush();
 #endif
@@ -969,8 +1492,31 @@ TIKU_PROCESS_THREAD(tiku_shell_process, ev, data)
 void tiku_shell_init(void)
 {
     tiku_process_register("Shell", &tiku_shell_process);
-#if TIKU_SHELL_TCP_ENABLE
+#if TIKU_SHELL_TCP_ENABLE && !TIKU_SHELL_NET_TEST
+    /* APP=cli telnet model: a dedicated net process owns the UART RX + SLIP.
+     * In net-test mode the shell owns RX via its demux (and the net process is
+     * not even compiled), so skip this -- see the net-test block below. */
     extern struct tiku_process tiku_kits_net_process;
     tiku_process_register("Net", &tiku_kits_net_process);
+#endif
+#if TIKU_SHELL_NET_TEST
+    /* Net test servers for the TikuBench net suite (Ambiq has no APP=net):
+     * init UDP (built-in echo on port 7) + TCP, and register the CoAP server.
+     * The shell's `slip` demux feeds tiku_kits_net_ipv4_input(), which then
+     * dispatches to these -- so the device answers the suite's UDP/TCP/CoAP
+     * tests over SLIP.  No net process (the shell owns UART RX). */
+    tiku_kits_net_udp_init();
+#if TIKU_KITS_NET_TCP_ENABLE
+    /* The telnet listener (port 23, when TIKU_SHELL_TCP_ENABLE) is started by
+     * the shell process itself once the stack is up -- see the process body
+     * above.  RX reaches it through the slip demux -> ipv4_input -> tcp_input. */
+    tiku_kits_net_tcp_init();
+#endif
+#if defined(TIKU_KITS_NET_COAP)
+    {
+        extern struct tiku_process tiku_kits_net_coap_process;
+        tiku_process_register("CoAP", &tiku_kits_net_coap_process);
+    }
+#endif
 #endif
 }
