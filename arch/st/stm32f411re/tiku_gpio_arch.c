@@ -22,40 +22,6 @@
 /* Per-pin direct helpers                                                    */
 /*---------------------------------------------------------------------------*/
 
-/*
- * Board-level helpers and non-GPIO peripherals use the STM32's native
- * bank/pin numbering (PA..PD, pin 0..15). The platform-agnostic GPIO HAL
- * keeps the shell/VFS contract of 8 pins per port, so the HAL entry points
- * below translate virtual port+pin pairs before touching the hardware.
- */
-static int
-stm32f411_gpio_virtual_resolve(uint8_t port, uint8_t pin,
-                               uint8_t *phys_port, uint8_t *phys_pin)
-{
-    if (pin > 7U || phys_port == (uint8_t *)0 || phys_pin == (uint8_t *)0) {
-        return -1;
-    }
-
-    switch (port) {
-    case 1U:
-    case 3U:
-    case 5U:
-    case 7U:
-        *phys_port = (uint8_t)(((port - 1U) / 2U) + 1U);
-        *phys_pin  = pin;
-        return 0;
-    case 2U:
-    case 4U:
-    case 6U:
-    case 8U:
-        *phys_port = (uint8_t)(((port - 2U) / 2U) + 1U);
-        *phys_pin  = (uint8_t)(pin + 8U);
-        return 0;
-    default:
-        return -1;
-    }
-}
-
 static GPIO_TypeDef *stm32f411_gpio_from_base(uint32_t gpio_base)
 {
     return (GPIO_TypeDef *)(uintptr_t)gpio_base;
@@ -133,7 +99,8 @@ int8_t tiku_gpio_arch_set_output(uint8_t port, uint8_t pin)
     uint8_t phys_port;
     uint8_t phys_pin;
 
-    if (stm32f411_gpio_virtual_resolve(port, pin, &phys_port, &phys_pin) != 0) {
+    if (tiku_stm32f411_gpio_virtual_resolve(port, pin,
+                                            &phys_port, &phys_pin) != 0) {
         return -1;
     }
     return tiku_stm32f411_pinmux_init_output(phys_port, phys_pin);
@@ -144,7 +111,8 @@ int8_t tiku_gpio_arch_set_input(uint8_t port, uint8_t pin)
     uint8_t phys_port;
     uint8_t phys_pin;
 
-    if (stm32f411_gpio_virtual_resolve(port, pin, &phys_port, &phys_pin) != 0) {
+    if (tiku_stm32f411_gpio_virtual_resolve(port, pin,
+                                            &phys_port, &phys_pin) != 0) {
         return -1;
     }
     return tiku_stm32f411_pinmux_init_input(phys_port, phys_pin,
@@ -161,7 +129,8 @@ int8_t tiku_gpio_arch_write(uint8_t port, uint8_t pin, uint8_t val)
     // Get actual port mappings (from virtual ports) and resolve that to GPIO base and RCC bit
     // The mappings to the actual ports are needed to support other peripherals (which use these 
     // mappings for configuration)
-    if (stm32f411_gpio_virtual_resolve(port, pin, &phys_port, &phys_pin) != 0) {
+    if (tiku_stm32f411_gpio_virtual_resolve(port, pin,
+                                            &phys_port, &phys_pin) != 0) {
         return -1;
     }
     if (tiku_stm32f411_pinmux_resolve(phys_port, phys_pin,
@@ -185,7 +154,8 @@ int8_t tiku_gpio_arch_toggle(uint8_t port, uint8_t pin)
     uint8_t phys_port;
     uint8_t phys_pin;
 
-    if (stm32f411_gpio_virtual_resolve(port, pin, &phys_port, &phys_pin) != 0) {
+    if (tiku_stm32f411_gpio_virtual_resolve(port, pin,
+                                            &phys_port, &phys_pin) != 0) {
         return -1;
     }
     if (tiku_stm32f411_pinmux_resolve(phys_port, phys_pin,
@@ -209,7 +179,8 @@ int8_t tiku_gpio_arch_read(uint8_t port, uint8_t pin)
     uint8_t phys_port;
     uint8_t phys_pin;
 
-    if (stm32f411_gpio_virtual_resolve(port, pin, &phys_port, &phys_pin) != 0) {
+    if (tiku_stm32f411_gpio_virtual_resolve(port, pin,
+                                            &phys_port, &phys_pin) != 0) {
         return -1;
     }
     if (tiku_stm32f411_pinmux_resolve(phys_port, phys_pin,
@@ -229,7 +200,8 @@ int8_t tiku_gpio_arch_get_dir(uint8_t port, uint8_t pin)
     uint8_t phys_port;
     uint8_t phys_pin;
 
-    if (stm32f411_gpio_virtual_resolve(port, pin, &phys_port, &phys_pin) != 0) {
+    if (tiku_stm32f411_gpio_virtual_resolve(port, pin,
+                                            &phys_port, &phys_pin) != 0) {
         return -1;
     }
     if (tiku_stm32f411_pinmux_resolve(phys_port, phys_pin,

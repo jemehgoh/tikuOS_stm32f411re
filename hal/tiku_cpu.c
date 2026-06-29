@@ -286,9 +286,8 @@ tiku_cpu_idle_enter_t tiku_cpu_idle_hook(tiku_cpu_idle_mode_t mode) {
         case TIKU_CPU_IDLE_OFF:
         default:
             return NULL;
-    }            
+    }
 #elif defined(PLATFORM_AMBIQ)
->>>>>>> main
     switch (mode) {
         case TIKU_CPU_IDLE_LIGHT:
         case TIKU_CPU_IDLE_DEEP:
