@@ -7,11 +7,25 @@
  *
  * tiku_vfs_tree_data.c - /data VFS nodes (user-data / persisted state)
  *
- * Bridges the Tiku BASIC program store to /data/basic so programs
- * can be saved and loaded through the VFS: `read /data/basic`
- * lists the stored program, writing replaces it.  The heavy
- * lifting (tokenising, FRAM arena management) lives in
- * kernel/shell/basic/; this module is only signature glue.
+ * /data is a DYNAMIC directory backed by the Tiku File Store (kernel/fs):
+ * arbitrary files can be created, written, read, listed and deleted at run
+ * time and are kept in NVM.  So:
+ *
+ *   write /data/blink.bas "10 LED 0,1 : ..."   # create / overwrite
+ *   ls /data                                    # list files
+ *   cat /data/blink.bas                         # read
+ *
+ * The file store sits on the carved NVM region's filesystem extent and is
+ * durable on both NVM families:
+ *   - MSP430: a `.persistent` FRAM array, written in place.
+ *   - Ambiq : the FS extent of the memory-mapped NVM region -- read in place
+ *             (no SRAM shadow), written via the region backend (MRAM bootrom),
+ *             so files survive a power cut.  Sized in megabytes (see
+ *             TIKU_NVMFS_FS_BYTES / TIKU_TFS_MAX_FILES), between the NVM tier's
+ *             bump extent (front) and the reserved durable tail.
+ *   - else  : plain `.bss` (functional but volatile) until a backend lands.
+ * When BASIC is built, the legacy /data/basic bridge to the interpreter's
+ * program store is kept as a static child.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -35,89 +49,278 @@
 #include "tiku_vfs_tree_data.h"
 #include "tiku.h"
 
-#if defined(TIKU_SHELL_ENABLE) && TIKU_SHELL_CMD_BASIC
+#if defined(TIKU_SHELL_ENABLE)
 
+#include <string.h>
+
+#include "kernel/fs/tiku_tfs.h"
+#include <kernel/memory/tiku_mem.h>      /* tiku_mpu_(un)lock_nvm, tiku_tier_nvm_write */
+#include "kernel/memory/tiku_nvm_region.h"
+
+#if TIKU_SHELL_CMD_BASIC
 #include "kernel/shell/basic/tiku_basic.h"
+#endif
 
 /*---------------------------------------------------------------------------*/
-/* /data — user-data / persisted-state file nodes                            */
+/* NVM-BACKED FILE STORE FOR /data                                           */
 /*---------------------------------------------------------------------------*/
 
-/*
- * Wrap the BASIC bridge in tiku_vfs handler signatures (size_t vs
- * unsigned int — same type on every TikuOS target but spelled
- * differently in the two headers).
- */
+/* The store's NVM home.  Ambiq: the FS extent of the carved NVM region (durable
+ * MRAM, read in place, written via the region backend) -- no SRAM array.
+ * RP2350: the FS extent of the carved Flash region (read in place via XIP,
+ * written via the Flash region backend).  MSP430: a `.persistent` FRAM array
+ * (in place).  Other parts: plain `.bss` (volatile) until a backend lands. */
+#if defined(PLATFORM_AMBIQ) || defined(PLATFORM_RP2350)
 
-/**
- * @brief Read handler for /data/basic.
- *
- * Renders the stored BASIC program listing into @p buf via
- * tiku_basic_vfs_read().  An empty store renders nothing (returns
- * 0 bytes).
- *
- * @param buf  Output buffer for the program text
- * @param max  Capacity of @p buf in bytes
- * @return Bytes written, or -1 on error
- */
+_Static_assert(TIKU_TFS_REGION_BYTES <= TIKU_NVMFS_FS_BYTES,
+               "TFS store larger than the region FS extent");
+
+static tiku_tfs_t          data_fs;
+static tiku_nvm_backend_t  data_be;
+static uint8_t             data_fs_ready;
+
+/* Program through the region backend (MRAM bootrom); it brackets its own NVM
+ * window, so reads stay plain pointer derefs into the FS extent. */
+static int
+data_be_write(tiku_nvm_backend_t *be, size_t off, const void *src, size_t len)
+{
+    return (tiku_tier_nvm_write((uint8_t *)be->base + off, src, len)
+            == TIKU_MEM_OK) ? 0 : -1;
+}
+
+static int
+data_tfs_ensure(void)
+{
+    const tiku_nvm_backend_t *rgn;
+
+    if (data_fs_ready) {
+        return 0;
+    }
+    rgn = tiku_nvm_backend_get();
+    if (rgn == NULL || rgn->base == NULL ||
+        rgn->size < (size_t)TIKU_NVMFS_FS_BYTES + TIKU_NVM_RESERVED_BYTES) {
+        return -1;
+    }
+    /* FS extent: between the tier extent (front) and the reserved tail. */
+    data_be.base  = rgn->base +
+        (rgn->size - TIKU_NVMFS_FS_BYTES - TIKU_NVM_RESERVED_BYTES);
+    data_be.size  = TIKU_NVMFS_FS_BYTES;
+    data_be.write = data_be_write;
+    data_be.erase = NULL;
+    data_be.ctx   = NULL;
+    if (tiku_tfs_mount(&data_fs, &data_be) != TFS_OK) {
+        return -1;
+    }
+    data_fs_ready = 1;
+    return 0;
+}
+
+#else  /* MSP430 FRAM / host: a static backing array */
+
+#if defined(PLATFORM_MSP430)
+#define DATA_TFS_SECTION __attribute__((section(".persistent")))
+#else
+#define DATA_TFS_SECTION
+#endif
+
+static DATA_TFS_SECTION uint8_t data_tfs_region[TIKU_TFS_REGION_BYTES];
+static tiku_tfs_t          data_fs;
+static tiku_nvm_backend_t  data_be;
+static uint8_t             data_fs_ready;
+
+static int
+data_be_write(tiku_nvm_backend_t *be, size_t off, const void *src, size_t len)
+{
+    uint16_t mpu = tiku_mpu_unlock_nvm();
+    memcpy(be->base + off, src, len);
+    tiku_mpu_lock_nvm(mpu);
+    return 0;
+}
+
+static int
+data_tfs_ensure(void)
+{
+    if (data_fs_ready) {
+        return 0;
+    }
+    data_be.base  = data_tfs_region;
+    data_be.size  = sizeof data_tfs_region;
+    data_be.write = data_be_write;
+    data_be.erase = NULL;
+    data_be.ctx   = NULL;
+    if (tiku_tfs_mount(&data_fs, &data_be) != TFS_OK) {
+        return -1;
+    }
+    data_fs_ready = 1;
+    return 0;
+}
+
+#endif
+
+/*---------------------------------------------------------------------------*/
+/* DYNAMIC-DIRECTORY OPS — bridge /data to the file store                     */
+/*---------------------------------------------------------------------------*/
+
+typedef struct { tiku_vfs_dyn_list_cb cb; void *ctx; } data_list_w_t;
+
+static void
+data_list_thunk(const char *name, size_t len, void *vw)
+{
+    data_list_w_t *w = (data_list_w_t *)vw;
+    (void)len;
+    w->cb(name, w->ctx);
+}
+
+static void
+data_dyn_list(tiku_vfs_dyn_list_cb cb, void *ctx)
+{
+    data_list_w_t w;
+    if (data_tfs_ensure() != 0) {
+        return;
+    }
+    w.cb = cb;
+    w.ctx = ctx;
+    (void)tiku_tfs_list(&data_fs, data_list_thunk, &w);
+}
+
+static int
+data_dyn_read(const char *name, char *buf, size_t max)
+{
+    size_t n = 0;
+    if (data_tfs_ensure() != 0) {
+        return -1;
+    }
+    if (tiku_tfs_read(&data_fs, name, buf, max, &n) != TFS_OK) {
+        return -1;
+    }
+    return (int)n;
+}
+
+static int
+data_dyn_write(const char *name, const char *buf, size_t len)
+{
+    if (data_tfs_ensure() != 0) {
+        return -1;
+    }
+    return (tiku_tfs_write(&data_fs, name, buf, len) == TFS_OK) ? 0 : -1;
+}
+
+static int
+data_dyn_unlink(const char *name)
+{
+    if (data_tfs_ensure() != 0) {
+        return -1;
+    }
+    return (tiku_tfs_delete(&data_fs, name) == TFS_OK) ? 0 : -1;
+}
+
+/* Folder-aware listing: present the flat store as a tree under @p prefix. */
+static void
+data_dyn_list_dir(const char *prefix, tiku_vfs_dyn_list_cb cb, void *ctx)
+{
+    data_list_w_t w;
+    if (data_tfs_ensure() != 0) {
+        return;
+    }
+    w.cb = cb;
+    w.ctx = ctx;
+    (void)tiku_tfs_list_dir(&data_fs, prefix, data_list_thunk, &w);
+}
+
+static const tiku_vfs_dynops_t data_dynops = {
+    data_dyn_list, data_dyn_read, data_dyn_write, data_dyn_unlink,
+    data_dyn_list_dir
+};
+
+/*---------------------------------------------------------------------------*/
+/* /data/basic — legacy BASIC program bridge (only when BASIC is built)      */
+/*---------------------------------------------------------------------------*/
+
+#if TIKU_SHELL_CMD_BASIC
+
 static int
 data_basic_read(char *buf, size_t max)
 {
     return tiku_basic_vfs_read(buf, (unsigned int)max);
 }
 
-/**
- * @brief Write handler for /data/basic.
- *
- * Feeds program text to tiku_basic_vfs_write(), which tokenises
- * and stores it in the interpreter's FRAM-backed program arena
- * (replacing the current program).
- *
- * @param buf  Program text to store
- * @param len  Text length in bytes
- * @return 0 on success, -1 on parse/store error
- */
 static int
 data_basic_write(const char *buf, size_t len)
 {
     return tiku_basic_vfs_write(buf, (unsigned int)len);
 }
 
-/*---------------------------------------------------------------------------*/
-/* NODE TABLES                                                               */
-/*---------------------------------------------------------------------------*/
-
-/** /data directory table — currently just the BASIC bridge */
 static const tiku_vfs_node_t data_children[] = {
-    { "basic", TIKU_VFS_FILE, data_basic_read, data_basic_write, NULL, 0 },
+    { "basic", TIKU_VFS_FILE, data_basic_read, data_basic_write, NULL, 0, NULL, NULL },
 };
 
-/**
- * The /data directory node itself, fully formed with its name so
- * the root assembly can copy it by value (getter pattern — see
- * tiku_vfs_tree_data_get()).
- */
 static const tiku_vfs_node_t data_node = {
-    "data", TIKU_VFS_DIR, NULL, NULL, data_children,
-    sizeof(data_children) / sizeof(data_children[0])
+    "data", TIKU_VFS_DIR, NULL, NULL,
+    data_children, (uint8_t)(sizeof(data_children) / sizeof(data_children[0])),
+    NULL, &data_dynops
 };
 
+#else  /* no BASIC: /data is purely the dynamic file store */
+
+static const tiku_vfs_node_t data_node = {
+    "data", TIKU_VFS_DIR, NULL, NULL,
+    NULL, 0,
+    NULL, &data_dynops
+};
+
+#endif
+
 /*---------------------------------------------------------------------------*/
-/* PUBLIC FUNCTIONS                                                          */
+/* df SUPPORT — file-store usage stats                                       */
 /*---------------------------------------------------------------------------*/
 
-/**
- * @brief Get the fully-formed /data directory node.
- *
- * See the header for the copy-by-value contract with the root
- * assembly.
- *
- * @return Pointer to the static /data directory node
- */
+typedef struct { uint16_t files; uint32_t bytes; } data_df_acc_t;
+
+static void
+data_df_thunk(const char *name, size_t len, void *vacc)
+{
+    data_df_acc_t *a = (data_df_acc_t *)vacc;
+    (void)name;
+    a->files++;
+    a->bytes += (uint32_t)len;
+}
+
+int
+tiku_vfs_tree_data_df(tiku_data_df_t *out)
+{
+    data_df_acc_t acc;
+
+    acc.files = 0u;
+    acc.bytes = 0u;
+    if (out == NULL || data_tfs_ensure() != 0) {
+        return -1;
+    }
+    (void)tiku_tfs_list(&data_fs, data_df_thunk, &acc);
+    out->used_files = acc.files;
+    out->used_bytes = acc.bytes;
+    out->max_files  = (uint16_t)TIKU_TFS_MAX_FILES;
+    out->slot_bytes = (uint16_t)TIKU_TFS_SLOT_DATA;
+    out->cap_bytes  = (uint32_t)TIKU_TFS_MAX_FILES * (uint32_t)TIKU_TFS_SLOT_DATA;
+#if defined(PLATFORM_AMBIQ)
+    out->backing = "MRAM";
+#elif defined(PLATFORM_MSP430)
+    out->backing = "FRAM";
+#elif defined(PLATFORM_RP2350)
+    out->backing = "Flash";  /* carved QSPI region, erase+program backend */
+#else
+    out->backing = "RAM*";   /* volatile until a backend lands */
+#endif
+    return 0;
+}
+
+/*---------------------------------------------------------------------------*/
+/* PUBLIC                                                                     */
+/*---------------------------------------------------------------------------*/
+
 const tiku_vfs_node_t *
 tiku_vfs_tree_data_get(void)
 {
     return &data_node;
 }
 
-#endif /* TIKU_SHELL_ENABLE && TIKU_SHELL_CMD_BASIC */
+#endif /* TIKU_SHELL_ENABLE */

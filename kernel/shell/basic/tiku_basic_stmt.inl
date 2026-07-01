@@ -394,7 +394,7 @@ exec_input(const char **p)
 static int
 prog_find_label(const char *name, size_t name_len)
 {
-    uint8_t i;
+    uint16_t i;
     size_t  k;
     for (i = 0; i < TIKU_BASIC_PROGRAM_LINES; i++) {
         const char *t;
@@ -1147,6 +1147,91 @@ basic_vfsread(const char *path)
 }
 #endif
 
+#if TIKU_BASIC_RTC_ENABLE
+/* SETTIME <epoch> -- set the wall clock to an absolute Unix timestamp
+ * (seconds). Persisted by the RTC layer, so DATE$/TIME$/NOW read it back
+ * across reboots. Typically fed from an `ntp` fetch or a known constant. */
+static void
+exec_settime(const char **p)
+{
+    long secs = parse_expr(p);
+    if (basic_error) return;
+    if (secs < 0) {
+        basic_error = 1;
+        SHELL_PRINTF(SH_RED "? SETTIME needs a non-negative epoch\n" SH_RST);
+        return;
+    }
+    tiku_rtc_set_seconds((uint32_t)secs);
+}
+#endif
+
+#if TIKU_BASIC_FILE_ENABLE
+/* Whole-file logging to /data (or any writable VFS path). TFS has no append
+ * primitive, so APPEND is read-modify-write bounded by this scratch buffer,
+ * which also caps a file at the TFS slot size on the target. */
+#ifndef TIKU_BASIC_FILE_BUF
+#define TIKU_BASIC_FILE_BUF 2048
+#endif
+static char basic_file_scratch[TIKU_BASIC_FILE_BUF];
+
+/* APPEND "path", expr$ -- append the string plus a newline, preserving the
+ * existing contents. Errors (never silently truncates) if the result would
+ * exceed the scratch buffer / slot. */
+static void
+exec_append(const char **p)
+{
+    char path[48];
+    char val[TIKU_BASIC_STR_BUF_CAP];
+    int  have, vlen, total;
+
+    if (parse_path_literal(p, path, sizeof(path)) != 0) return;
+    skip_ws(p);
+    if (**p != ',') {
+        basic_error = 1; SHELL_PRINTF(SH_RED "? ',' expected\n" SH_RST); return;
+    }
+    (*p)++;
+    if (parse_strexpr(p, val, sizeof(val)) != 0) return;
+
+    have = tiku_vfs_read(path, basic_file_scratch,
+                         (size_t)(TIKU_BASIC_FILE_BUF - 2));
+    if (have < 0) have = 0;                       /* file doesn't exist yet */
+    vlen  = (int)strlen(val);
+    total = have + vlen + 1;                       /* +1 for the newline */
+    if (total > TIKU_BASIC_FILE_BUF) {
+        basic_error = 1;
+        SHELL_PRINTF(SH_RED "? file full (max %d bytes)\n" SH_RST,
+                     (int)TIKU_BASIC_FILE_BUF);
+        return;
+    }
+    memcpy(basic_file_scratch + have, val, (size_t)vlen);
+    basic_file_scratch[have + vlen] = '\n';
+    if (tiku_vfs_write(path, basic_file_scratch, (size_t)total) < 0) {
+        basic_error = 1;
+        SHELL_PRINTF(SH_RED "? write failed: %s\n" SH_RST, path);
+    }
+}
+
+/* FWRITE "path", expr$ -- truncating whole-file write (no trailing newline). */
+static void
+exec_fwrite(const char **p)
+{
+    char path[48];
+    char val[TIKU_BASIC_STR_BUF_CAP];
+
+    if (parse_path_literal(p, path, sizeof(path)) != 0) return;
+    skip_ws(p);
+    if (**p != ',') {
+        basic_error = 1; SHELL_PRINTF(SH_RED "? ',' expected\n" SH_RST); return;
+    }
+    (*p)++;
+    if (parse_strexpr(p, val, sizeof(val)) != 0) return;
+    if (tiku_vfs_write(path, val, strlen(val)) < 0) {
+        basic_error = 1;
+        SHELL_PRINTF(SH_RED "? write failed: %s\n" SH_RST, path);
+    }
+}
+#endif
+
 #if TIKU_BASIC_PEEK_POKE_ENABLE
 static void
 exec_poke(const char **p)
@@ -1192,6 +1277,20 @@ exec_delay_ms(long ms)
     ticks = TIKU_CLOCK_MS_TO_TICKS((unsigned long)ms);
     if (ticks == 0u) return;
     while ((tiku_clock_time_t)(tiku_clock_time() - start) < ticks) {
+#if TIKU_SHELL_CMD_SLIP
+        /* SLIP-aware break check: demux IP frames away so a 0x03 byte inside
+         * network traffic on the shared console UART (e.g. a connection's
+         * teardown after a BROWSE) is not misread as Ctrl-C, and the net stack
+         * is pumped so that teardown completes during the wait. */
+        {
+            int ch = tiku_shell_net_getc();
+            if (ch == BASIC_CTRL_C) {
+                basic_error = 1;
+                SHELL_PRINTF(SH_YELLOW "^C\n" SH_RST);
+                return;
+            }
+        }
+#else
         if (tiku_shell_io_rx_ready()) {
             int ch = tiku_shell_io_getc();
             if (ch == BASIC_CTRL_C) {
@@ -1200,6 +1299,7 @@ exec_delay_ms(long ms)
                 return;
             }
         }
+#endif
     }
 }
 

@@ -110,6 +110,9 @@
 #if TIKU_SHELL_CMD_REBOOT
 #include "commands/tiku_shell_cmd_reboot.h"
 #endif
+#if TIKU_SHELL_CMD_TRNG
+#include "commands/tiku_shell_cmd_trng.h"
+#endif
 #if TIKU_SHELL_CMD_HISTORY
 #include "commands/tiku_shell_cmd_history.h"
 #endif
@@ -136,6 +139,15 @@
 #endif
 #if TIKU_SHELL_CMD_WRITE
 #include "commands/tiku_shell_cmd_write.h"
+#endif
+#if TIKU_SHELL_CMD_FS
+#include "commands/tiku_shell_cmd_fs.h"
+#endif
+#if TIKU_SHELL_CMD_DF
+#include "commands/tiku_shell_cmd_df.h"
+#endif
+#if TIKU_SHELL_CMD_NVMPROBE
+#include "commands/tiku_shell_cmd_nvmprobe.h"
 #endif
 #if TIKU_SHELL_CMD_READ
 #include "commands/tiku_shell_cmd_read.h"
@@ -377,6 +389,56 @@ static uint8_t shell_net_demux(int ch) {
     }
     return 1;
 }
+
+/*
+ * Drain the shared UART through the SLIP demux on behalf of a blocking
+ * builtin (e.g. BASIC HTTPGET$) that has taken over the shell loop.  While
+ * such a builtin busy-waits, the main loop's demux is not running, so without
+ * this incoming SLIP frames (DNS reply, TCP/TLS data) are never delivered to
+ * the IP stack.  Crucially it reuses shell_net_demux, whose frame buffer is
+ * static: a frame that arrives across many calls (the bytes trickle in at the
+ * line rate, far slower than this is polled) is reassembled correctly, rather
+ * than being shredded the way a caller-local accumulator would.
+ */
+void
+tiku_shell_net_pump(void)
+{
+    int ch;
+    while (tiku_shell_io_rx_ready()) {
+        ch = tiku_shell_io_getc();
+        if (ch < 0) {
+            break;
+        }
+        (void)shell_net_demux(ch);
+    }
+}
+
+/*
+ * SLIP-aware non-blocking getc -- see the header.  A blocking builtin that
+ * reads the keyboard while a SLIP link is up (the BASIC REPL / INPUT after a
+ * BROWSE) calls this instead of tiku_shell_io_getc(): it routes SLIP frame
+ * bytes (a closed connection's lingering teardown / retransmits) into the IP
+ * stack, where they are consumed and ACKed, rather than letting them land in
+ * the line editor as garbage and wedge the console.  Only bytes the demux
+ * classifies as console (return 0) are handed back; if SLIP is not currently
+ * active every byte is a keystroke, so it behaves like a plain getc.
+ */
+int
+tiku_shell_net_getc(void)
+{
+    int ch;
+    while (tiku_shell_io_rx_ready()) {
+        ch = tiku_shell_io_getc();
+        if (ch < 0) {
+            break;
+        }
+        if (tiku_shell_cmd_slip_active() && shell_net_demux(ch)) {
+            continue;          /* consumed as a SLIP frame byte, not input */
+        }
+        return ch;             /* genuine console keystroke */
+    }
+    return -1;
+}
 #endif
 
 #if TIKU_SHELL_CMD_HTIMER
@@ -454,11 +516,14 @@ static const tiku_shell_cmd_t tiku_shell_commands[] = {
 #if TIKU_SHELL_CMD_REBOOT
     {"reboot",  "System reset",                tiku_shell_cmd_reboot},
 #endif
+#if TIKU_SHELL_CMD_TRNG
+    {"trng",    "Dump hardware TRNG bytes",    tiku_shell_cmd_trng},
+#endif
 #if TIKU_SHELL_CMD_HISTORY
     {"history", "Last N commands from FRAM",   tiku_shell_cmd_history},
 #endif
 #if TIKU_SHELL_CMD_WIFI
-    {"wifi",    "CYW43 WiFi: status|scan|list", tiku_shell_cmd_wifi},
+    {"wifi",    "CYW43 WiFi: scan/connect/up/status", tiku_shell_cmd_wifi},
 #endif
 #if TIKU_SHELL_CMD_BT
     {"bt",      "CYW43 BT: status",             tiku_shell_cmd_bt},
@@ -532,6 +597,20 @@ static const tiku_shell_cmd_t tiku_shell_commands[] = {
 #endif
 #if TIKU_SHELL_CMD_WRITE
     {"write",   "Write a VFS node",            tiku_shell_cmd_write},
+#endif
+#if TIKU_SHELL_CMD_FS
+    {"rm",      "Delete a /data file",         tiku_shell_cmd_rm},
+    {"touch",   "Create an empty /data file",  tiku_shell_cmd_touch},
+    {"mkdir",   "Create a /data folder",       tiku_shell_cmd_mkdir},
+    {"rmdir",   "Remove an empty /data folder", tiku_shell_cmd_rmdir},
+    {"recv",    "Receive a file: recv <p> <n>", tiku_shell_cmd_recv},
+    {"send",    "Send a file: send <p>",       tiku_shell_cmd_send},
+#endif
+#if TIKU_SHELL_CMD_DF
+    {"df",      "/data file-store usage",      tiku_shell_cmd_df},
+#endif
+#if TIKU_SHELL_CMD_NVMPROBE
+    {"nvmprobe","Carved NVM region diagnostic", tiku_shell_cmd_nvmprobe},
 #endif
 #if TIKU_SHELL_CMD_NAME
     {"name",    "Read/set device name",        tiku_shell_cmd_name},

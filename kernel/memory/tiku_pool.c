@@ -48,6 +48,7 @@
 
 #include "tiku_mem.h"
 #include <stddef.h>
+#include <string.h>
 
 /*---------------------------------------------------------------------------*/
 /* PRIVATE HELPERS                                                           */
@@ -65,6 +66,11 @@
 static tiku_mem_arch_size_t align_up(tiku_mem_arch_size_t size)
 {
     const tiku_mem_arch_size_t mask = TIKU_MEM_ARCH_ALIGNMENT - 1U;
+    /* Saturate instead of wrapping to 0 on a near-max request (16-bit on
+     * MSP430), so the caller's capacity check rejects it cleanly. */
+    if (size > (tiku_mem_arch_size_t)(~(tiku_mem_arch_size_t)0 - mask)) {
+        return (tiku_mem_arch_size_t)(~(tiku_mem_arch_size_t)0 & ~mask);
+    }
     return (size + mask) & ~mask;
 }
 
@@ -107,22 +113,109 @@ static tiku_mem_arch_size_t min_block_size(void)
  *
  * @param pool   Pool whose freelist to build
  */
+/*
+ * Write one freelist "next" pointer into a block, honouring the backing.
+ * An NVM-tier pool (pool->nvm) routes the word through tiku_tier_nvm_write()
+ * -- the bootrom program op on MRAM, the flash program on RP2350, an in-place
+ * store on FRAM -- because a direct CPU store would bus-fault on program-op
+ * NVM. An SRAM pool stores directly (the hot path, unchanged).
+ */
+static void pool_write_next(const tiku_pool_t *pool, void *block, void *next)
+{
+    if (pool->nvm) {
+        (void)tiku_tier_nvm_write(block, &next,
+                                  (tiku_mem_arch_size_t)sizeof(next));
+    } else {
+        *(void **)(void *)block = next;
+    }
+}
+
+/*
+ * Program-op NVM (carved MRAM / RP2350 Flash) is written a whole erase granule
+ * at a time, so routing each freelist "next" pointer through pool_write_next()
+ * one block at a time erases+reprograms a block's sector once PER block -- a
+ * pool whose blocks share a sector erases it ~block_count times just at create.
+ * Stage a run of whole blocks in SRAM, overlay every next-pointer in the run,
+ * and write the run in a single tiku_tier_nvm_write(): the region backend then
+ * coalesces to one erase per sector. Only program-op parts need this (and have
+ * the SRAM for it); MSP430 FRAM / host write in place, so they keep the simple
+ * per-block path below.
+ */
+#if defined(PLATFORM_AMBIQ) || defined(PLATFORM_RP2350)
+#define TIKU_POOL_NVM_BATCH 1
+#ifndef TIKU_POOL_NVM_STAGE_BYTES
+#define TIKU_POOL_NVM_STAGE_BYTES 4096u   /* one RP2350 flash erase granule */
+#endif
+static uint8_t pool_nvm_stage[TIKU_POOL_NVM_STAGE_BYTES];
+
+static void build_freelist_nvm(tiku_pool_t *pool)
+{
+    const tiku_mem_arch_size_t bs = pool->block_size;
+    const tiku_mem_arch_size_t n  = pool->block_count;
+    tiku_mem_arch_size_t i;
+
+    /* A block at least a stage wide already owns its sector(s): a per-block
+     * pointer write is one erase each, with nothing to coalesce. */
+    if (bs > (tiku_mem_arch_size_t)TIKU_POOL_NVM_STAGE_BYTES) {
+        for (i = 0; i < n; i++) {
+            uint8_t *blk = pool->buf + (i * bs);
+            void *next = (i + 1U < n) ? (void *)(blk + bs) : NULL;
+            (void)tiku_tier_nvm_write(blk, &next,
+                                      (tiku_mem_arch_size_t)sizeof(next));
+        }
+        return;
+    }
+
+    /* Small blocks share sectors: write a run of whole blocks per call. */
+    {
+        const tiku_mem_arch_size_t per =
+            (tiku_mem_arch_size_t)TIKU_POOL_NVM_STAGE_BYTES / bs;   /* >= 1 */
+        for (i = 0; i < n; i += per) {
+            tiku_mem_arch_size_t cnt  = (n - i < per) ? (n - i) : per;
+            tiku_mem_arch_size_t span = cnt * bs;
+            uint8_t *base = pool->buf + (i * bs);
+            tiku_mem_arch_size_t j;
+
+            /* Seed the run with its current NVM bytes so block payloads we do
+             * not touch survive the write, then overlay each next-pointer. */
+            memcpy(pool_nvm_stage, base, span);
+            for (j = 0; j < cnt; j++) {
+                tiku_mem_arch_size_t gi = i + j;
+                void *next = (gi + 1U < n)
+                             ? (void *)(pool->buf + ((gi + 1U) * bs)) : NULL;
+                memcpy(pool_nvm_stage + (j * bs), &next, sizeof(next));
+            }
+            (void)tiku_tier_nvm_write(base, pool_nvm_stage, span);
+        }
+    }
+}
+#else
+#define TIKU_POOL_NVM_BATCH 0
+#endif /* program-op NVM batch */
+
 static void build_freelist(tiku_pool_t *pool)
 {
     tiku_mem_arch_size_t i;
     uint8_t *block;
-    void **next_ptr;
+
+#if TIKU_POOL_NVM_BATCH
+    /* NVM-tier pool on program-op NVM: build the freelist a run at a time so
+     * each sector is erased once, not once per block (see build_freelist_nvm). */
+    if (pool->nvm) {
+        build_freelist_nvm(pool);
+        pool->free_head = pool->buf;
+        return;
+    }
+#endif
 
     for (i = 0; i < pool->block_count - 1U; i++) {
-        block    = pool->buf + (i * pool->block_size);
-        next_ptr = (void **)(void *)block;
-        *next_ptr = block + pool->block_size;
+        block = pool->buf + (i * pool->block_size);
+        pool_write_next(pool, block, block + pool->block_size);
     }
 
     /* Last block terminates the list */
-    block    = pool->buf + ((pool->block_count - 1U) * pool->block_size);
-    next_ptr = (void **)(void *)block;
-    *next_ptr = NULL;
+    block = pool->buf + ((pool->block_count - 1U) * pool->block_size);
+    pool_write_next(pool, block, NULL);
 
     pool->free_head = pool->buf;
 }
@@ -173,6 +266,7 @@ tiku_mem_err_t tiku_pool_create_raw(tiku_pool_t *pool, uint8_t *buf,
     pool->peak_count  = 0;
     pool->id          = 0;
     pool->active      = 1;
+    pool->nvm         = 0;
     pool->tier        = TIKU_MEM_SRAM;
 
     build_freelist(pool);
@@ -238,9 +332,51 @@ tiku_mem_err_t tiku_pool_create(tiku_pool_t *pool, uint8_t *buf,
     pool->peak_count  = 0;
     pool->id          = id;
     pool->active      = 1;
+    pool->nvm         = 0;
     pool->tier        = TIKU_MEM_SRAM; /* Default; tier allocator overrides */
 
     build_freelist(pool);
+
+    return TIKU_MEM_OK;
+}
+
+/*
+ * NVM-backed pool init. Mirrors tiku_pool_create() but marks pool->nvm so the
+ * embedded freelist is laid out (and later push/pop maintained) through
+ * tiku_tier_nvm_write() -- the bootrom program op on MRAM, the flash program on
+ * RP2350, an in-place store on FRAM. A direct CPU store into program-op NVM
+ * bus-faults, so this is the only correct path there. The tier allocator
+ * (tiku_tier_pool_create) calls this for TIKU_MEM_NVM pools.
+ */
+tiku_mem_err_t tiku_pool_create_nvm(tiku_pool_t *pool, uint8_t *buf,
+                                     tiku_mem_arch_size_t block_size,
+                                     tiku_mem_arch_size_t block_count,
+                                     uint8_t id)
+{
+    tiku_mem_arch_size_t aligned_size;
+    tiku_mem_arch_size_t min_size;
+
+    if (pool == NULL || buf == NULL || block_count == 0) {
+        return TIKU_MEM_ERR_INVALID;
+    }
+
+    aligned_size = align_up(block_size);
+    min_size     = min_block_size();
+    if (aligned_size < min_size) {
+        aligned_size = min_size;
+    }
+
+    pool->buf         = buf;
+    pool->block_size  = aligned_size;
+    pool->block_count = block_count;
+    pool->used_count  = 0;
+    pool->peak_count  = 0;
+    pool->id          = id;
+    pool->active      = 1;
+    pool->nvm         = 1;
+    pool->tier        = TIKU_MEM_NVM;
+
+    build_freelist(pool);   /* writes route through tiku_tier_nvm_write() */
 
     return TIKU_MEM_OK;
 }
@@ -306,7 +442,6 @@ tiku_mem_err_t tiku_pool_free(tiku_pool_t *pool, void *ptr)
 {
     uint8_t *block;
     tiku_mem_arch_size_t offset;
-    void **next_ptr;
 
     if (pool == NULL || !pool->active || ptr == NULL) {
         return TIKU_MEM_ERR_INVALID;
@@ -331,9 +466,12 @@ tiku_mem_err_t tiku_pool_free(tiku_pool_t *pool, void *ptr)
      * Poison freed block to catch use-after-free during development.
      * The first sizeof(void *) bytes are used for the freelist pointer,
      * so poison only the remaining bytes. 0xDE is a recognizable
-     * pattern in hex dumps ("dead").
+     * pattern in hex dumps ("dead"). Skipped for NVM-tier pools: a direct
+     * CPU store bus-faults on program-op NVM (MRAM/Flash), and poisoning
+     * through the region program op would erase+reprogram the block's sector
+     * on every free.
      */
-    {
+    if (!pool->nvm) {
         tiku_mem_arch_size_t ptr_bytes;
         tiku_mem_arch_size_t i;
 
@@ -344,9 +482,8 @@ tiku_mem_err_t tiku_pool_free(tiku_pool_t *pool, void *ptr)
     }
 #endif
 
-    /* Push onto freelist head */
-    next_ptr  = (void **)(void *)block;
-    *next_ptr = pool->free_head;
+    /* Push onto freelist head (NVM-aware: program op on MRAM/Flash) */
+    pool_write_next(pool, block, pool->free_head);
     pool->free_head = block;
 
     pool->used_count--;

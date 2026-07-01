@@ -25,6 +25,18 @@
 #include <kernel/timers/tiku_clock.h>
 #include <interfaces/wireless/tiku_wireless.h>
 
+#if defined(TIKU_KITS_NET_WIFI_ENABLE)
+/* WiFi as the IP link: bring the net stack up over the joined radio (DHCP),
+ * instead of SLIP-over-UART. Needs the CYW43 driver + the net kit's WiFi
+ * adapter (TIKU_DRV_WIFI_CYW43_ENABLE=1 TIKU_KITS_NET_WIFI_ENABLE=1). */
+#include <kernel/process/tiku_process.h>
+#include <tikukits/net/wifi/tiku_kits_net_wifi.h>
+#include <tikukits/net/ipv4/tiku_kits_net_ipv4.h>
+#include <tikukits/net/ipv4/tiku_kits_net_udp.h>
+#include <tikukits/net/ipv4/tiku_kits_net_dhcp.h>
+extern struct tiku_process tiku_kits_net_dhcp_process;
+#endif
+
 /*---------------------------------------------------------------------------*/
 
 static int str_eq(const char *a, const char *b)
@@ -59,6 +71,9 @@ static void wifi_help(void)
     SHELL_PRINTF("wifi scan                Trigger active scan\n");
     SHELL_PRINTF("wifi list                Show cached scan results\n");
     SHELL_PRINTF("wifi connect SSID PSK    Join WPA2-PSK network\n");
+#if defined(TIKU_KITS_NET_WIFI_ENABLE)
+    SHELL_PRINTF("wifi up                  Bring the IP stack up over WiFi (DHCP)\n");
+#endif
     SHELL_PRINTF("wifi connect3 SSID PSK   Join WPA3-SAE network\n");
     SHELL_PRINTF("wifi disconnect          Leave the current network\n");
     SHELL_PRINTF("wifi forget              Clear stored credentials "
@@ -199,6 +214,42 @@ static void wifi_list(void)
     }
 }
 
+#if defined(TIKU_KITS_NET_WIFI_ENABLE)
+/* Bring the IP stack up over the joined radio: install the WiFi link backend in
+ * place of SLIP, start the DHCP client process, and request a lease (broadcast
+ * DORA over WiFi).  The lease binds asynchronously; DHCP applies it to the IPv4
+ * layer on ACK, so `ip` then shows the acquired address. */
+static void wifi_up(void)
+{
+    tiku_wireless_status_t st;
+    if (tiku_wireless_status(&st) != 0 ||
+        st.link_state != TIKU_WIRELESS_LINK_JOINED) {
+        SHELL_PRINTF("wifi: not joined -- run 'wifi connect <ssid> <psk>' first\n");
+        return;
+    }
+    if (tiku_kits_net_wifi_init() != TIKU_KITS_NET_OK) {
+        SHELL_PRINTF("wifi: could not install the WiFi link backend\n");
+        return;
+    }
+    /* Self-contained: ensure UDP is up (DHCP binds port 68). Harmless if the
+     * net-test path already did it; lets a lean net build (no NET_TEST) work. */
+    tiku_kits_net_udp_init();
+    tiku_kits_net_dhcp_init();
+    /* Kick off the exchange (real station MAC) BEFORE starting the poller
+     * process, so the process sees an in-flight DISCOVER and just polls it
+     * rather than self-starting a second exchange with the default MAC.  Order
+     * matters: tiku_process_start() runs the process body synchronously if the
+     * event queue is full, so the exchange must already be armed by then. */
+    if (tiku_kits_net_dhcp_start(st.mac) != TIKU_KITS_NET_OK) {
+        SHELL_PRINTF("wifi: DHCP start failed (radio up? already bound?)\n");
+        return;
+    }
+    tiku_process_start(&tiku_kits_net_dhcp_process, (tiku_event_data_t)0);
+    SHELL_PRINTF("wifi: IP stack now rides WiFi; DHCP requested -- "
+                 "run 'ip' shortly for the lease.\n");
+}
+#endif
+
 /*---------------------------------------------------------------------------*/
 
 void
@@ -206,6 +257,9 @@ tiku_shell_cmd_wifi(uint8_t argc, const char *argv[])
 {
     if (argc < 2U) { wifi_help(); return; }
 
+#if defined(TIKU_KITS_NET_WIFI_ENABLE)
+    if (str_eq(argv[1], "up")) { wifi_up(); return; }
+#endif
     if      (str_eq(argv[1], "status"))     wifi_status();
     else if (str_eq(argv[1], "scan"))       wifi_scan();
     else if (str_eq(argv[1], "list"))       wifi_list();

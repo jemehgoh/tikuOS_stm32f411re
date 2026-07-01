@@ -45,7 +45,9 @@
 /*---------------------------------------------------------------------------*/
 
 #include "tiku_mem.h"
+#include "tiku_nvm_region.h"
 #include <stddef.h>
+#include <string.h>
 
 /*---------------------------------------------------------------------------*/
 /* PRIVATE HELPERS                                                           */
@@ -70,6 +72,11 @@
 static tiku_mem_arch_size_t align_up(tiku_mem_arch_size_t size)
 {
     const tiku_mem_arch_size_t mask = TIKU_MEM_ARCH_ALIGNMENT - 1U;
+    /* Saturate instead of wrapping to 0 on a near-max request (16-bit on
+     * MSP430), so the caller's capacity check rejects it cleanly. */
+    if (size > (tiku_mem_arch_size_t)(~(tiku_mem_arch_size_t)0 - mask)) {
+        return (tiku_mem_arch_size_t)(~(tiku_mem_arch_size_t)0 & ~mask);
+    }
     return (size + mask) & ~mask;
 }
 
@@ -121,16 +128,12 @@ static uint8_t __attribute__((aligned(TIKU_MEM_ARCH_ALIGNMENT)))
 static uint8_t __attribute__((section(".persistent"),
                               aligned(TIKU_MEM_ARCH_ALIGNMENT)))
     tier_nvm_buf[TIKU_TIER_NVM_SIZE] = {0};
-#elif defined(PLATFORM_AMBIQ)
-/* Apollo510: the NVM tier lives in the NOLOAD .uninit area (DTCM) so its pool
- * survives a warm reset and the buffer sits inside the NVM region the region
- * table overlays on .uninit (mem port A). NOLOAD -> no boot zero-init (the
- * area is reseeded only on a power cycle); the persist layer is magic-gated,
- * so cold-boot garbage is rejected. Power-cycle durability via an MRAM mirror
- * is mem port C. */
-static uint8_t __attribute__((section(".uninit"),
-                              aligned(TIKU_MEM_ARCH_ALIGNMENT)))
-    tier_nvm_buf[TIKU_TIER_NVM_SIZE];
+#elif defined(PLATFORM_AMBIQ) || defined(PLATFORM_RP2350)
+/* Ambiq (MRAM) / RP2350 (QSPI Flash): the NVM tier is backed by the carved,
+ * memory-mapped region (tiku_nvm_region) -- read in place, written via the
+ * region backend -- so there is no static pool here. tier_wire_all() points the
+ * tier at the region's front extent and tiku_tier_nvm_write() routes writes
+ * through its backend (MRAM bootrom program / Flash erase+program). */
 #else
 static uint8_t __attribute__((aligned(TIKU_MEM_ARCH_ALIGNMENT)))
     tier_nvm_buf[TIKU_TIER_NVM_SIZE];
@@ -255,8 +258,29 @@ static void tier_wire_all(void)
     tier_state[TIKU_MEM_SRAM].alloc_count = 0;
     tier_state[TIKU_MEM_SRAM].initialized = 1;
 
+#if defined(PLATFORM_AMBIQ) || defined(PLATFORM_RP2350)
+    {
+        /* NVM tier = the carved region (Ambiq MRAM / RP2350 Flash): read in
+         * place, written via the backend (tiku_tier_nvm_write). NULL until the
+         * board's region backend exists. */
+        const tiku_nvm_backend_t *rgn = tiku_nvm_backend_get();
+        /* The tier bump-allocates from the front; the top
+         * TIKU_NVM_RESERVED_BYTES is reserved for durable named data (BASIC
+         * save, FS) and never handed out. */
+        if (rgn != NULL && rgn->base != NULL &&
+            rgn->size > (size_t)TIKU_NVMFS_FS_BYTES + TIKU_NVM_RESERVED_BYTES) {
+            tier_state[TIKU_MEM_NVM].buf      = rgn->base;
+            tier_state[TIKU_MEM_NVM].capacity = (tiku_mem_arch_size_t)
+                (rgn->size - TIKU_NVMFS_FS_BYTES - TIKU_NVM_RESERVED_BYTES);
+        } else {
+            tier_state[TIKU_MEM_NVM].buf      = NULL;
+            tier_state[TIKU_MEM_NVM].capacity = 0u;
+        }
+    }
+#else
     tier_state[TIKU_MEM_NVM].buf         = tier_nvm_buf;
     tier_state[TIKU_MEM_NVM].capacity    = TIKU_TIER_NVM_SIZE;
+#endif
     tier_state[TIKU_MEM_NVM].offset      = 0;
     tier_state[TIKU_MEM_NVM].peak        = 0;
     tier_state[TIKU_MEM_NVM].alloc_count = 0;
@@ -532,6 +556,17 @@ tiku_mem_err_t tiku_tier_pool_create(tiku_pool_t *pool,
     if (aligned_blk < min_blk) {
         aligned_blk = min_blk;
     }
+    /* Reject before the product wraps (tiku_mem_arch_size_t is 16-bit on
+     * MSP430): a wrapped 'total' reserves ~0 bytes while build_freelist writes
+     * the full block_size*block_count span, corrupting the tier pool. Cast to
+     * the unsigned type BEFORE dividing so the bound is unsigned, not -1/N. */
+    {
+        const tiku_mem_arch_size_t size_max =
+            (tiku_mem_arch_size_t)~(tiku_mem_arch_size_t)0;
+        if (block_count != 0u && aligned_blk > size_max / block_count) {
+            return TIKU_MEM_ERR_NOMEM;
+        }
+    }
     total = aligned_blk * block_count;
 
     resolved = resolve_tier(tier, total);
@@ -542,14 +577,16 @@ tiku_mem_err_t tiku_tier_pool_create(tiku_pool_t *pool,
     }
 
     /*
-     * For NVM-backed pools, freelist construction writes next-pointers
-     * into FRAM blocks. The MPU must be temporarily unlocked. On host
-     * the MPU functions are no-ops, so this is safe everywhere.
+     * NVM-tier pools build and maintain their embedded freelist through
+     * tiku_tier_nvm_write() -- the bootrom program op on MRAM, the flash program
+     * on RP2350, an in-place store on FRAM (a direct CPU store would bus-fault on
+     * program-op NVM, which is what crash-looped this before).
+     * tiku_pool_create_nvm() marks the pool so every freelist write takes that
+     * path; the write primitive brackets its own NVM-unlock window, so no outer
+     * unlock is needed here. SRAM pools store directly (the hot path).
      */
     if (resolved == TIKU_MEM_NVM) {
-        uint16_t saved = tiku_mpu_unlock_nvm();
-        err = tiku_pool_create(pool, buf, block_size, block_count, id);
-        tiku_mpu_lock_nvm(saved);
+        err = tiku_pool_create_nvm(pool, buf, block_size, block_count, id);
     } else {
         err = tiku_pool_create(pool, buf, block_size, block_count, id);
     }
@@ -695,5 +732,62 @@ tiku_mem_err_t tiku_tier_stats(tiku_mem_tier_t tier,
     stats->peak_bytes  = ts->peak;
     stats->alloc_count = ts->alloc_count;
 
+    return TIKU_MEM_OK;
+}
+
+/*---------------------------------------------------------------------------*/
+/* NVM-TIER WRITE (backend-aware)                                            */
+/*---------------------------------------------------------------------------*/
+
+/**
+ * @brief Write into NVM-tier memory through the correct backing path.
+ *
+ * NVM-tier memory is read by a plain pointer dereference everywhere, but the
+ * WRITE differs: a directly-mapped NVM region (Ambiq MRAM) is programmed by the
+ * bootrom backend -- a CPU store would fault against the read-only MRAM mapping
+ * -- whereas FRAM / host .bss is byte-writable in place. This is the matching
+ * write primitive; it brackets the NVM unlock window itself, so a caller just
+ * hands it (dst inside NVM-tier memory, src, len).
+ *
+ * @return TIKU_MEM_OK, or TIKU_MEM_ERR_INVALID on a NULL or out-of-range write.
+ */
+tiku_mem_err_t tiku_tier_nvm_write(void *dst, const void *src,
+                                   tiku_mem_arch_size_t len)
+{
+    if (dst == NULL || src == NULL) {
+        return TIKU_MEM_ERR_INVALID;
+    }
+#if defined(PLATFORM_AMBIQ) || defined(PLATFORM_RP2350)
+    /* Region-backed NVM (Ambiq MRAM, RP2350 Flash): the medium is NOT
+     * plain-store-writable, so route through the backend's program path. */
+    {
+        const tiku_nvm_backend_t *rgn = tiku_nvm_backend_get();
+        if (rgn != NULL && rgn->base != NULL && rgn->write != NULL) {
+            uintptr_t d = (uintptr_t)dst;
+            uintptr_t b = (uintptr_t)rgn->base;
+            if (d < b || (size_t)(d - b) > rgn->size ||
+                (size_t)len > rgn->size - (size_t)(d - b)) {
+                return TIKU_MEM_ERR_INVALID;     /* dst not in the region */
+            }
+            {
+                uint16_t mpu = tiku_mpu_unlock_nvm();
+                int rc = rgn->write((tiku_nvm_backend_t *)rgn,
+                                    (size_t)(d - b), src, (size_t)len);
+                tiku_mpu_lock_nvm(mpu);
+                return (rc == 0) ? TIKU_MEM_OK : TIKU_MEM_ERR_INVALID;
+            }
+        }
+        /* Region-backed platform but no usable backend: a direct CPU store would
+         * bus-fault on program-op NVM, so fail rather than fall through to the
+         * in-place memcpy below. */
+        return TIKU_MEM_ERR_INVALID;
+    }
+#endif
+    /* Byte-writable NVM tier (FRAM / host .bss): store in place. */
+    {
+        uint16_t mpu = tiku_mpu_unlock_nvm();
+        memcpy(dst, src, (size_t)len);
+        tiku_mpu_lock_nvm(mpu);
+    }
     return TIKU_MEM_OK;
 }

@@ -68,6 +68,21 @@ __tiku_nvm_flash_offset = LENGTH(FLASH) - __tiku_nvm_flash_size;
 __tiku_nvm_flash_start  = ORIGIN(FLASH) + __tiku_nvm_flash_offset;
 __tiku_nvm_flash_end    = ORIGIN(FLASH) + LENGTH(FLASH);
 
+/* Carved NVM region (substrate B): a ~3 MB slice of QSPI flash just below the
+ * 4 KB .uninit backup sector, owned by the /data file store + NVM tier via the
+ * Flash region backend (arch/arm-rp2350/tiku_nvm_region_rp2350.c).  Sub-layout
+ * (front->top): NVM tier extent (~124 KB, durable TIKU_MEM_NVM) | /data FS
+ * extent (TIKU_NVMFS_FS_BYTES, 2.75 MB) | reserved tail (TIKU_NVM_RESERVED_BYTES,
+ * 128 KB durable named data).  4 KB-sector aligned (the flash erase granule).
+ * Code grows up from ORIGIN(FLASH) into the remaining 1 MB; an ASSERT in
+ * SECTIONS guards the flash image against overrunning it.
+ *   __tiku_nvmfs_base   : XIP address (read in place by pointer); == 0x10100000
+ *   __tiku_nvmfs_offset : byte offset from flash start (for the boot-ROM)
+ *   __tiku_nvmfs_size   : ABSOLUTE symbol -- its ADDRESS is the size */
+__tiku_nvmfs_size   = 0x2FF000;     /* 3068 KB; leaves a 1 MB code budget */
+__tiku_nvmfs_offset = __tiku_nvm_flash_offset - __tiku_nvmfs_size;
+__tiku_nvmfs_base   = ORIGIN(FLASH) + __tiku_nvmfs_offset;
+
 /* The Cortex-M loads the initial SP from the first vector entry.
  * Place it at the very top of SRAM and let the stack grow downward. */
 __stack       = __sram_end;
@@ -176,9 +191,18 @@ SECTIONS
     {
         __uninit_start = .;
         *(.uninit*)
-        *(.persistent*)
+        /* Durable cells (boot counter, aliases, persist cells) -- backed up to
+         * the 4 KB flash sector and MPU-protected. EXCLUDE the net stack: its
+         * TCP/MQTT/DNS/HTTP pools are tagged .persistent only for NOLOAD (skip
+         * zero-init), but they are transient, write-heavy working buffers -- they
+         * must be neither mirrored nor MPU-read-only. */
+        *(EXCLUDE_FILE(*tiku_kits_net_*.o) .persistent*)
         . = ALIGN(32);
         __uninit_end = .;
+        /* Net working buffers: still NOLOAD SRAM, but AFTER __uninit_end so they
+         * sit outside the backed-up + MPU-protected window (they need ~5 KB,
+         * which alone overflows the 4 KB backup on RP2350). */
+        *tiku_kits_net_*.o(.persistent*)
     } > SRAM
 
     /* End of static allocations (heap-style growth would start here).
@@ -204,6 +228,11 @@ SECTIONS
      * driver. */
     ASSERT((__uninit_end - __uninit_start) <= __tiku_nvm_flash_size,
            "ERROR: .uninit region exceeds 4 KB flash backup sector")
+
+    /* The flash image (code + rodata + the .data load copy) must not grow up
+     * into the carved NVM region below the backup sector. */
+    ASSERT(__data_load + (__data_end - __data_start) <= __tiku_nvmfs_base,
+           "ERROR: flash image overruns the carved NVM region")
 
     /DISCARD/ :
     {

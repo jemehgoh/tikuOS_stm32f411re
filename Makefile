@@ -38,6 +38,8 @@ else ifeq ($(MCU),apollo510)
 TIKU_PLATFORM := ambiq
 else ifeq ($(MCU),apollo4l)
 TIKU_PLATFORM := ambiq
+else ifeq ($(MCU),apollo4p)
+TIKU_PLATFORM := ambiq
 else
 TIKU_PLATFORM := msp430
 endif
@@ -95,10 +97,12 @@ endif
 endif
 
 ifeq ($(TIKU_PLATFORM),ambiq)
-ifeq ($(MCU),apollo4l)
-TIKU_BOARD_DEFINE := TIKU_BOARD_APOLLO4L_EVB
-else
+ifeq ($(MCU),apollo510)
 TIKU_BOARD_DEFINE := TIKU_BOARD_APOLLO510_EVB
+else
+# Apollo4 Lite and Apollo4 Plus EVBs share the M4F board pinout (console UART,
+# LEDs, buttons); apollo4p reuses the apollo4l board config for bring-up.
+TIKU_BOARD_DEFINE := TIKU_BOARD_APOLLO4L_EVB
 endif
 endif
 
@@ -225,6 +229,12 @@ AMBIQ_LOAD_ADDR ?= 0x00018000
 # is attached at reset. Detaching with the target left running (qc) drops the
 # debugger so the SBL hands off to the app at 0x18000; the Sleep lets the SBL
 # reach that debug-wait before we detach. (q halts, so the app never starts.)
+JLINK_RUN_SEQ   ?= r\ng\nSleep 600\nqc
+else ifeq ($(MCU),apollo4p)
+# Apollo4 Plus (AMAP42KP-KBR): same M4F family + SBL hand-off as the Lite, just
+# a different J-Link flash device (2 MB MRAM vs 1 MB).
+JLINK_DEVICE    ?= AMAP42KP-KBR
+AMBIQ_LOAD_ADDR ?= 0x00018000
 JLINK_RUN_SEQ   ?= r\ng\nSleep 600\nqc
 else
 JLINK_DEVICE    ?= AP510NFA-CBR
@@ -604,11 +614,36 @@ CFLAGS += --specs=nano.specs --specs=nosys.specs
 CFLAGS += -I$(PROJ_DIR)
 CFLAGS += -ffunction-sections -fdata-sections -fno-common
 
+# Memory tiers. tiku_mem.h defaults to the MSP430-era 128 B SRAM (AUTO) tier,
+# which can't hold a real allocation. BASIC's program arena (~98 KB for the
+# 1024-line BIG tier RP2350 selects) then fails to fit SRAM and resolve_tier()
+# falls back to the 1 KB NVM tier -- which on RP2350 is QSPI flash (program-op,
+# not byte-writable), so the first arena store faults and `basic` wedged the
+# board at entry. Size the SRAM (AUTO) tier to hold the arena in the part's
+# 520 KB SRAM. Gated on BASIC so non-BASIC builds keep the lean default.
+ifeq ($(TIKU_SHELL_BASIC_ENABLE),1)
+ifeq ($(HAS_TLS),1)
+# HTTPS (HAS_TLS) adds the cert-TLS client's static buffers to .bss; trim the
+# BASIC tier to 128 KB so the cyw43 bring-up + stack keep their SRAM (the
+# ~98 KB 1024-line arena still fits).
+CFLAGS += -DTIKU_TIER_SRAM_SIZE=131072    # 128 KB: arena + TLS .bss + radio
+# TLS server flights are multi-KB; the lean 512 B TCP receive window turns
+# each one into fragile 512-byte stop-and-wait (a lost window-update ACK
+# stalls the handshake).  Widen the window so a flight streams in a couple of
+# round-trips.  HTTPGET$ uses a single connection, so 2 conns is ample and
+# keeps the SRAM bump small (4 KB x 2 = 8 KB vs 512 B x 4).
+CFLAGS += -DTIKU_KITS_NET_TCP_RX_BUF_SIZE=4096
+CFLAGS += -DTIKU_KITS_NET_TCP_MAX_CONNS=2
+else
+CFLAGS += -DTIKU_TIER_SRAM_SIZE=163840    # 160 KB: fits the 1024-line BASIC arena
+endif
+endif
+
 else ifeq ($(TIKU_PLATFORM),ambiq)
 
 # CPU/FPU per Ambiq part: Cortex-M55 + Helium (Apollo510) or Cortex-M4F with a
 # single-precision FPU (Apollo4 Lite). Derived from -mcpu; -Wno-psabi below.
-ifeq ($(MCU),apollo4l)
+ifneq (,$(filter apollo4l apollo4p,$(MCU)))
 CFLAGS  = -mcpu=cortex-m4 -mthumb
 CFLAGS += -mfpu=fpv4-sp-d16 -mfloat-abi=hard
 else
@@ -623,19 +658,56 @@ CFLAGS += --specs=nano.specs --specs=nosys.specs
 CFLAGS += -D$(DEVICE_DEFINE)=1
 CFLAGS += -D$(TIKU_BOARD_DEFINE)=1
 CFLAGS += -DPLATFORM_AMBIQ=1
-# Memory tiers sized for Apollo510's 512 KB DTCM. The tiku_mem.h defaults are
-# MSP430-era (128 B SRAM / 1 KB NVM) and assume large allocations spill to HIFRAM
-# (FRAM > 64 KB), which this part lacks -- so AUTO allocations land in the 128 B
-# SRAM tier and OOM on a half-MB-of-RAM MCU (e.g. BASIC's ~4 KB arena). The mem
-# size type is 32-bit here (arch/ambiq/tiku_mem_arch.h), so >64 KB tiers are
-# fine. NVM tier is volatile-RAM-backed until MRAM persistence lands.
-CFLAGS += -DTIKU_TIER_SRAM_SIZE=131072   # 128 KB fast volatile tier in DTCM
+# Memory tiers. The tiku_mem.h defaults are MSP430-era (128 B SRAM / 1 KB NVM)
+# and assume large allocations spill to HIFRAM (FRAM > 64 KB), which these parts
+# lack -- so without an override AUTO allocations land in the tiny SRAM tier and
+# OOM. The SRAM (AUTO) tier lives in the multi-MB SSRAM (.ssram, powered + zeroed
+# in tiku_crt_early.c -- mem port B), NOT the 512 KB DTCM, so size it to the
+# part's SSRAM rather than the old DTCM-era 128 KB cap (which was left stale when
+# the tier moved out of DTCM). This is the ceiling on every AUTO-tier arena,
+# including BASIC's program arena (a 2048-line program needs ~195 KB). The mem
+# size type is 32-bit here (arch/ambiq/tiku_mem_arch.h), so multi-hundred-KB
+# tiers are fine.
+ifeq ($(MCU),apollo4p)
+CFLAGS += -DTIKU_TIER_SRAM_SIZE=1703936   # 1.625 MB tier in the Plus's 2 MB SSRAM (4 MB MPU window; +~182 KB other .ssram still fits, ~206 KB spare)
+else ifeq ($(MCU),apollo4l)
+CFLAGS += -DTIKU_TIER_SRAM_SIZE=524288    # 512 KB of the Lite's 1 MB mapped SSRAM
+else
+CFLAGS += -DTIKU_TIER_SRAM_SIZE=1048576   # 1 MB of the 3 MB SSRAM (Apollo510)
+endif
 CFLAGS += -DTIKU_TIER_NVM_SIZE=16384      # 16 KB NVM tier
+# HTTPS over TCP on Ambiq -- two coupled fixes:
+# (1) BUF_PERSIST=0: put the RX ring + TX pool in regular ZERO-INITIALISED .bss,
+#     not .persistent. On Cortex-M ".persistent" is plain SRAM (lost on a power
+#     cycle, so the persistence is moot) and the linker marks it NOLOAD/skipped
+#     by zero-init -- a large *uninitialised* RX ring there behaved
+#     non-deterministically (varying RST/stall/empty-body across identical
+#     builds on Apollo510). Zeroed .bss is deterministic.
+# (2) RX_BUF=4096: a TLS-1.3 server's post-handshake NewSessionTickets (google's
+#     GFE sends ~1 KB right after the handshake) sit UNREAD in the ring
+#     (read_record stops at the server Finished), so a small ring fills with
+#     tickets and refuses the HTTP response (google => empty body; cloudflare/
+#     nginx send less post-handshake data, so they fit a small ring). 4 KB holds
+#     tickets + response together. DTCM has ~410 KB free, so 4 KB x 2 in .bss is
+#     trivial.
+ifeq ($(HAS_TLS),1)
+CFLAGS += -DTIKU_KITS_NET_TCP_BUF_PERSIST=0
+CFLAGS += -DTIKU_KITS_NET_TCP_RX_BUF_SIZE=4096
+CFLAGS += -DTIKU_KITS_NET_TCP_MAX_CONNS=2
+endif
 # Part selectors that configure the vendored register map (apollo4l.h / apollo510.h).
-ifeq ($(MCU),apollo4l)
+ifneq (,$(filter apollo4l apollo4p,$(MCU)))
+# apollo4p reuses the apollo4l register map (apollo4l.h) -- the Apollo4 family is
+# register-compatible for the peripherals tikuOS uses (UART2/GPIO/PWRCTRL/STIMER/
+# MRAM), so the M4F arch backends are shared.
 CFLAGS += -DPART_apollo4l -DAM_PART_APOLLO4L -Dgcc
 else
 CFLAGS += -DPART_apollo510 -DAM_PART_APOLLO510 -DAM_PACKAGE_BGA -Dgcc
+endif
+# The Apollo4 Plus EVB routes its J-Link VCOM to UART0 (pads 60/47); the Lite
+# uses UART2 (pads 54/11). The shared UART driver + crt vector key off this.
+ifeq ($(MCU),apollo4p)
+CFLAGS += -DTIKU_CONSOLE_UART0
 endif
 CFLAGS += -I$(PROJ_DIR)
 # CMSIS register headers, VENDORED in-tree (arch/ambiq/cmsis/) so the build is
@@ -745,7 +817,7 @@ LDFLAGS += -Wl,-Map=$(BUILD_DIR)/main.map
 
 else ifeq ($(TIKU_PLATFORM),ambiq)
 
-ifeq ($(MCU),apollo4l)
+ifneq (,$(filter apollo4l apollo4p,$(MCU)))
 LDFLAGS  = -mcpu=cortex-m4 -mthumb -mfpu=fpv4-sp-d16 -mfloat-abi=hard
 else
 LDFLAGS  = -mcpu=cortex-m55 -mthumb -mfpu=auto -mfloat-abi=hard
@@ -754,7 +826,13 @@ endif
 # libnosys syscall stubs (_sbrk/_write/...), formerly supplied by AmbiqSuite.
 LDFLAGS += --specs=nano.specs --specs=nosys.specs
 LDFLAGS += -nostartfiles -static
-ifeq ($(MCU),apollo4l)
+ifeq ($(MCU),apollo4p)
+# Apollo4 Plus: same map as the Lite but the shared-SRAM window grows from 1 MB
+# to the full 2 MB the two SSRAM banks expose (both already powered in the crt),
+# backing a larger SRAM tier. (The Plus's remaining ~0.75 MB needs its own bank
+# definitions -- see apollo4p.ld.)
+LDFLAGS += -Tarch/ambiq/devices/apollo4p.ld
+else ifeq ($(MCU),apollo4l)
 LDFLAGS += -Tarch/ambiq/devices/apollo4l.ld
 else
 LDFLAGS += -Tarch/ambiq/devices/apollo510.ld
@@ -852,7 +930,7 @@ endif
 # Use the minimal entry point and exactly the arch files it needs.
 SRCS  = main_minimal.c
 ifeq ($(TIKU_PLATFORM),ambiq)
-ifeq ($(MCU),apollo4l)
+ifneq (,$(filter apollo4l apollo4p,$(MCU)))
 SRCS += arch/ambiq/tiku_crt_early_apollo4l.c
 SRCS += arch/ambiq/tiku_cpu_freq_boot_apollo4l.c
 SRCS += arch/ambiq/tiku_cpu_common_apollo4l.c
@@ -900,6 +978,7 @@ SRCS += arch/arm-rp2350/tiku_uart_arch.c
 SRCS += arch/arm-rp2350/tiku_mem_arch.c
 SRCS += arch/arm-rp2350/tiku_mpu_arch.c
 SRCS += arch/arm-rp2350/tiku_region_arch.c
+SRCS += arch/arm-rp2350/tiku_nvm_region_rp2350.c
 SRCS += arch/arm-rp2350/tiku_gpio_arch.c
 SRCS += arch/arm-rp2350/tiku_spi_arch.c
 SRCS += arch/arm-rp2350/tiku_lcd_arch.c
@@ -929,7 +1008,10 @@ SRCS += arch/ambiq/tiku_onewire_arch.c
 SRCS += arch/ambiq/tiku_wake_arch.c
 SRCS += arch/ambiq/tiku_spi_arch.c
 SRCS += arch/ambiq/tiku_lcd_arch.c
-ifeq ($(MCU),apollo4l)
+# CryptoCell-312 TRNG (shared across apollo4l/4p/510) -- backs the cert-TLS
+# handshake RNG (TIKU_KITS_CRYPTO_TLS_RNG_FILL).
+SRCS += arch/ambiq/tiku_trng_arch.c
+ifneq (,$(filter apollo4l apollo4p,$(MCU)))
 # Apollo4 Lite (Cortex-M4F) device/CPU backends.
 # Apollo4 Lite drives the kernel tick from the always-on STIMER (not SysTick,
 # which freezes in WFI sleep); apollo510 keeps the shared SysTick timer below.
@@ -945,6 +1027,7 @@ SRCS += arch/ambiq/tiku_uart_apollo4l.c
 SRCS += arch/ambiq/tiku_mem_apollo4l.c
 SRCS += arch/ambiq/tiku_mpu_apollo4l.c
 SRCS += arch/ambiq/tiku_region_apollo4l.c
+SRCS += arch/ambiq/tiku_nvm_region_apollo4l.c
 SRCS += arch/ambiq/tiku_gpio_apollo4l.c
 SRCS += arch/ambiq/tiku_adc_apollo4l.c
 else
@@ -962,6 +1045,7 @@ SRCS += arch/ambiq/tiku_uart_arch.c
 SRCS += arch/ambiq/tiku_mem_arch.c
 SRCS += arch/ambiq/tiku_mpu_arch.c
 SRCS += arch/ambiq/tiku_region_arch.c
+SRCS += arch/ambiq/tiku_nvm_region_apollo510.c
 SRCS += arch/ambiq/tiku_gpio_arch.c
 endif
 # No AmbiqSuite sources compiled in (de-SDK complete): system_apollo510.c,
@@ -986,6 +1070,7 @@ SRCS += arch/msp430/tiku_uart_arch.c
 SRCS += arch/msp430/tiku_mem_arch.c
 SRCS += arch/msp430/tiku_mpu_arch.c
 SRCS += arch/msp430/tiku_region_arch.c
+SRCS += arch/msp430/tiku_nvm_region_msp430.c
 
 endif
 SRCS += boot/tiku_boot.c
@@ -1056,6 +1141,7 @@ SRCS += kernel/memory/tiku_mpu.c
 SRCS += kernel/memory/tiku_persist.c
 SRCS += kernel/memory/tiku_region.c
 SRCS += kernel/memory/tiku_tier.c
+SRCS += kernel/memory/tiku_nvm_region.c
 SRCS += kernel/memory/tiku_cache.c
 SRCS += kernel/memory/tiku_hibernate.c
 SRCS += kernel/memory/tiku_proc_mem.c
@@ -1078,6 +1164,10 @@ SRCS += kernel/vfs/tree/tiku_vfs_tree_gpio.c
 SRCS += kernel/vfs/tree/tiku_vfs_tree_inittab.c
 SRCS += kernel/vfs/tree/tiku_vfs_tree_data.c
 
+# File store backing the dynamic /data directory (self-gated; the data tree
+# module above references it only when the shell is built).
+SRCS += kernel/fs/tiku_tfs.c
+
 # ---------------------------------------------------------------------------
 # Shell (kernel service — compiled when TIKU_SHELL_ENABLE=1)
 # ---------------------------------------------------------------------------
@@ -1096,6 +1186,7 @@ SRCS += kernel/shell/commands/tiku_shell_cmd_kill.c
 SRCS += kernel/shell/commands/tiku_shell_cmd_resume.c
 SRCS += kernel/shell/commands/tiku_shell_cmd_queue.c
 SRCS += kernel/shell/commands/tiku_shell_cmd_reboot.c
+SRCS += kernel/shell/commands/tiku_shell_cmd_trng.c
 ifeq (,$(findstring TIKU_SHELL_CMD_HISTORY=0,$(EXTRA_CFLAGS)))
 SRCS += kernel/shell/commands/tiku_shell_cmd_history.c
 endif
@@ -1115,6 +1206,7 @@ SRCS += kernel/shell/commands/tiku_shell_cmd_toggle.c
 SRCS += kernel/shell/commands/tiku_shell_cmd_start.c
 SRCS += kernel/shell/commands/tiku_shell_cmd_write.c
 SRCS += kernel/shell/commands/tiku_shell_cmd_read.c
+SRCS += kernel/shell/commands/tiku_shell_cmd_fs.c
 SRCS += kernel/shell/commands/tiku_shell_cmd_watch.c
 # slip command: only when the net stack is compiled in (it starts the net
 # process). Keeps one OS image: interactive shell by default, SLIP/IP on
@@ -1175,6 +1267,9 @@ SRCS += kernel/shell/commands/tiku_shell_cmd_changed.c
 SRCS += kernel/shell/commands/tiku_shell_cmd_gpio.c
 SRCS += kernel/shell/commands/tiku_shell_cmd_adc.c
 SRCS += kernel/shell/commands/tiku_shell_cmd_free.c
+ifeq (,$(findstring TIKU_SHELL_CMD_DF=0,$(EXTRA_CFLAGS)))
+SRCS += kernel/shell/commands/tiku_shell_cmd_df.c
+endif
 SRCS += kernel/shell/commands/tiku_shell_cmd_sleep.c
 SRCS += kernel/shell/commands/tiku_shell_cmd_wake.c
 SRCS += kernel/shell/commands/tiku_shell_cmd_freq.c
@@ -1201,6 +1296,9 @@ SRCS += kernel/shell/commands/tiku_shell_cmd_repeat.c
 endif
 ifneq (,$(findstring TIKU_SHELL_CMD_PEEK=1,$(EXTRA_CFLAGS))$(findstring TIKU_SHELL_CMD_POKE=1,$(EXTRA_CFLAGS)))
 SRCS += kernel/shell/commands/tiku_shell_cmd_mem.c
+endif
+ifneq (,$(findstring TIKU_SHELL_CMD_NVMPROBE=1,$(EXTRA_CFLAGS)))
+SRCS += kernel/shell/commands/tiku_shell_cmd_nvmprobe.c
 endif
 endif
 # GPIO arch is always needed (VFS tree references GPIO read/write/dir).
@@ -1493,6 +1591,9 @@ SRCS   += $(wildcard tikukits/net/slip/*.c)
 # .persistent backup sector is 4 KB hard cap. Most demos need only
 # ipv4 + icmp + udp.
 ifeq ($(TIKU_KIT_NET_MIN),1)
+# Expose MIN to the C preprocessor so shell commands whose kits live only
+# in the non-MIN wildcard (e.g. syslog) can gate themselves off.
+CFLAGS += -DTIKU_KIT_NET_MIN=1
 SRCS   += tikukits/net/ipv4/tiku_kits_net_ipv4.c
 SRCS   += tikukits/net/ipv4/tiku_kits_net_icmp.c
 SRCS   += tikukits/net/ipv4/tiku_kits_net_udp.c
@@ -1502,6 +1603,34 @@ SRCS   += tikukits/net/ipv4/tiku_kits_net_udp.c
 ifeq ($(TIKU_KITS_NET_DHCP_ENABLE),1)
 CFLAGS += -DTIKU_KITS_NET_DHCP_ENABLE=1
 SRCS   += tikukits/net/ipv4/tiku_kits_net_dhcp.c
+endif
+# Opt-in DNS stub resolver for MIN builds.  The non-MIN path already pulls
+# the whole ipv4/ directory; MIN omits it, but the ntp/dns shell commands
+# reference the resolver symbols, so opt it in when those are wanted.  dns.c
+# is a tiku_kits_net_*.o so its working buffer is relocated out of the .uninit
+# backup window by the linker script -- no 4 KB-cap impact.
+ifeq ($(TIKU_KITS_NET_DNS_ENABLE),1)
+CFLAGS += -DTIKU_KITS_NET_DNS_ENABLE=1
+SRCS   += tikukits/net/ipv4/tiku_kits_net_dns.c
+endif
+# Opt-in TCP + MQTT/HTTP for MIN builds (e.g. BASIC MQTTPUB / HTTPGET$ on a
+# lean WiFi profile).  TCP is the shared transport; MQTT and HTTP each add
+# their kit on top.  These keep their working buffers in tiku_kits_net_*.o
+# sections, relocated out of the .uninit backup window -- no 4 KB-cap impact.
+# http is HTTPS-only, so pair TIKU_KITS_NET_HTTP_ENABLE=1 with
+# TIKU_KIT_CRYPTO_ENABLE=1 HAS_TLS=1 (+ a TRNG-backed RNG_FILL, which the TLS
+# config header defaults for PLATFORM_RP2350).
+ifneq ($(filter 1,$(TIKU_KITS_NET_MQTT_ENABLE) $(TIKU_KITS_NET_HTTP_ENABLE)),)
+CFLAGS += -DTIKU_KITS_NET_TCP_ENABLE=1
+SRCS   += tikukits/net/ipv4/tiku_kits_net_tcp.c
+endif
+ifeq ($(TIKU_KITS_NET_MQTT_ENABLE),1)
+CFLAGS += -DTIKU_KITS_NET_MQTT_ENABLE=1
+SRCS   += tikukits/net/mqtt/tiku_kits_net_mqtt.c
+endif
+ifeq ($(TIKU_KITS_NET_HTTP_ENABLE),1)
+CFLAGS += -DTIKU_KITS_NET_HTTP_ENABLE=1
+SRCS   += $(wildcard tikukits/net/http/*.c)
 endif
 else
 SRCS   += $(wildcard tikukits/net/ipv4/*.c)
@@ -1536,17 +1665,25 @@ endif
 ifeq ($(TIKU_KIT_CRYPTO_ENABLE),1)
 CFLAGS += -DTIKU_KIT_CRYPTO_ENABLE=1
 SRCS   += $(wildcard tikukits/crypto/sha256/*.c)
+SRCS   += $(wildcard tikukits/crypto/sha384/*.c)
 SRCS   += $(wildcard tikukits/crypto/base64/*.c)
 SRCS   += $(wildcard tikukits/crypto/crc/*.c)
 SRCS   += $(wildcard tikukits/crypto/gcm/*.c)
 SRCS   += $(wildcard tikukits/crypto/aes128/*.c)
 SRCS   += $(wildcard tikukits/crypto/hkdf/*.c)
 SRCS   += $(wildcard tikukits/crypto/hmac/*.c)
+SRCS   += $(wildcard tikukits/crypto/x25519/*.c)
+SRCS   += $(wildcard tikukits/crypto/p256/*.c)
+SRCS   += $(wildcard tikukits/crypto/p384/*.c)
+SRCS   += $(wildcard tikukits/crypto/rsa/*.c)
+SRCS   += $(wildcard tikukits/net/tls/x509/*.c)
 # TLS pulls in additional code; gated separately on HAS_TLS=1
 # because tiku_kits_crypto_tls requires the platform to provide
 # TIKU_KITS_CRYPTO_TLS_RNG_FILL.
 ifeq ($(HAS_TLS),1)
-SRCS   += $(wildcard tikukits/crypto/tls/*.c)
+SRCS   += $(wildcard tikukits/net/tls/psk/*.c)
+SRCS   += $(wildcard tikukits/net/tls/tls13/*.c)
+SRCS   += $(wildcard tikukits/net/tls/tls12/*.c)
 endif
 endif
 

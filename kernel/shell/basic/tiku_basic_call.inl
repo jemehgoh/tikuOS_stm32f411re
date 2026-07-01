@@ -235,6 +235,25 @@ expr_call(const char **p, long *out_v)
         *out_v = (long)tiku_clock_time() * 1000L / (long)TIKU_CLOCK_SECOND;
         return 1;
     }
+#if TIKU_BASIC_RTC_ENABLE
+    /* NOW() -- wall-clock seconds since the Unix epoch (0 until the RTC is
+     * set via SETTIME or NTP). 0-arg-with-parens like MILLIS so the lexer
+     * treats it as a function. Fits a signed 32-bit long until 2038. */
+    if (match_kw(p, "NOW")) {
+        skip_ws(p);
+        if (**p != '(') {
+            basic_error = 1; SHELL_PRINTF(SH_RED "? '(' expected\n" SH_RST); return 1;
+        }
+        (*p)++;
+        skip_ws(p);
+        if (**p != ')') {
+            basic_error = 1; SHELL_PRINTF(SH_RED "? ')' expected\n" SH_RST); return 1;
+        }
+        (*p)++;
+        *out_v = (long)tiku_rtc_get_seconds();
+        return 1;
+    }
+#endif
 #if TIKU_BASIC_FIXED_ENABLE
     if (match_kw(p, "FMUL")) {
         if (!parse_call_2arg(p, &a, &b)) return 1;
@@ -304,6 +323,55 @@ expr_call(const char **p, long *out_v)
         *out_v = (long)res;
         return 1;
     }
+#endif
+#if TIKU_BASIC_MATHX_ENABLE
+    /* Extended fixed-point math (Q.3). LOG is natural log; POW(b,e)=b^e
+     * (also reachable via the '^' operator). See tiku_basic_mathx.inl. */
+    if (match_kw(p, "LOG")) {
+        if (!parse_call_1arg(p, &a)) return 1;
+        *out_v = basic_log_q3(a);
+        return 1;
+    }
+    if (match_kw(p, "EXP")) {
+        if (!parse_call_1arg(p, &a)) return 1;
+        *out_v = basic_exp_q3(a);
+        return 1;
+    }
+    if (match_kw(p, "POW")) {
+        if (!parse_call_2arg(p, &a, &b)) return 1;
+        *out_v = basic_pow_q3(a, b);
+        return 1;
+    }
+    if (match_kw(p, "ATAN")) {
+        if (!parse_call_1arg(p, &a)) return 1;
+        *out_v = basic_atan_q3(a);
+        return 1;
+    }
+#endif
+#if TIKU_BASIC_NET_ENABLE
+    /* NETUP() -- 1 if the IP link is installed (after `wifi up` / a link
+     * backend brought it up), else 0. Parens optional so `IF NETUP THEN`
+     * reads naturally. Guards UDPSEND / MQTTPUB / HTTPGET$. */
+    if (match_kw(p, "NETUP")) {
+        skip_ws(p);
+        if (**p == '(') {
+            (*p)++; skip_ws(p);
+            if (**p == ')') (*p)++;
+            else { basic_error = 1; SHELL_PRINTF(SH_RED "? ')' expected\n" SH_RST); return 1; }
+        }
+        *out_v = (tiku_kits_net_ipv4_get_link() != (const tiku_kits_net_link_t *)0)
+                 ? 1L : 0L;
+        return 1;
+    }
+#if (TIKU_KITS_NET_HTTP_ENABLE + 0)
+    /* HTTPSTATUS() -- the HTTP status code from the last HTTPGET$ (0-arg). */
+    if (match_kw(p, "HTTPSTATUS")) {
+        skip_ws(p);
+        if (**p == '(') { (*p)++; skip_ws(p); if (**p == ')') (*p)++; }
+        *out_v = (long)basic_http_status;   /* set by basic_https_get() */
+        return 1;
+    }
+#endif
 #endif
     if (match_kw(p, "SECS")) {
         skip_ws(p);

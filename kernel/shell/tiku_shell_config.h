@@ -72,6 +72,9 @@
 #ifndef TIKU_SHELL_CMD_REBOOT
 #define TIKU_SHELL_CMD_REBOOT  1  /**< reboot  - System reset */
 #endif
+#ifndef TIKU_SHELL_CMD_TRNG
+#define TIKU_SHELL_CMD_TRNG    1  /**< trng    - Dump hardware TRNG bytes */
+#endif
 #ifndef TIKU_SHELL_CMD_HISTORY
 #define TIKU_SHELL_CMD_HISTORY 1  /**< history - Last N commands from FRAM */
 #endif
@@ -107,6 +110,12 @@
 #ifndef TIKU_SHELL_CMD_WRITE
 #define TIKU_SHELL_CMD_WRITE   1  /**< write   - Write value to VFS node */
 #endif
+#ifndef TIKU_SHELL_CMD_FS
+#define TIKU_SHELL_CMD_FS      1  /**< rm/touch- Remove / create /data files */
+#endif
+#ifndef TIKU_SHELL_CMD_NVMPROBE
+#define TIKU_SHELL_CMD_NVMPROBE 0 /**< nvmprobe- Carved NVM region diagnostic (opt-in) */
+#endif
 #ifndef TIKU_SHELL_CMD_READ
 #define TIKU_SHELL_CMD_READ    1  /**< read    - Read value from VFS node */
 #endif
@@ -118,6 +127,9 @@
 #endif
 #ifndef TIKU_SHELL_CMD_FREE
 #define TIKU_SHELL_CMD_FREE    1  /**< free    - Memory usage summary */
+#endif
+#ifndef TIKU_SHELL_CMD_DF
+#define TIKU_SHELL_CMD_DF      1  /**< df      - /data file-store usage */
 #endif
 #ifndef TIKU_SHELL_CMD_SLEEP
 #define TIKU_SHELL_CMD_SLEEP   1  /**< sleep   - Enter low-power idle mode */
@@ -210,10 +222,13 @@
 #define TIKU_SHELL_CMD_DNS     0
 #endif
 #endif
-/* syslog: send a remote log line (UDP 514) over SLIP.  Same gating as
- * slip/ping/ip; the syslog client is already compiled with the net kit. */
+/* syslog: send a remote log line (UDP 514) over SLIP.  Tracks the net kit,
+ * but only in non-MIN builds: the syslog client (tiku_kits_net_syslog.c)
+ * ships in the non-MIN ipv4 wildcard, so a MIN build (lean WiFi/SLIP) omits
+ * it -- auto-drop the command there to avoid an undefined-reference link. */
 #ifndef TIKU_SHELL_CMD_SYSLOG
-#if defined(TIKU_KIT_NET_ENABLE) && TIKU_KIT_NET_ENABLE
+#if defined(TIKU_KIT_NET_ENABLE) && TIKU_KIT_NET_ENABLE && \
+    !(defined(TIKU_KIT_NET_MIN) && TIKU_KIT_NET_MIN)
 #define TIKU_SHELL_CMD_SYSLOG  1  /**< syslog  - Send a remote log line (514) */
 #else
 #define TIKU_SHELL_CMD_SYSLOG  0
