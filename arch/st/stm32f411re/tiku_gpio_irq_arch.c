@@ -20,7 +20,6 @@
 #include <stdint.h>
 #include <stm32f411xe.h>
 
-#define TIKU_STM32_GPIO_MODE_INPUT  0U
 #define TIKU_STM32_GPIO_PUPD_UP     1U
 #define TIKU_STM32_EXTI_LINE_COUNT  16U
 
@@ -32,6 +31,10 @@
 #define TIKU_STM32_EXTI_MASK_9_5    (0x1FUL << 5)
 #define TIKU_STM32_EXTI_MASK_15_10  (0x3FUL << 10)
 
+/*
+Global arrays to track the configuration of each EXTI line.
+May be modified in future to support concurrent API access.
+*/
 static volatile uint8_t owner_port[TIKU_STM32_EXTI_LINE_COUNT];
 static volatile uint8_t owner_pin[TIKU_STM32_EXTI_LINE_COUNT];
 static volatile uint16_t exti_enabled_mask;
@@ -104,56 +107,65 @@ stm32f411_exti_group_mask(IRQn_Type irqn)
     }
 }
 
-static int
-stm32f411_exti_line_is_input(uint8_t phys_port, uint8_t phys_pin)
-{
-    uint32_t gpio_base;
-    uint32_t rcc_bit;
-    GPIO_TypeDef *gpio;
-
-    if (tiku_stm32f411_pinmux_resolve(phys_port, phys_pin,
-                                      &gpio_base, &rcc_bit) != 0) {
-        return 0;
-    }
-
-    RCC->AHB1ENR |= rcc_bit;
-    (void)RCC->AHB1ENR;
-
-    gpio = (GPIO_TypeDef *)(uintptr_t)gpio_base;
-    return (((gpio->MODER >> (phys_pin * 2U)) & 0x3U)
-            == TIKU_STM32_GPIO_MODE_INPUT) ? 1 : 0;
-}
-
-static int
-stm32f411_exti_prepare_input(uint8_t port, uint8_t pin,
-                             uint8_t phys_port, uint8_t phys_pin)
-{
-    if (stm32f411_exti_line_is_input(phys_port, phys_pin)) {
-        return TIKU_GPIO_IRQ_OK;
-    }
-
-    if (tiku_stm32f411_gpio_virtual_resolve(port, pin,
-                                            &phys_port, &phys_pin) != 0) {
-        return TIKU_GPIO_IRQ_ERR_INVALID;
-    }
-
-    return tiku_stm32f411_pinmux_init_input(phys_port, phys_pin,
-                                            TIKU_STM32_GPIO_PUPD_UP) == 0
-        ? TIKU_GPIO_IRQ_OK
-        : TIKU_GPIO_IRQ_ERR_INVALID;
-}
-
 static uint32_t
 stm32f411_exti_line_mask(uint8_t line)
 {
     return (1UL << line);
 }
 
+/*
+* Line-specific EXTI dispatch handler.
+*/
+static void
+stm32f411_exti_trace_line(uint8_t line)
+{
+    uint32_t bit;
+    tiku_event_data_t data;
+
+    if (line >= TIKU_STM32_EXTI_LINE_COUNT) {
+        return;
+    }
+
+    bit = stm32f411_exti_line_mask(line);
+    if ((exti_enabled_mask & (uint16_t)bit) == 0U) {
+        return;
+    }
+    if (owner_port[line] == 0U || owner_pin[line] > 7U) {
+        return;
+    }
+
+    data = (tiku_event_data_t)TIKU_GPIO_IRQ_PACK(owner_port[line],
+                                                 owner_pin[line]);
+    tiku_process_post(TIKU_PROCESS_BROADCAST, TIKU_EVENT_GPIO, data);
+    tiku_vfs_tree_gpio_notify(owner_port[line], owner_pin[line]);
+}
+
+/*
+Shared EXTI line dispatch for lines 5-9 and 10-15. 
+These lines share interrupt vectors, so we need to check which specific line triggered the interrupt.
+*/
+static void
+stm32f411_exti_dispatch_shared(uint32_t pending,
+                               uint8_t first_line,
+                               uint8_t last_line)
+{
+    uint8_t line;
+
+    for (line = first_line; line <= last_line; line++) {
+        if ((pending & stm32f411_exti_line_mask(line)) == 0U) {
+            continue;
+        }
+        stm32f411_exti_trace_line(line);
+    }
+}
+
+/*
+Dispatch EXTI interrupts for a specific group of lines.
+*/
 static void
 stm32f411_exti_dispatch(uint32_t group_mask)
 {
     uint32_t pending;
-    uint8_t line;
 
     pending = EXTI->PR & EXTI->IMR & group_mask;
     if (pending == 0U) {
@@ -162,25 +174,33 @@ stm32f411_exti_dispatch(uint32_t group_mask)
 
     EXTI->PR = pending;
 
-    for (line = 0U; line < TIKU_STM32_EXTI_LINE_COUNT; line++) {
-        uint32_t bit = stm32f411_exti_line_mask(line);
-
-        if ((pending & bit) == 0U) {
-            continue;
-        }
-        if ((exti_enabled_mask & (uint16_t)bit) == 0U) {
-            continue;
-        }
-        if (owner_port[line] == 0U || owner_pin[line] > 7U) {
-            continue;
-        }
-
-        tiku_process_post(TIKU_PROCESS_BROADCAST,
-                          TIKU_EVENT_GPIO,
-                          (tiku_event_data_t)
-                              TIKU_GPIO_IRQ_PACK(owner_port[line],
-                                                 owner_pin[line]));
-        tiku_vfs_tree_gpio_notify(owner_port[line], owner_pin[line]);
+    // Line dispatch handler calls, called by ISR
+    // For lines 0-4 (one ISR per line), the line-specific handler is called directly.
+    // Otherwise (multiple lines share an ISR), we dispatch to the shared handler.
+    switch (group_mask) {
+    case TIKU_STM32_EXTI_MASK_0:
+        stm32f411_exti_trace_line(0U);
+        break;
+    case TIKU_STM32_EXTI_MASK_1:
+        stm32f411_exti_trace_line(1U);
+        break;
+    case TIKU_STM32_EXTI_MASK_2:
+        stm32f411_exti_trace_line(2U);
+        break;
+    case TIKU_STM32_EXTI_MASK_3:
+        stm32f411_exti_trace_line(3U);
+        break;
+    case TIKU_STM32_EXTI_MASK_4:
+        stm32f411_exti_trace_line(4U);
+        break;
+    case TIKU_STM32_EXTI_MASK_9_5:
+        stm32f411_exti_dispatch_shared(pending, 5U, 9U);
+        break;
+    case TIKU_STM32_EXTI_MASK_15_10:
+        stm32f411_exti_dispatch_shared(pending, 10U, 15U);
+        break;
+    default:
+        break;
     }
 }
 
@@ -211,7 +231,11 @@ tiku_gpio_irq_arch_enable(uint8_t port, uint8_t pin,
         edge != TIKU_GPIO_EDGE_BOTH) {
         return TIKU_GPIO_IRQ_ERR_INVALID;
     }
-    if (stm32f411_exti_prepare_input(port, pin, phys_port, phys_pin) != 0) {
+
+    // Set up the pin as input with pull-up.
+    // This is done in line with the MSP430 port's EXTI implementation.
+    if (tiku_stm32f411_pinmux_init_input(phys_port, phys_pin,
+                                         TIKU_STM32_GPIO_PUPD_UP) != 0) {
         return TIKU_GPIO_IRQ_ERR_INVALID;
     }
 
@@ -234,6 +258,9 @@ tiku_gpio_irq_arch_enable(uint8_t port, uint8_t pin,
     EXTI->RTSR &= ~line_mask;
     EXTI->FTSR &= ~line_mask;
 
+    // Setup edge trigger configuration for EXTI line.
+    // For the STM32, rising and falling edges are configured independently (with RTSR and FTSR)
+    // To support both edges, both bits are set.
     if (edge == TIKU_GPIO_EDGE_RISING || edge == TIKU_GPIO_EDGE_BOTH) {
         EXTI->RTSR |= line_mask;
     }
@@ -286,6 +313,7 @@ tiku_gpio_irq_arch_disable(uint8_t port, uint8_t pin)
         return TIKU_GPIO_IRQ_OK;
     }
 
+    // Reset EXTI line configuration
     EXTI->IMR &= ~line_mask;
     EXTI->RTSR &= ~line_mask;
     EXTI->FTSR &= ~line_mask;
