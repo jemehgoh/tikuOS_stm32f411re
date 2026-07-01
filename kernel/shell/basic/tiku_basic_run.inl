@@ -59,6 +59,10 @@ exec_run(void)
     gosub_sp          = 0;
     for_sp            = 0;
     loop_sp           = 0;
+#if TIKU_BASIC_SUBS_ENABLE
+    basic_call_sp     = 0;
+    basic_scope_sp    = 0;
+#endif
     basic_err_handler = 0;
     basic_err_pc      = 0;
     basic_data_idx    = -1;      /* RESTORE-equivalent at every RUN */
@@ -158,7 +162,19 @@ exec_run(void)
             break;
         }
 
-        /* Cooperative Ctrl-C poll between statements. */
+        /* Cooperative Ctrl-C poll between statements. SLIP-aware: demux IP
+         * frames away so a 0x03 byte in network traffic on the shared console
+         * UART is not misread as a break (same fix as read_line / DELAY). */
+#if TIKU_SHELL_CMD_SLIP
+        {
+            int ch = tiku_shell_net_getc();
+            if (ch == BASIC_CTRL_C) {
+                SHELL_PRINTF(SH_YELLOW "^C break at line %u" SH_RST "\n",
+                             (unsigned)basic_pc);
+                break;
+            }
+        }
+#else
         if (tiku_shell_io_rx_ready()) {
             int ch = tiku_shell_io_getc();
             if (ch == BASIC_CTRL_C) {
@@ -167,6 +183,7 @@ exec_run(void)
                 break;
             }
         }
+#endif
     }
     basic_running = 0;
 }

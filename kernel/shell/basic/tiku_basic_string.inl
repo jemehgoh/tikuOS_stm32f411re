@@ -275,6 +275,20 @@ parse_strprim(const char **p, char *out, size_t cap)
         out[take] = '\0';
         return 0;
     }
+    if (match_kw(p, "STRIP$")) {
+        /* STRIP$(html$) -- render HTML to plain text (tags/scripts removed,
+         * entities decoded). Bounded by the string scratch (STR_BUF_CAP). */
+        char src[TIKU_BASIC_STR_BUF_CAP];
+        skip_ws(p);
+        if (**p != '(') goto fn_paren_err;
+        (*p)++;
+        if (parse_strexpr(p, src, sizeof(src)) != 0) return -1;
+        skip_ws(p);
+        if (**p != ')') goto fn_paren_err;
+        (*p)++;
+        basic_html_render(src, out, cap);
+        return 0;
+    }
     if (match_kw(p, "CHR$")) {
         long v;
         skip_ws(p);
@@ -334,6 +348,51 @@ parse_strprim(const char **p, char *out, size_t cap)
         }
         return 0;
     }
+#if TIKU_BASIC_RTC_ENABLE && (TIKU_KIT_TIME_ENABLE + 0)
+    /* DATE$() -- "YYYY-MM-DD" (UTC) from the wall clock; 0-arg-with-parens.
+     * Reads 1970-01-01 until the RTC is set (via SETTIME or NTP). */
+    if (match_kw(p, "DATE$")) {
+        tiku_kits_time_tm_t tm;
+        int n;
+        skip_ws(p);
+        if (**p != '(') goto fn_paren_err;
+        (*p)++;
+        skip_ws(p);
+        if (**p != ')') goto fn_paren_err;
+        (*p)++;
+        (void)tiku_kits_time_to_tm(
+            (tiku_kits_time_unix_t)tiku_rtc_get_seconds(), &tm);
+        n = snprintf(out, cap, "%04u-%02u-%02u",
+                     (unsigned)tm.year, (unsigned)tm.month, (unsigned)tm.day);
+        if (n < 0 || (size_t)n >= cap) {
+            basic_error = 1;
+            SHELL_PRINTF(SH_RED "? string too long\n" SH_RST);
+            return -1;
+        }
+        return 0;
+    }
+    /* TIME$() -- "HH:MM:SS" (UTC) from the wall clock. */
+    if (match_kw(p, "TIME$")) {
+        tiku_kits_time_tm_t tm;
+        int n;
+        skip_ws(p);
+        if (**p != '(') goto fn_paren_err;
+        (*p)++;
+        skip_ws(p);
+        if (**p != ')') goto fn_paren_err;
+        (*p)++;
+        (void)tiku_kits_time_to_tm(
+            (tiku_kits_time_unix_t)tiku_rtc_get_seconds(), &tm);
+        n = snprintf(out, cap, "%02u:%02u:%02u",
+                     (unsigned)tm.hour, (unsigned)tm.minute, (unsigned)tm.second);
+        if (n < 0 || (size_t)n >= cap) {
+            basic_error = 1;
+            SHELL_PRINTF(SH_RED "? string too long\n" SH_RST);
+            return -1;
+        }
+        return 0;
+    }
+#endif
     /* BIN$(n) -- 32-bit binary, leading zeros stripped (but at least
      * one digit). Examples: BIN$(10) = "1010", BIN$(0) = "0",
      * BIN$(-1) = "11111111111111111111111111111111". */
@@ -427,6 +486,75 @@ parse_strprim(const char **p, char *out, size_t cap)
         }
         return 0;
     }
+#endif
+#if TIKU_BASIC_FILE_ENABLE
+    /* FREAD$("path") -- read a whole file/VFS node into a string, capped at
+     * the string buffer (a longer file truncates to cap-1). Unlike VFSREAD$ it
+     * keeps the content verbatim, newlines included -- it's for log files. */
+    if (match_kw(p, "FREAD$")) {
+        char path[48];
+        int  n;
+        skip_ws(p);
+        if (**p != '(') goto fn_paren_err;
+        (*p)++;
+        if (parse_path_literal(p, path, sizeof(path)) != 0) return -1;
+        skip_ws(p);
+        if (**p != ')') goto fn_paren_err;
+        (*p)++;
+        n = tiku_vfs_read(path, out, cap - 1u);
+        if (n < 0) n = 0;                       /* missing file -> "" */
+        if ((size_t)n >= cap) n = (int)cap - 1;
+        out[n] = '\0';
+        return 0;
+    }
+#endif
+#if TIKU_BASIC_NET_ENABLE
+    /* IPADDR$() -- the device's current IPv4 as "a.b.c.d" (empty if no
+     * link/lease). 0-arg-with-parens. */
+    if (match_kw(p, "IPADDR$")) {
+        const uint8_t *a;
+        int n;
+        skip_ws(p);
+        if (**p != '(') goto fn_paren_err;
+        (*p)++; skip_ws(p);
+        if (**p != ')') goto fn_paren_err;
+        (*p)++;
+        a = tiku_kits_net_ipv4_get_addr();
+        if (a == (const uint8_t *)0) { out[0] = '\0'; return 0; }
+        n = snprintf(out, cap, "%u.%u.%u.%u",
+                     (unsigned)a[0], (unsigned)a[1], (unsigned)a[2], (unsigned)a[3]);
+        if (n < 0 || (size_t)n >= cap) {
+            basic_error = 1;
+            SHELL_PRINTF(SH_RED "? string too long\n" SH_RST);
+            return -1;
+        }
+        return 0;
+    }
+#if (TIKU_KITS_NET_HTTP_ENABLE + 0)
+    /* HTTPGET$("host", "path") -- HTTPS GET over the certificate-based TLS 1.3
+     * client (basic_https_get): DNS + TCP + cert-validated TLS to a real https
+     * server, returning the response body capped at the string buffer.  The
+     * call drives the net stack itself (WiFi RX drain + TCP timers) so the
+     * console stays alive; HTTPSTATUS() exposes the parsed status code. */
+    if (match_kw(p, "HTTPGET$")) {
+        char host[64], path[80];
+        skip_ws(p);
+        if (**p != '(') goto fn_paren_err;
+        (*p)++;
+        if (parse_path_literal(p, host, sizeof(host)) != 0) return -1;
+        skip_ws(p);
+        if (**p != ',') {
+            basic_error = 1; SHELL_PRINTF(SH_RED "? ',' expected\n" SH_RST); return -1;
+        }
+        (*p)++;
+        if (parse_path_literal(p, path, sizeof(path)) != 0) return -1;
+        skip_ws(p);
+        if (**p != ')') goto fn_paren_err;
+        (*p)++;
+        (void)basic_https_get(host, path, out, cap);
+        return 0;
+    }
+#endif
 #endif
 
     /* UCASE$(s) / LCASE$(s) -- ASCII case conversion. */

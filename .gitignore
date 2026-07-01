@@ -40,10 +40,11 @@ lnk_*.cmd
 .DS_Store
 Thumbs.db
 
-# Backup files
+# Backup files / scratch notes
 *.bak
 *.orig
 takenote.md
+problem.md
 tikukits/
 
 # drivers/ is registered as a git submodule pointing at
@@ -74,7 +75,9 @@ academic/
 TikuBench/
 kintsugi/
 docs/
+ignored/
 tikuConsole/
 
 # Python bytecode cache
 __pycache__/
+insight/

@@ -85,6 +85,36 @@
 #include <kernel/vfs/tiku_vfs.h>
 #include <stdlib.h>     /* strtol for VFSREAD value parsing */
 #endif
+#if TIKU_BASIC_RTC_ENABLE
+#include <kernel/cpu/tiku_rtc.h>          /* NOW / SETTIME wall-clock seconds */
+#if (TIKU_KIT_TIME_ENABLE + 0)
+#include <tikukits/time/tiku_kits_time.h> /* DATE$ / TIME$ calendar breakdown */
+#endif
+#endif
+#if TIKU_BASIC_NET_ENABLE
+#include <tikukits/net/ipv4/tiku_kits_net_udp.h>   /* UDPSEND */
+#include <tikukits/net/ipv4/tiku_kits_net_ipv4.h>  /* IPADDR$ / NETUP */
+#include <kernel/cpu/tiku_watchdog.h>              /* pump kicks the WDT */
+#if (TIKU_KITS_NET_MQTT_ENABLE + 0)
+#include <tikukits/net/ipv4/tiku_kits_net_tcp.h>   /* tcp_periodic in pump */
+#include <tikukits/net/mqtt/tiku_kits_net_mqtt.h>  /* MQTTPUB */
+#if defined(TIKU_DRV_WIFI_CYW43_ENABLE) && TIKU_DRV_WIFI_CYW43_ENABLE
+#include <drivers/wifi/cyw43/whd.h>                /* whd_drain_rx in pump */
+#endif
+#endif
+#if (TIKU_KITS_NET_HTTP_ENABLE + 0)
+/* HTTPGET$ runs over the certificate-based TLS 1.3 client (not the PSK-only
+ * http kit): TCP transport + DNS + X.509 trust store + the tls13 client. */
+#include <tikukits/net/ipv4/tiku_kits_net_tcp.h>
+#include <tikukits/net/ipv4/tiku_kits_net_dns.h>
+#include <tikukits/net/tls/x509/tiku_kits_crypto_x509.h>
+#include <tikukits/net/tls/tls13/tiku_kits_crypto_tls13.h>
+#if defined(TIKU_DRV_WIFI_CYW43_ENABLE) && TIKU_DRV_WIFI_CYW43_ENABLE
+#include <drivers/wifi/cyw43/whd.h>                /* whd_drain_rx in pump */
+#include <arch/arm-rp2350/tiku_trng_arch.h>        /* TLS entropy          */
+#endif
+#endif
+#endif
 
 /*---------------------------------------------------------------------------*/
 /* AMALGAMATION                                                              */
@@ -98,13 +128,18 @@
 #include "tiku_basic_hw.inl"
 #include "tiku_basic_prng.inl"
 #include "tiku_basic_trig.inl"
+#include "tiku_basic_mathx.inl"
 #include "tiku_basic_lex.inl"
 #include "tiku_basic_io.inl"
+#include "tiku_basic_https.inl"
+#include "tiku_basic_browse.inl"
 #include "tiku_basic_string.inl"
 #include "tiku_basic_call.inl"
 #include "tiku_basic_expr.inl"
 #include "tiku_basic_program.inl"
 #include "tiku_basic_stmt.inl"
+#include "tiku_basic_net.inl"
+#include "tiku_basic_subs.inl"
 #include "tiku_basic_multi_if.inl"
 #include "tiku_basic_select.inl"
 #include "tiku_basic_renum.inl"

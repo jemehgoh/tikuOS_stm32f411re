@@ -192,6 +192,34 @@ typedef struct tiku_vfs_desc {
       TIKU_VFS_DF_RANGE, (uint16_t)(ticks), 0, (int32_t)(lo), (int32_t)(hi), 0 }
 
 /*---------------------------------------------------------------------------*/
+/* DYNAMIC DIRECTORIES — runtime-populated children (e.g. a file store)      */
+/*---------------------------------------------------------------------------*/
+/*
+ * A DIR node may carry an optional `dyn` ops pointer.  When set, the directory
+ * has children that are NOT in the static children[] array but are resolved at
+ * run time -- the file store mounts /data this way.  The static tree is
+ * unchanged: read/write fall back to the dyn ops ONLY when a path fails to
+ * resolve statically, and list() enumerates the static children and then the
+ * dynamic ones.  A dynamic child is addressed BY NAME (the const node handlers
+ * carry no file identity), so the ops take the name.
+ */
+
+/** @brief Per-name callback for tiku_vfs_dynops.list(). */
+typedef void (*tiku_vfs_dyn_list_cb)(const char *name, void *ctx);
+
+/** @brief Runtime child operations for a dynamic directory. */
+typedef struct tiku_vfs_dynops {
+    void (*list)  (tiku_vfs_dyn_list_cb cb, void *ctx);           /**< enumerate  */
+    int  (*read)  (const char *name, char *buf, size_t max);      /**< read child */
+    int  (*write) (const char *name, const char *buf, size_t len);/**< write/create */
+    int  (*unlink)(const char *name);                            /**< delete child */
+    /** Optional: enumerate the immediate children under @p prefix ("" = root,
+     *  "logs/" = a sub-folder), reporting virtual folders with a trailing '/'.
+     *  NULL on a purely flat store -- the VFS then falls back to list(). */
+    void (*list_dir)(const char *prefix, tiku_vfs_dyn_list_cb cb, void *ctx);
+} tiku_vfs_dynops_t;
+
+/*---------------------------------------------------------------------------*/
 /* VFS NODE                                                                  */
 /*---------------------------------------------------------------------------*/
 
@@ -205,6 +233,8 @@ typedef struct tiku_vfs_node {
     uint8_t                      child_count;  /**< For DIR: child count */
     const tiku_vfs_desc_t       *desc;         /**< Type descriptor; NULL =
                                                     untyped (back-compat) */
+    const struct tiku_vfs_dynops *dyn;         /**< Dynamic children; NULL =
+                                                    static dir (back-compat) */
 } tiku_vfs_node_t;
 
 /*---------------------------------------------------------------------------*/
@@ -306,6 +336,19 @@ int tiku_vfs_desc_str(const tiku_vfs_node_t *node, char *buf, size_t max);
 int tiku_vfs_write(const char *path, const char *data, size_t len);
 
 /**
+ * @brief Delete a file at @p path.
+ *
+ * Only dynamic directories (a file store mounted via dynops) support
+ * removal; a static node — or a directory without an unlink op —
+ * returns -1.  On success the parent directory's watchers are rung,
+ * exactly like a write.
+ *
+ * @param path  Absolute path to a dynamic FILE node
+ * @return 0 on success, -1 on error (not found / not removable)
+ */
+int tiku_vfs_unlink(const char *path);
+
+/**
  * @brief List directory contents
  * @param path      Absolute path to a DIR node
  * @param callback  Called once per child
@@ -313,6 +356,17 @@ int tiku_vfs_write(const char *path, const char *data, size_t len);
  * @return 0 on success, -1 on error (not found or not a directory)
  */
 int tiku_vfs_list(const char *path, tiku_vfs_list_fn callback, void *ctx);
+
+/**
+ * @brief Is @p path a directory?
+ *
+ * True for a static DIR node and for a virtual sub-folder of a dynamic store
+ * (path-as-name): a path with at least one child under it, or an mkdir marker.
+ * False for a file or a non-existent path.  Used by `cd`.
+ *
+ * @return 1 if @p path is a directory, 0 otherwise.
+ */
+int tiku_vfs_is_dir(const char *path);
 
 /*---------------------------------------------------------------------------*/
 /* WATCH — change notification on nodes                                      */
