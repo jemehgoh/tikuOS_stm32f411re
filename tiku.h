@@ -142,7 +142,7 @@
 #endif
 #elif defined(PLATFORM_STM32F411)
 /* STM32F411 SYSCLK/HCLK target in MHz. Supported values:
- *   16, 48, 84, 100
+ * 2, 4, 8, 16, 48, 84, 100
  * Unsupported values request the safe default, 100 MHz, and set the
  * clock-fault flag. PLL failures fall back to HSI at 16 MHz. */
 #ifndef MAIN_CPU_FREQ

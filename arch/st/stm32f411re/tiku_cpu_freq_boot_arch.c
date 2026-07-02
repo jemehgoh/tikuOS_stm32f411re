@@ -41,6 +41,8 @@
     ((((uint32_t)(v)) << FLASH_ACR_LATENCY_Pos) & FLASH_ACR_LATENCY_Msk)
 
 #define TIKU_STM32_PWR_CR_VOS_SCALE1  (0x03U << PWR_CR_VOS_Pos)
+#define TIKU_STM32_PWR_CR_VOS_SCALE2  (0x02U << PWR_CR_VOS_Pos)
+#define TIKU_STM32_PWR_CR_VOS_SCALE3  (0x02U << PWR_CR_VOS_Pos)
 #define TIKU_STM32_PLLP_DIV2          0x00000000U
 #define TIKU_STM32_PLLP_DIV4          RCC_PLLCFGR_PLLP_0
 
@@ -143,13 +145,33 @@ static int stm32f411_flash_configure(uint8_t latency) {
                                       TIKU_STM32_FLASH_ACR_LATENCY(latency));
 }
 
-static void stm32f411_voltage_scale1(void) {
+static void stm32f411_voltage_scale(unsigned int target_mhz) {
     RCC->APB1ENR |= RCC_APB1ENR_PWREN;
     (void)RCC->APB1ENR;
 
-    PWR->CR =
-        (PWR->CR & ~PWR_CR_VOS_Msk)
-        | TIKU_STM32_PWR_CR_VOS_SCALE1;
+    /*
+        Set voltage scaling based on target frequency.
+        The settings are based on those described in the STM32F411xE
+        reference manual (RM0383), section 5.4.1, as follows:
+        - Scale 1: fCLK > 84 MHz
+        - Scale 2: fCLK <= 84 MHz
+        - Scale 3: fCLK <= 64 MHz
+    */
+    switch (target_mhz) {
+        case 48U:
+            PWR->CR = (PWR->CR & ~PWR_CR_VOS_Msk)
+                    | TIKU_STM32_PWR_CR_VOS_SCALE3;
+            break;        
+        case 84U:
+            PWR->CR = (PWR->CR & ~PWR_CR_VOS_Msk)
+                    | TIKU_STM32_PWR_CR_VOS_SCALE2;
+            break;        
+        default:
+            PWR->CR = (PWR->CR & ~PWR_CR_VOS_Msk)
+                    | TIKU_STM32_PWR_CR_VOS_SCALE1;
+            break;
+    }
+
     (void)stm32f411_spin_until_set(&PWR->CSR, PWR_CSR_VOSRDY);
 }
 
@@ -187,6 +209,27 @@ struct stm32f411_clock_plan {
 };
 
 static const struct stm32f411_clock_plan stm32f411_clock_plans[] = {
+    {
+        2U, 0U, 0U, 0U, 0U, 0U, 0U,
+        RCC_CFGR_HPRE_DIV8,
+        RCC_CFGR_PPRE1_DIV1,
+        RCC_CFGR_PPRE2_DIV1,
+        2000000UL, 2000000UL, 2000000UL, 2000000UL
+    },
+    {
+        4U, 0U, 0U, 0U, 0U, 0U, 0U,
+        RCC_CFGR_HPRE_DIV4,
+        RCC_CFGR_PPRE1_DIV1,
+        RCC_CFGR_PPRE2_DIV1,
+        4000000UL, 4000000UL, 4000000UL, 4000000UL
+    },
+    {
+        8U, 0U, 0U, 0U, 0U, 0U, 0U,
+        RCC_CFGR_HPRE_DIV2,
+        RCC_CFGR_PPRE1_DIV1,
+        RCC_CFGR_PPRE2_DIV1,
+        8000000UL, 8000000UL, 8000000UL, 8000000UL
+    },
     {
         16U, 0U, 0U, 0U, 0U, 0U, 0U,
         RCC_CFGR_HPRE_DIV1,
@@ -243,6 +286,16 @@ static void stm32f411_update_clock_cache(
     g_pclk2_hz  = plan->pclk2_hz;
 }
 
+static void stm32f411_apply_cfgr(const struct stm32f411_clock_plan *plan) {
+    uint32_t cfgr = RCC->CFGR;
+
+    cfgr &= ~(RCC_CFGR_HPRE_Msk
+            | RCC_CFGR_PPRE1_Msk
+            | RCC_CFGR_PPRE2_Msk);
+    cfgr |= plan->hpre_bits | plan->ppre1_bits | plan->ppre2_bits;
+    RCC->CFGR = cfgr;
+}
+
 static void stm32f411_fallback_hsi(void) {
     (void)stm32f411_switch_sysclk_to_hsi();
     stm32f411_pll_disable();
@@ -261,18 +314,13 @@ static int stm32f411_apply_pll_plan(
     }
 
     stm32f411_pll_disable();
-    stm32f411_voltage_scale1();
+    stm32f411_voltage_scale(plan->target_mhz);
 
     if (!stm32f411_flash_configure(plan->flash_latency)) {
         return 0;
     }
 
-    cfgr = RCC->CFGR;
-    cfgr &= ~(RCC_CFGR_HPRE_Msk
-            | RCC_CFGR_PPRE1_Msk
-            | RCC_CFGR_PPRE2_Msk);
-    cfgr |= plan->hpre_bits | plan->ppre1_bits | plan->ppre2_bits;
-    RCC->CFGR = cfgr;
+    stm32f411_apply_cfgr(plan);
 
     RCC->PLLCFGR =
         TIKU_STM32_RCC_PLLCFGR_PLLM(plan->pllm)
@@ -328,6 +376,7 @@ void tiku_cpu_freq_stm32f411_init(unsigned int target_mhz) {
         if (!stm32f411_flash_configure(plan->flash_latency)) {
             g_clock_fault = 1U;
         } else {
+            stm32f411_apply_cfgr(plan);
             g_clock_fault = unsupported;
         }
         stm32f411_update_clock_cache(plan);
