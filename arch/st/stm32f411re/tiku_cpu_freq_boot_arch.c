@@ -134,8 +134,8 @@ static int stm32f411_flash_configure(uint8_t latency) {
     uint32_t acr = FLASH->ACR;
 
     acr &= ~FLASH_ACR_LATENCY_Msk;
+    acr &= ~FLASH_ACR_PRFTEN;
     acr |= TIKU_STM32_FLASH_ACR_LATENCY(latency)
-        | FLASH_ACR_PRFTEN
         | FLASH_ACR_ICEN
         | FLASH_ACR_DCEN;
     FLASH->ACR = acr;
