@@ -42,7 +42,7 @@
 
 #define TIKU_STM32_PWR_CR_VOS_SCALE1  (0x03U << PWR_CR_VOS_Pos)
 #define TIKU_STM32_PWR_CR_VOS_SCALE2  (0x02U << PWR_CR_VOS_Pos)
-#define TIKU_STM32_PWR_CR_VOS_SCALE3  (0x02U << PWR_CR_VOS_Pos)
+#define TIKU_STM32_PWR_CR_VOS_SCALE3  (0x01U << PWR_CR_VOS_Pos)
 #define TIKU_STM32_PLLP_DIV2          0x00000000U
 #define TIKU_STM32_PLLP_DIV4          RCC_PLLCFGR_PLLP_0
 
@@ -176,15 +176,7 @@ static void stm32f411_voltage_scale(unsigned int target_mhz) {
 }
 
 static void stm32f411_enable_boot_peripherals(void) {
-    RCC->AHB1ENR |= RCC_AHB1ENR_GPIOAEN
-                 |  RCC_AHB1ENR_GPIOBEN
-                 |  RCC_AHB1ENR_GPIOCEN;
-    (void)RCC->AHB1ENR;
-
-    RCC->APB1ENR |= RCC_APB1ENR_PWREN
-                 |  RCC_APB1ENR_TIM2EN
-                 |  RCC_APB1ENR_TIM5EN
-                 |  RCC_APB1ENR_USART2EN;
+    RCC->APB1ENR |= RCC_APB1ENR_PWREN;
     (void)RCC->APB1ENR;
 
     RCC->APB2ENR |= RCC_APB2ENR_SYSCFGEN;
