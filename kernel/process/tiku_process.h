@@ -45,6 +45,18 @@
 /** @brief Event queue size (power of 2 for fast modulo) */
 #define TIKU_QUEUE_SIZE         32
 
+/**
+ * @brief Queue slots reserved for system events.
+ *
+ * User-range events (TIKU_EVENT_USER .. TIKU_EVENT_TIMER-1) may fill
+ * the queue only up to TIKU_QUEUE_SIZE - TIKU_QUEUE_RESERVE; the
+ * last slots are held back so a flood of application posts can never
+ * drop kernel events (TIMER, EXITED, INIT, VFS, GPIO).  Dropping a
+ * TIMER event stalls its owner until some other event arrives —
+ * the reserve makes that failure mode structurally impossible.
+ */
+#define TIKU_QUEUE_RESERVE      4
+
 /** @brief Maximum number of processes in the registry */
 #define TIKU_PROCESS_MAX        8
 
@@ -116,10 +128,17 @@ typedef struct tiku_process {
     /* --- Observability fields --- */
     tiku_process_state_t state;     /**< Current process state */
     int8_t pid;                     /**< Registry index (-1 = unregistered) */
-    uint16_t sram_used;             /**< SRAM bytes allocated for this process */
-    uint16_t fram_used;             /**< FRAM bytes allocated for this process */
+    uint16_t sram_used;             /**< Self-DECLARED SRAM bytes (advisory) */
+    uint16_t fram_used;             /**< Self-DECLARED FRAM bytes (advisory) */
     tiku_clock_time_t start_time;   /**< Tick count when process started */
     uint16_t wake_count;            /**< Number of times scheduled */
+    const void *mem_arena;          /**< Attached tiku_arena_t (or NULL): the
+                                         MEASURED memory source.  Set via
+                                         tiku_process_attach_mem_arena(); read
+                                         through tiku_process_sram/fram_used(),
+                                         which report measured + declared.  A
+                                         bump allocator cannot misreport, so
+                                         attached beats advertised. */
 } tiku_process_t;
 
 /*---------------------------------------------------------------------------*/
@@ -404,6 +423,28 @@ void tiku_process_poll(struct tiku_process *p);
 int8_t tiku_process_register(const char *name, struct tiku_process *p);
 
 /**
+ * @brief Attach a memory arena to a process for MEASURED accounting.
+ *
+ * ps, /proc/<pid>/sram_used|fram_used and /sys/mem/used then report the
+ * arena's real bump-pointer state (which cannot drift) on top of the
+ * advisory self-declared fields.  Pass the process's dominant arena
+ * (e.g. BASIC's working arena for the shell process); NULL detaches.
+ *
+ * @param p      Process (no-op when NULL)
+ * @param arena  const tiku_arena_t* (typed void to keep this header
+ *               free of the memory-module include)
+ */
+void tiku_process_attach_mem_arena(struct tiku_process *p,
+                                   const void *arena);
+
+/** @brief SRAM bytes: measured (attached SRAM-tier arena) + declared. */
+uint32_t tiku_process_sram_used(const struct tiku_process *p);
+
+/** @brief FRAM/NVM/HIFRAM bytes: measured (attached non-SRAM-tier
+ *         arena) + declared. */
+uint32_t tiku_process_fram_used(const struct tiku_process *p);
+
+/**
  * @brief Get a registered process by pid
  *
  * @param pid  Process identifier (0..TIKU_PROCESS_MAX-1)
@@ -521,6 +562,18 @@ uint8_t tiku_process_queue_empty(void);
 
 /** @brief Return the number of pending events in the queue */
 uint8_t tiku_process_queue_length(void);
+
+/**
+ * @brief Lifetime count of events dropped because the queue was full.
+ *
+ * Increments every time tiku_process_post() (or an internal poll
+ * enqueue) fails for lack of space — including user posts refused by
+ * the TIKU_QUEUE_RESERVE guard.  A nonzero, growing value is the
+ * tell for queue-overflow bugs that were previously silent (the
+ * failed post returns 0 and most callers ignore it).  Wraps at
+ * 65535; exported at /proc/queue/dropped.
+ */
+uint16_t tiku_process_queue_dropped(void);
 
 /**
  * @brief Peek at a queue entry by index (0 = head).

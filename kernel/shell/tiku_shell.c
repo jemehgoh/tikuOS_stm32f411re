@@ -113,6 +113,12 @@
 #if TIKU_SHELL_CMD_TRNG
 #include "commands/tiku_shell_cmd_trng.h"
 #endif
+#if TIKU_SHELL_CMD_MRAMBENCH
+#include "commands/tiku_shell_cmd_mrambench.h"
+#endif
+#if TIKU_SHELL_CMD_BLE
+#include "commands/tiku_shell_cmd_ble.h"
+#endif
 #if TIKU_SHELL_CMD_HISTORY
 #include "commands/tiku_shell_cmd_history.h"
 #endif
@@ -519,6 +525,12 @@ static const tiku_shell_cmd_t tiku_shell_commands[] = {
 #if TIKU_SHELL_CMD_TRNG
     {"trng",    "Dump hardware TRNG bytes",    tiku_shell_cmd_trng},
 #endif
+#if TIKU_SHELL_CMD_MRAMBENCH
+    {"mrambench","Time the MRAM programmer",   tiku_shell_cmd_mrambench},
+#endif
+#if TIKU_SHELL_CMD_BLE
+    {"ble",     "EM9305 BLE radio: probe | beacon [name] | stop", tiku_shell_cmd_ble},
+#endif
 #if TIKU_SHELL_CMD_HISTORY
     {"history", "Last N commands from FRAM",   tiku_shell_cmd_history},
 #endif
@@ -801,6 +813,12 @@ static struct {
     struct tiku_timer  timer;       /**< Periodic I/O poll timer; posts
                                      *   TIKU_EVENT_TIMER to this process. */
 } cli;
+
+/* cli.pos is uint8_t, so the line buffer must index within 0..255.  Raising
+ * TIKU_SHELL_LINE_SIZE past 256 would let a full line overflow pos (and the
+ * uint8_t history head/count) -- widen those fields first. */
+_Static_assert(TIKU_SHELL_LINE_SIZE <= 256,
+               "cli.pos is uint8_t; widen it before TIKU_SHELL_LINE_SIZE > 256");
 
 #if TIKU_SHELL_CMD_HISTORY
 /**

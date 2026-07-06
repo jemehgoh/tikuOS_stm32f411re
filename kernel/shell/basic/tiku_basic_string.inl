@@ -63,6 +63,12 @@ static long parse_cond(const char **p);
 static int  parse_path_literal(const char **p, char *buf, size_t cap);
 static long basic_vfsread(const char *path);
 #endif
+#if TIKU_BASIC_NET_ENABLE && (TIKU_KITS_NET_MQTT_ENABLE + 0)
+/* MQTTWAIT$ is dispatched here but implemented in tiku_basic_net.inl,
+ * which is included after this file -- forward-declare it. */
+static int basic_net_mqtt_wait(const char *ipstr, const char *topic,
+                               long secs, char *out, size_t cap);
+#endif
 
 /*---------------------------------------------------------------------------*/
 /* STRING HEAP + STRING-EXPRESSION PARSER                                    */
@@ -118,9 +124,166 @@ peek_string_expr(const char *p)
 
 static int parse_strexpr(const char **p, char *out, size_t cap);
 
+/* Resolve a reader's SOURCE argument to a (ptr, len) pair. A big-buffer
+ * reference `#n` (a FETCH target) yields the arena buffer IN PLACE -- no copy,
+ * so a whole multi-KB reply is readable past STR_BUF_CAP. Anything else is a
+ * normal string expression parsed into the caller's stack buffer. Readers that
+ * scan a large source (JSON$, LINE$, BETWEEN$) use this instead of
+ * parse_strexpr; their small results still go through the 1 KB out buffer. */
+static int
+parse_str_ref(const char **p, const char **op, size_t *olen,
+              char *stackbuf, size_t cap)
+{
+    skip_ws(p);
+#if TIKU_BASIC_BIGBUF_COUNT > 0
+    if (**p == '#') {
+        long n;
+        (*p)++;
+        n = parse_expr(p);
+        if (basic_error) return -1;
+        if (n < 0 || n >= TIKU_BASIC_BIGBUF_COUNT || basic_bigbuf[n] == NULL) {
+            basic_error = 1;
+            SHELL_PRINTF(SH_RED "? bad #buffer\n" SH_RST);
+            return -1;
+        }
+        *op = basic_bigbuf[n];
+        *olen = basic_biglen[n];
+        return 0;
+    }
+#endif
+    if (parse_strexpr(p, stackbuf, cap) != 0) return -1;
+    *op = stackbuf;
+    *olen = strlen(stackbuf);
+    return 0;
+}
+
+#if TIKU_BASIC_JSON_ENABLE
+/* JSON$ core: navigate `json` (jlen bytes) by a dotted `path` -- object keys and
+ * array indices (e.g. "choices.0.message.content") -- and render the target
+ * SCALAR into out[cap]: strings are un-escaped, numbers/bools become text, and
+ * null / not-found / a non-scalar target yield "".  Wraps the codec/json
+ * pull-parser (validated against real LLM-response shapes on host).  The agent
+ * primitive for reading an API reply. */
+static int
+basic_json_extract(const char *json, uint16_t jlen, const char *path,
+                   char *out, size_t cap)
+{
+    tiku_kits_codec_json_reader_t r;
+    tiku_kits_codec_json_tok_t t, vt = TIKU_KITS_CODEC_JSON_TOK_END;
+    const char *seg = path;
+    out[0] = '\0';
+    tiku_kits_codec_json_reader_init(&r, (const uint8_t *)json, jlen);
+    for (;;) {
+        size_t sl = 0, k;
+        int is_idx, last;
+        while (seg[sl] && seg[sl] != '.') sl++;
+        is_idx = (sl > 0);
+        for (k = 0; k < sl; k++) if (seg[k] < '0' || seg[k] > '9') { is_idx = 0; break; }
+        last = (seg[sl] == '\0');
+        if (tiku_kits_codec_json_next_token(&r, &t) != TIKU_KITS_CODEC_OK) return -1;
+        if (t == TIKU_KITS_CODEC_JSON_TOK_LBRACE) {
+            for (;;) {                          /* object: find key == seg */
+                const char *ks; uint16_t kl;
+                if (tiku_kits_codec_json_next_token(&r, &t) != TIKU_KITS_CODEC_OK) return -1;
+                if (t != TIKU_KITS_CODEC_JSON_TOK_STRING) return -1;   /* RBRACE/malformed */
+                tiku_kits_codec_json_token_string(&r, &ks, &kl);
+                if (tiku_kits_codec_json_next_token(&r, &t) != TIKU_KITS_CODEC_OK ||
+                    t != TIKU_KITS_CODEC_JSON_TOK_COLON) return -1;
+                if ((size_t)kl == sl && memcmp(ks, seg, sl) == 0) break;   /* found */
+                if (tiku_kits_codec_json_skip_value(&r) != TIKU_KITS_CODEC_OK) return -1;
+                if (tiku_kits_codec_json_next_token(&r, &t) != TIKU_KITS_CODEC_OK) return -1;
+                if (t != TIKU_KITS_CODEC_JSON_TOK_COMMA) return -1;   /* end of object */
+            }
+        } else if (t == TIKU_KITS_CODEC_JSON_TOK_LBRACKET) {
+            long idx = 0, i;                     /* array: index seg */
+            if (!is_idx) return -1;
+            for (k = 0; k < sl; k++) idx = idx * 10 + (seg[k] - '0');
+            for (i = 0; i < idx; i++) {
+                if (tiku_kits_codec_json_skip_value(&r) != TIKU_KITS_CODEC_OK) return -1;
+                if (tiku_kits_codec_json_next_token(&r, &t) != TIKU_KITS_CODEC_OK) return -1;
+                if (t != TIKU_KITS_CODEC_JSON_TOK_COMMA) return -1;   /* out of range */
+            }
+        } else {
+            return -1;                           /* path descends into a scalar */
+        }
+        if (last) {
+            if (tiku_kits_codec_json_next_token(&r, &vt) != TIKU_KITS_CODEC_OK) return -1;
+            break;
+        }
+        seg += sl + 1;
+    }
+    if (vt == TIKU_KITS_CODEC_JSON_TOK_STRING) {
+        const char *s; uint16_t slen; size_t o = 0, i = 0;
+        tiku_kits_codec_json_token_string(&r, &s, &slen);
+        while (i < slen && o + 1u < cap) {       /* un-escape */
+            char c = s[i++];
+            if (c == '\\' && i < slen) {
+                char e = s[i++];
+                switch (e) {
+                case 'n': c = '\n'; break;  case 'r': c = '\r'; break;
+                case 't': c = '\t'; break;  case 'b': c = '\b'; break;
+                case 'f': c = '\f'; break;  case '/': c = '/';  break;
+                case '"': c = '"';  break;  case '\\': c = '\\'; break;
+                case 'u': {
+                    unsigned v = 0; int kk;
+                    if (i + 4u <= slen) {
+                        for (kk = 0; kk < 4; kk++) {
+                            char h = s[i + kk];
+                            unsigned d = (h <= '9') ? (unsigned)(h - '0')
+                                                    : (unsigned)((h | 0x20) - 'a' + 10);
+                            v = v * 16u + d;
+                        }
+                        i += 4;
+                        c = (v < 128u) ? (char)v : '?';
+                    } else c = '?';
+                    break;
+                }
+                default: c = e; break;
+                }
+            }
+            out[o++] = c;
+        }
+        out[o] = '\0';
+        return 0;
+    }
+    if (vt == TIKU_KITS_CODEC_JSON_TOK_NUMBER) {
+        int32_t iv; char tmp[16]; int ti = 0; size_t oo = 0; long v;
+        tiku_kits_codec_json_token_int(&r, &iv);
+        v = (long)iv;
+        if (v < 0) { if (oo + 1u < cap) out[oo++] = '-'; v = -v; }
+        do { tmp[ti++] = (char)('0' + (int)(v % 10)); v /= 10; } while (v && ti < 15);
+        while (ti > 0 && oo + 1u < cap) out[oo++] = tmp[--ti];
+        out[oo] = '\0';
+        return 0;
+    }
+    if (vt == TIKU_KITS_CODEC_JSON_TOK_TRUE  && cap > 4u) { memcpy(out, "true", 5);  return 0; }
+    if (vt == TIKU_KITS_CODEC_JSON_TOK_FALSE && cap > 5u) { memcpy(out, "false", 6); return 0; }
+    out[0] = '\0';                               /* null / object / array -> "" */
+    return 0;
+}
+#endif /* TIKU_BASIC_JSON_ENABLE */
+
 /* parse_strprim: a single string atom -- literal, variable, or a
  * string-returning function call. Stores the resulting NUL-terminated
  * string in @out (cap bytes). Returns 0 on success, -1 on error. */
+#if TIKU_BASIC_CRYPTO_ENABLE
+/* Encode n raw bytes as 2n lowercase hex chars + NUL into out. The
+ * caller guarantees out holds 2n+1 bytes.  Used by SHA256$ / HMAC$,
+ * which return their digests as hex text (raw bytes cannot survive a
+ * NUL-terminated string interpreter). */
+static void
+basic_hex_encode(const uint8_t *src, size_t n, char *out)
+{
+    static const char hexd[] = "0123456789abcdef";
+    size_t i;
+    for (i = 0; i < n; i++) {
+        out[2 * i]     = hexd[(src[i] >> 4) & 0x0F];
+        out[2 * i + 1] = hexd[src[i] & 0x0F];
+    }
+    out[2 * n] = '\0';
+}
+#endif
+
 static int
 parse_strprim(const char **p, char *out, size_t cap)
 {
@@ -275,6 +438,275 @@ parse_strprim(const char **p, char *out, size_t cap)
         out[take] = '\0';
         return 0;
     }
+    /* UPPER$(s$) / LOWER$(s$) -- ASCII case fold (leaves non-letters, incl.
+     * UTF-8 multibyte bytes, untouched). Table stakes for case-insensitive
+     * matching in agent/text programs. */
+    {
+        int case_up = 0;                    /* 1 = upper, 2 = lower */
+        if (match_kw(p, "UPPER$")) case_up = 1;
+        else if (match_kw(p, "LOWER$")) case_up = 2;
+        if (case_up) {
+            char src[TIKU_BASIC_STR_BUF_CAP];
+            size_t i, n;
+            skip_ws(p);
+            if (**p != '(') goto fn_paren_err;
+            (*p)++;
+            if (parse_strexpr(p, src, sizeof(src)) != 0) return -1;
+            skip_ws(p);
+            if (**p != ')') goto fn_paren_err;
+            (*p)++;
+            n = strlen(src);
+            if (n + 1u > cap) {
+                basic_error = 1;
+                SHELL_PRINTF(SH_RED "? string too long\n" SH_RST);
+                return -1;
+            }
+            for (i = 0; i < n; i++) {
+                char c = src[i];
+                if (case_up == 1 && c >= 'a' && c <= 'z') c = (char)(c - ('a' - 'A'));
+                else if (case_up == 2 && c >= 'A' && c <= 'Z') c = (char)(c + ('a' - 'A'));
+                out[i] = c;
+            }
+            out[n] = '\0';
+            return 0;
+        }
+    }
+    if (match_kw(p, "TRIM$")) {
+        /* TRIM$(s$) -- strip leading + trailing ASCII whitespace. */
+        char src[TIKU_BASIC_STR_BUF_CAP];
+        size_t a, b, n;
+        skip_ws(p);
+        if (**p != '(') goto fn_paren_err;
+        (*p)++;
+        if (parse_strexpr(p, src, sizeof(src)) != 0) return -1;
+        skip_ws(p);
+        if (**p != ')') goto fn_paren_err;
+        (*p)++;
+        n = strlen(src);
+        a = 0;
+        while (a < n && (src[a] == ' ' || src[a] == '\t' ||
+                         src[a] == '\r' || src[a] == '\n')) a++;
+        b = n;
+        while (b > a && (src[b - 1] == ' ' || src[b - 1] == '\t' ||
+                         src[b - 1] == '\r' || src[b - 1] == '\n')) b--;
+        if ((b - a) + 1u > cap) {
+            basic_error = 1;
+            SHELL_PRINTF(SH_RED "? string too long\n" SH_RST);
+            return -1;
+        }
+        memcpy(out, src + a, b - a);
+        out[b - a] = '\0';
+        return 0;
+    }
+    if (match_kw(p, "WORD$")) {
+        /* WORD$(s$, n [, delim$]) -- the nth field (1-based) of s$, split on
+         * any char in delim$ (default: whitespace). Empty runs are skipped, so
+         * "a,,b" with delim "," yields WORD$=... 1:"a" 2:"b". Out of range -> "".
+         * The tokenizer for "parse text, extract words". */
+        char src[TIKU_BASIC_STR_BUF_CAP], delim[TIKU_BASIC_STR_BUF_CAP];
+        long idx;
+        const char *dl;
+        size_t i, srclen, tstart = 0, tlen = 0;
+        long w = 0;
+        int in_tok = 0, found = 0, dgiven = 0;
+        skip_ws(p);
+        if (**p != '(') goto fn_paren_err;
+        (*p)++;
+        if (parse_strexpr(p, src, sizeof(src)) != 0) return -1;
+        skip_ws(p);
+        if (**p != ',') { basic_error = 1; SHELL_PRINTF(SH_RED "? ',' expected\n" SH_RST); return -1; }
+        (*p)++;
+        idx = parse_expr(p);
+        if (basic_error) return -1;
+        skip_ws(p);
+        if (**p == ',') {
+            (*p)++;
+            if (parse_strexpr(p, delim, sizeof(delim)) != 0) return -1;
+            dgiven = 1;
+            skip_ws(p);
+        }
+        if (**p != ')') goto fn_paren_err;
+        (*p)++;
+        dl = (dgiven && delim[0]) ? delim : " \t\r\n";
+        srclen = strlen(src);
+        for (i = 0; i <= srclen && !found; i++) {
+            int is_delim = (i == srclen) ? 1 : (strchr(dl, src[i]) != NULL);
+            if (!is_delim) {
+                if (!in_tok) { in_tok = 1; tstart = i; tlen = 0; }
+                tlen++;
+            } else if (in_tok) {
+                in_tok = 0;
+                w++;
+                if (w == idx) found = 1;
+            }
+        }
+        if (found && idx >= 1) {
+            if (tlen + 1u > cap) {
+                basic_error = 1;
+                SHELL_PRINTF(SH_RED "? string too long\n" SH_RST);
+                return -1;
+            }
+            memcpy(out, src + tstart, tlen);
+            out[tlen] = '\0';
+        } else {
+            out[0] = '\0';
+        }
+        return 0;
+    }
+    if (match_kw(p, "REPLACE$")) {
+        /* REPLACE$(s$, from$, to$) -- replace every occurrence of from$ with
+         * to$. Empty from$ returns s$ unchanged (no infinite loop). */
+        char src[TIKU_BASIC_STR_BUF_CAP];
+        char from[TIKU_BASIC_STR_BUF_CAP], to[TIKU_BASIC_STR_BUF_CAP];
+        size_t fl, tl, srclen, i = 0, o = 0;
+        skip_ws(p);
+        if (**p != '(') goto fn_paren_err;
+        (*p)++;
+        if (parse_strexpr(p, src, sizeof(src)) != 0) return -1;
+        skip_ws(p);
+        if (**p != ',') { basic_error = 1; SHELL_PRINTF(SH_RED "? ',' expected\n" SH_RST); return -1; }
+        (*p)++;
+        if (parse_strexpr(p, from, sizeof(from)) != 0) return -1;
+        skip_ws(p);
+        if (**p != ',') { basic_error = 1; SHELL_PRINTF(SH_RED "? ',' expected\n" SH_RST); return -1; }
+        (*p)++;
+        if (parse_strexpr(p, to, sizeof(to)) != 0) return -1;
+        skip_ws(p);
+        if (**p != ')') goto fn_paren_err;
+        (*p)++;
+        fl = strlen(from); tl = strlen(to); srclen = strlen(src);
+        while (i < srclen) {
+            if (fl > 0 && i + fl <= srclen && memcmp(src + i, from, fl) == 0) {
+                if (o + tl + 1u > cap) {
+                    basic_error = 1;
+                    SHELL_PRINTF(SH_RED "? string too long\n" SH_RST);
+                    return -1;
+                }
+                memcpy(out + o, to, tl); o += tl; i += fl;
+            } else {
+                if (o + 2u > cap) {
+                    basic_error = 1;
+                    SHELL_PRINTF(SH_RED "? string too long\n" SH_RST);
+                    return -1;
+                }
+                out[o++] = src[i++];
+            }
+        }
+        out[o] = '\0';
+        return 0;
+    }
+    if (match_kw(p, "LINE$")) {
+        /* LINE$(s$, n) -- the nth 1-based line (split on \n; a trailing \r is
+         * dropped so CRLF text works). Empty lines are counted (unlike WORD$);
+         * out of range -> "". Walks multi-line LLM/API output. */
+        char src[TIKU_BASIC_STR_BUF_CAP];
+        const char *S; size_t SL;
+        long idx, ln = 1;
+        size_t i, srclen, lstart = 0, llen = 0;
+        int found = 0;
+        skip_ws(p);
+        if (**p != '(') goto fn_paren_err;
+        (*p)++;
+        if (parse_str_ref(p, &S, &SL, src, sizeof(src)) != 0) return -1;
+        skip_ws(p);
+        if (**p != ',') {
+            basic_error = 1; SHELL_PRINTF(SH_RED "? ',' expected\n" SH_RST); return -1;
+        }
+        (*p)++;
+        idx = parse_expr(p);
+        if (basic_error) return -1;
+        skip_ws(p);
+        if (**p != ')') goto fn_paren_err;
+        (*p)++;
+        srclen = SL;
+        for (i = 0; ; i++) {
+            if (i == srclen || S[i] == '\n') {
+                if (ln == idx) { found = 1; llen = i - lstart; break; }
+                if (i == srclen) break;
+                ln++;
+                lstart = i + 1;
+            }
+        }
+        if (!found) { out[0] = '\0'; return 0; }
+        if (llen > 0 && S[lstart + llen - 1] == '\r') llen--;
+        if (llen + 1u > cap) {
+            basic_error = 1; SHELL_PRINTF(SH_RED "? string too long\n" SH_RST); return -1;
+        }
+        memcpy(out, S + lstart, llen);
+        out[llen] = '\0';
+        return 0;
+    }
+    if (match_kw(p, "BETWEEN$")) {
+        /* BETWEEN$(s$, a$, b$) -- text between the first a$ and the next b$ after
+         * it (empty a$ = from start, empty b$ = to end). Either marker absent
+         * -> "". Extracts fenced code, quoted values, tag/bracket contents. */
+        char src[TIKU_BASIC_STR_BUF_CAP], am[128], bm[128];
+        const char *sa, *sb, *S;
+        size_t alen, blen, rlen, SL;
+        skip_ws(p);
+        if (**p != '(') goto fn_paren_err;
+        (*p)++;
+        if (parse_str_ref(p, &S, &SL, src, sizeof(src)) != 0) return -1;
+        (void)SL;
+        skip_ws(p);
+        if (**p != ',') {
+            basic_error = 1; SHELL_PRINTF(SH_RED "? ',' expected\n" SH_RST); return -1;
+        }
+        (*p)++;
+        if (parse_strexpr(p, am, sizeof(am)) != 0) return -1;
+        skip_ws(p);
+        if (**p != ',') {
+            basic_error = 1; SHELL_PRINTF(SH_RED "? ',' expected\n" SH_RST); return -1;
+        }
+        (*p)++;
+        if (parse_strexpr(p, bm, sizeof(bm)) != 0) return -1;
+        skip_ws(p);
+        if (**p != ')') goto fn_paren_err;
+        (*p)++;
+        alen = strlen(am); blen = strlen(bm);
+        if (alen == 0) {
+            sa = S;
+        } else {
+            sa = strstr(S, am);
+            if (sa == NULL) { out[0] = '\0'; return 0; }
+            sa += alen;
+        }
+        if (blen == 0) {
+            sb = sa + strlen(sa);
+        } else {
+            sb = strstr(sa, bm);
+            if (sb == NULL) { out[0] = '\0'; return 0; }
+        }
+        rlen = (size_t)(sb - sa);
+        if (rlen + 1u > cap) {
+            basic_error = 1; SHELL_PRINTF(SH_RED "? string too long\n" SH_RST); return -1;
+        }
+        memcpy(out, sa, rlen);
+        out[rlen] = '\0';
+        return 0;
+    }
+#if TIKU_BASIC_JSON_ENABLE
+    if (match_kw(p, "JSON$")) {
+        /* JSON$(json$, path$) -- extract a scalar by dotted path (object keys +
+         * array indices), e.g. JSON$(R$, "choices.0.message.content"). Missing
+         * key / out-of-range index / non-scalar target -> "". */
+        char src[TIKU_BASIC_STR_BUF_CAP], jpath[TIKU_BASIC_STR_BUF_CAP];
+        const char *jsrc; size_t jslen;
+        skip_ws(p);
+        if (**p != '(') goto fn_paren_err;
+        (*p)++;
+        if (parse_str_ref(p, &jsrc, &jslen, src, sizeof(src)) != 0) return -1;
+        skip_ws(p);
+        if (**p != ',') { basic_error = 1; SHELL_PRINTF(SH_RED "? ',' expected\n" SH_RST); return -1; }
+        (*p)++;
+        if (parse_strexpr(p, jpath, sizeof(jpath)) != 0) return -1;
+        skip_ws(p);
+        if (**p != ')') goto fn_paren_err;
+        (*p)++;
+        (void)basic_json_extract(jsrc, (uint16_t)jslen, jpath, out, cap);
+        return 0;
+    }
+#endif
     if (match_kw(p, "STRIP$")) {
         /* STRIP$(html$) -- render HTML to plain text (tags/scripts removed,
          * entities decoded). Bounded by the string scratch (STR_BUF_CAP). */
@@ -508,6 +940,23 @@ parse_strprim(const char **p, char *out, size_t cap)
         return 0;
     }
 #endif
+#if TIKU_BASIC_BLE_ENABLE
+    /* BLEGET$() -- pop any bytes a connected central has written to us (up to
+     * the string buffer), "" if none.  Polls the BLE stack, so a BLEGET$() poll
+     * loop keeps the link serviced.  0-arg-with-parens. */
+    if (match_kw(p, "BLEGET$")) {
+        int n;
+        skip_ws(p);
+        if (**p != '(') goto fn_paren_err;
+        (*p)++; skip_ws(p);
+        if (**p != ')') goto fn_paren_err;
+        (*p)++;
+        n = tiku_ble_serial_recv((uint8_t *)out, (uint16_t)(cap - 1u));
+        if (n < 0) n = 0;
+        out[n] = '\0';
+        return 0;
+    }
+#endif
 #if TIKU_BASIC_NET_ENABLE
     /* IPADDR$() -- the device's current IPv4 as "a.b.c.d" (empty if no
      * link/lease). 0-arg-with-parens. */
@@ -537,7 +986,7 @@ parse_strprim(const char **p, char *out, size_t cap)
      * call drives the net stack itself (WiFi RX drain + TCP timers) so the
      * console stays alive; HTTPSTATUS() exposes the parsed status code. */
     if (match_kw(p, "HTTPGET$")) {
-        char host[64], path[80];
+        char host[TIKU_BASIC_HTTP_HOST_MAX], path[TIKU_BASIC_HTTP_PATH_MAX];
         skip_ws(p);
         if (**p != '(') goto fn_paren_err;
         (*p)++;
@@ -551,7 +1000,78 @@ parse_strprim(const char **p, char *out, size_t cap)
         skip_ws(p);
         if (**p != ')') goto fn_paren_err;
         (*p)++;
-        (void)basic_https_get(host, path, out, cap);
+        (void)basic_https_get("GET", host, path, NULL, NULL, out, cap);
+        return 0;
+    }
+    /* HTTPPOST$("host","path", body$ [, ctype$]) -- HTTPS POST body$ (default
+     * Content-Type application/json) over the same cert-TLS client, returning
+     * the response body.  Set Authorization/other headers first with HTTPHEADER.
+     * The agent write path: pair with JSON$ to read the reply. */
+    if (match_kw(p, "HTTPPOST$")) {
+        char host[TIKU_BASIC_HTTP_HOST_MAX], path[TIKU_BASIC_HTTP_PATH_MAX],
+             ctype[TIKU_BASIC_HTTP_CTYPE_MAX];
+        char body[TIKU_BASIC_STR_BUF_CAP];
+        int have_ct = 0;
+        skip_ws(p);
+        if (**p != '(') goto fn_paren_err;
+        (*p)++;
+        if (parse_path_literal(p, host, sizeof(host)) != 0) return -1;
+        skip_ws(p);
+        if (**p != ',') {
+            basic_error = 1; SHELL_PRINTF(SH_RED "? ',' expected\n" SH_RST); return -1;
+        }
+        (*p)++;
+        if (parse_path_literal(p, path, sizeof(path)) != 0) return -1;
+        skip_ws(p);
+        if (**p != ',') {
+            basic_error = 1; SHELL_PRINTF(SH_RED "? ',' expected\n" SH_RST); return -1;
+        }
+        (*p)++;
+        if (parse_strexpr(p, body, sizeof(body)) != 0) return -1;
+        skip_ws(p);
+        if (**p == ',') {                       /* optional content-type */
+            (*p)++;
+            if (parse_strexpr(p, ctype, sizeof(ctype)) != 0) return -1;
+            have_ct = 1;
+            skip_ws(p);
+        }
+        if (**p != ')') goto fn_paren_err;
+        (*p)++;
+        (void)basic_https_get("POST", host, path, body,
+                              have_ct ? ctype : NULL, out, cap);
+        return 0;
+    }
+#endif
+#if (TIKU_KITS_NET_MQTT_ENABLE + 0)
+    /* MQTTWAIT$("broker_ip", "topic", secs) -- the inbound dual of
+     * MQTTPUB: subscribe and block up to `secs` for one PUBLISH, then
+     * return its payload ("" on timeout).  This is how a device is
+     * commanded: LET C$ = MQTTWAIT$(B$, "cmd/dev1", 30).  Pairs with
+     * ON ERROR (ERR()=6 on link failure) for a robust wait loop. */
+    if (match_kw(p, "MQTTWAIT$")) {
+        char host[20], topic[48];
+        long secs;
+        skip_ws(p);
+        if (**p != '(') goto fn_paren_err;
+        (*p)++;
+        if (parse_path_literal(p, host, sizeof(host)) != 0) return -1;
+        skip_ws(p);
+        if (**p != ',') {
+            basic_error = 1; SHELL_PRINTF(SH_RED "? ',' expected\n" SH_RST); return -1;
+        }
+        (*p)++;
+        if (parse_path_literal(p, topic, sizeof(topic)) != 0) return -1;
+        skip_ws(p);
+        if (**p != ',') {
+            basic_error = 1; SHELL_PRINTF(SH_RED "? ',' expected\n" SH_RST); return -1;
+        }
+        (*p)++;
+        secs = parse_expr(p);
+        if (basic_error) return -1;
+        skip_ws(p);
+        if (**p != ')') goto fn_paren_err;
+        (*p)++;
+        (void)basic_net_mqtt_wait(host, topic, secs, out, cap);
         return 0;
     }
 #endif
@@ -702,6 +1222,81 @@ parse_strprim(const char **p, char *out, size_t cap)
         out[n] = '\0';
         return 0;
     }
+
+#if TIKU_BASIC_CRYPTO_ENABLE
+    /* BASE64$(s$) -- RFC 4648 Base64 of the bytes of s$.  The reverse
+     * (decode) is intentionally omitted: it would yield raw bytes that
+     * a NUL-terminated string cannot hold. */
+    if (match_kw(p, "BASE64$")) {
+        char src[TIKU_BASIC_STR_BUF_CAP];
+        skip_ws(p);
+        if (**p != '(') goto fn_paren_err;
+        (*p)++;
+        if (parse_strexpr(p, src, sizeof(src)) != 0) return -1;
+        skip_ws(p);
+        if (**p != ')') goto fn_paren_err;
+        (*p)++;
+        if (tiku_kits_crypto_base64_encode((const uint8_t *)src,
+                (uint16_t)strlen(src), out, (uint16_t)cap, NULL)
+            != TIKU_KITS_CRYPTO_OK) {
+            basic_error = 1;
+            SHELL_PRINTF(SH_RED "? string too long\n" SH_RST);
+            return -1;
+        }
+        return 0;
+    }
+    /* SHA256$(s$) -- SHA-256 of s$, returned as 64-char lowercase hex. */
+    if (match_kw(p, "SHA256$")) {
+        char    src[TIKU_BASIC_STR_BUF_CAP];
+        uint8_t dig[TIKU_KITS_CRYPTO_SHA256_DIGEST_SIZE];
+        skip_ws(p);
+        if (**p != '(') goto fn_paren_err;
+        (*p)++;
+        if (parse_strexpr(p, src, sizeof(src)) != 0) return -1;
+        skip_ws(p);
+        if (**p != ')') goto fn_paren_err;
+        (*p)++;
+        if (cap < 2u * sizeof(dig) + 1u) {
+            basic_error = 1;
+            SHELL_PRINTF(SH_RED "? string too long\n" SH_RST);
+            return -1;
+        }
+        (void)tiku_kits_crypto_sha256_hash((const uint8_t *)src,
+                                           strlen(src), dig);
+        basic_hex_encode(dig, sizeof(dig), out);
+        return 0;
+    }
+    /* HMAC$(key$, msg$) -- HMAC-SHA256(key, msg), 64-char lowercase hex.
+     * The on-device request-signing primitive: pair with HTTPHEADER to
+     * build an Authorization header for an API call. */
+    if (match_kw(p, "HMAC$")) {
+        char    key[TIKU_BASIC_STR_BUF_CAP], msg[TIKU_BASIC_STR_BUF_CAP];
+        uint8_t mac[TIKU_KITS_CRYPTO_HMAC_SHA256_SIZE];
+        skip_ws(p);
+        if (**p != '(') goto fn_paren_err;
+        (*p)++;
+        if (parse_strexpr(p, key, sizeof(key)) != 0) return -1;
+        skip_ws(p);
+        if (**p != ',') {
+            basic_error = 1; SHELL_PRINTF(SH_RED "? ',' expected\n" SH_RST); return -1;
+        }
+        (*p)++;
+        if (parse_strexpr(p, msg, sizeof(msg)) != 0) return -1;
+        skip_ws(p);
+        if (**p != ')') goto fn_paren_err;
+        (*p)++;
+        if (cap < 2u * sizeof(mac) + 1u) {
+            basic_error = 1;
+            SHELL_PRINTF(SH_RED "? string too long\n" SH_RST);
+            return -1;
+        }
+        (void)tiku_kits_crypto_hmac_sha256(
+                (const uint8_t *)key, (uint16_t)strlen(key),
+                (const uint8_t *)msg, (uint16_t)strlen(msg), mac);
+        basic_hex_encode(mac, sizeof(mac), out);
+        return 0;
+    }
+#endif
 
     /* Bare string variable: A$ / NAME$ / etc.  Must come AFTER the
      * function-name matchers above so that LEFT$(...) and friends

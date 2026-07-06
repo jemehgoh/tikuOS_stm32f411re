@@ -120,14 +120,15 @@ static tiku_mem_arch_size_t min_block_size(void)
  * store on FRAM -- because a direct CPU store would bus-fault on program-op
  * NVM. An SRAM pool stores directly (the hot path, unchanged).
  */
-static void pool_write_next(const tiku_pool_t *pool, void *block, void *next)
+static tiku_mem_err_t pool_write_next(const tiku_pool_t *pool,
+                                      void *block, void *next)
 {
     if (pool->nvm) {
-        (void)tiku_tier_nvm_write(block, &next,
-                                  (tiku_mem_arch_size_t)sizeof(next));
-    } else {
-        *(void **)(void *)block = next;
+        return tiku_tier_nvm_write(block, &next,
+                                   (tiku_mem_arch_size_t)sizeof(next));
     }
+    *(void **)(void *)block = next;
+    return TIKU_MEM_OK;
 }
 
 /*
@@ -148,7 +149,7 @@ static void pool_write_next(const tiku_pool_t *pool, void *block, void *next)
 #endif
 static uint8_t pool_nvm_stage[TIKU_POOL_NVM_STAGE_BYTES];
 
-static void build_freelist_nvm(tiku_pool_t *pool)
+static tiku_mem_err_t build_freelist_nvm(tiku_pool_t *pool)
 {
     const tiku_mem_arch_size_t bs = pool->block_size;
     const tiku_mem_arch_size_t n  = pool->block_count;
@@ -160,10 +161,14 @@ static void build_freelist_nvm(tiku_pool_t *pool)
         for (i = 0; i < n; i++) {
             uint8_t *blk = pool->buf + (i * bs);
             void *next = (i + 1U < n) ? (void *)(blk + bs) : NULL;
-            (void)tiku_tier_nvm_write(blk, &next,
-                                      (tiku_mem_arch_size_t)sizeof(next));
+            tiku_mem_err_t err =
+                tiku_tier_nvm_write(blk, &next,
+                                    (tiku_mem_arch_size_t)sizeof(next));
+            if (err != TIKU_MEM_OK) {
+                return err;     /* half-built freelist: caller rejects */
+            }
         }
-        return;
+        return TIKU_MEM_OK;
     }
 
     /* Small blocks share sectors: write a run of whole blocks per call. */
@@ -185,39 +190,57 @@ static void build_freelist_nvm(tiku_pool_t *pool)
                              ? (void *)(pool->buf + ((gi + 1U) * bs)) : NULL;
                 memcpy(pool_nvm_stage + (j * bs), &next, sizeof(next));
             }
-            (void)tiku_tier_nvm_write(base, pool_nvm_stage, span);
+            {
+                tiku_mem_err_t err =
+                    tiku_tier_nvm_write(base, pool_nvm_stage, span);
+                if (err != TIKU_MEM_OK) {
+                    return err;
+                }
+            }
         }
     }
+    return TIKU_MEM_OK;
 }
 #else
 #define TIKU_POOL_NVM_BATCH 0
 #endif /* program-op NVM batch */
 
-static void build_freelist(tiku_pool_t *pool)
+static tiku_mem_err_t build_freelist(tiku_pool_t *pool)
 {
     tiku_mem_arch_size_t i;
+    tiku_mem_err_t err;
     uint8_t *block;
 
 #if TIKU_POOL_NVM_BATCH
     /* NVM-tier pool on program-op NVM: build the freelist a run at a time so
      * each sector is erased once, not once per block (see build_freelist_nvm). */
     if (pool->nvm) {
-        build_freelist_nvm(pool);
+        err = build_freelist_nvm(pool);
+        if (err != TIKU_MEM_OK) {
+            return err;
+        }
         pool->free_head = pool->buf;
-        return;
+        return TIKU_MEM_OK;
     }
 #endif
 
     for (i = 0; i < pool->block_count - 1U; i++) {
         block = pool->buf + (i * pool->block_size);
-        pool_write_next(pool, block, block + pool->block_size);
+        err = pool_write_next(pool, block, block + pool->block_size);
+        if (err != TIKU_MEM_OK) {
+            return err;
+        }
     }
 
     /* Last block terminates the list */
     block = pool->buf + ((pool->block_count - 1U) * pool->block_size);
-    pool_write_next(pool, block, NULL);
+    err = pool_write_next(pool, block, NULL);
+    if (err != TIKU_MEM_OK) {
+        return err;
+    }
 
     pool->free_head = pool->buf;
+    return TIKU_MEM_OK;
 }
 
 /*---------------------------------------------------------------------------*/
@@ -245,6 +268,7 @@ tiku_mem_err_t tiku_pool_create_raw(tiku_pool_t *pool, uint8_t *buf,
                                      tiku_mem_arch_size_t block_size,
                                      tiku_mem_arch_size_t block_count)
 {
+    TIKU_MEM_KERNEL_ONLY(TIKU_MEM_ERR_INVALID);
     tiku_mem_arch_size_t aligned_size;
     tiku_mem_arch_size_t min_size;
 
@@ -264,12 +288,19 @@ tiku_mem_err_t tiku_pool_create_raw(tiku_pool_t *pool, uint8_t *buf,
     pool->block_count = block_count;
     pool->used_count  = 0;
     pool->peak_count  = 0;
+    pool->fail        = 0;
     pool->id          = 0;
     pool->active      = 1;
     pool->nvm         = 0;
     pool->tier        = TIKU_MEM_SRAM;
 
-    build_freelist(pool);
+    {
+        tiku_mem_err_t err = build_freelist(pool);
+        if (err != TIKU_MEM_OK) {
+            pool->active = 0;   /* an unwritable freelist is not a pool */
+            return err;
+        }
+    }
 
     return TIKU_MEM_OK;
 }
@@ -305,6 +336,7 @@ tiku_mem_err_t tiku_pool_create(tiku_pool_t *pool, uint8_t *buf,
                                  tiku_mem_arch_size_t block_count,
                                  uint8_t id)
 {
+    TIKU_MEM_KERNEL_ONLY(TIKU_MEM_ERR_INVALID);
     tiku_mem_arch_size_t aligned_size;
     tiku_mem_arch_size_t min_size;
 
@@ -330,12 +362,19 @@ tiku_mem_err_t tiku_pool_create(tiku_pool_t *pool, uint8_t *buf,
     pool->block_count = block_count;
     pool->used_count  = 0;
     pool->peak_count  = 0;
+    pool->fail        = 0;
     pool->id          = id;
     pool->active      = 1;
     pool->nvm         = 0;
     pool->tier        = TIKU_MEM_SRAM; /* Default; tier allocator overrides */
 
-    build_freelist(pool);
+    {
+        tiku_mem_err_t err = build_freelist(pool);
+        if (err != TIKU_MEM_OK) {
+            pool->active = 0;   /* an unwritable freelist is not a pool */
+            return err;
+        }
+    }
 
     return TIKU_MEM_OK;
 }
@@ -353,6 +392,7 @@ tiku_mem_err_t tiku_pool_create_nvm(tiku_pool_t *pool, uint8_t *buf,
                                      tiku_mem_arch_size_t block_count,
                                      uint8_t id)
 {
+    TIKU_MEM_KERNEL_ONLY(TIKU_MEM_ERR_INVALID);
     tiku_mem_arch_size_t aligned_size;
     tiku_mem_arch_size_t min_size;
 
@@ -371,12 +411,19 @@ tiku_mem_err_t tiku_pool_create_nvm(tiku_pool_t *pool, uint8_t *buf,
     pool->block_count = block_count;
     pool->used_count  = 0;
     pool->peak_count  = 0;
+    pool->fail        = 0;
     pool->id          = id;
     pool->active      = 1;
     pool->nvm         = 1;
     pool->tier        = TIKU_MEM_NVM;
 
-    build_freelist(pool);   /* writes route through tiku_tier_nvm_write() */
+    {
+        tiku_mem_err_t err = build_freelist(pool);
+        if (err != TIKU_MEM_OK) {
+            pool->active = 0;   /* an unwritable freelist is not a pool */
+            return err;
+        }
+    }
 
     return TIKU_MEM_OK;
 }
@@ -397,10 +444,15 @@ tiku_mem_err_t tiku_pool_create_nvm(tiku_pool_t *pool, uint8_t *buf,
  */
 void *tiku_pool_alloc(tiku_pool_t *pool)
 {
+    TIKU_MEM_KERNEL_ONLY(NULL);
     void *block;
     void **next_ptr;
 
-    if (pool == NULL || !pool->active || pool->free_head == NULL) {
+    if (pool == NULL || !pool->active) {
+        return NULL;
+    }
+    if (pool->free_head == NULL) {
+        pool->fail++;                    /* exhausted, not misused */
         return NULL;
     }
 
@@ -440,6 +492,7 @@ void *tiku_pool_alloc(tiku_pool_t *pool)
  */
 tiku_mem_err_t tiku_pool_free(tiku_pool_t *pool, void *ptr)
 {
+    TIKU_MEM_KERNEL_ONLY(TIKU_MEM_ERR_INVALID);
     uint8_t *block;
     tiku_mem_arch_size_t offset;
 
@@ -515,6 +568,7 @@ tiku_mem_err_t tiku_pool_stats(const tiku_pool_t *pool,
     stats->used_bytes  = pool->block_size * pool->used_count;
     stats->peak_bytes  = pool->block_size * pool->peak_count;
     stats->alloc_count = pool->used_count;
+    stats->fail_count  = pool->fail;
 
     return TIKU_MEM_OK;
 }
@@ -537,13 +591,20 @@ tiku_mem_err_t tiku_pool_stats(const tiku_pool_t *pool,
  */
 tiku_mem_err_t tiku_pool_reset(tiku_pool_t *pool)
 {
+    TIKU_MEM_KERNEL_ONLY(TIKU_MEM_ERR_INVALID);
     if (pool == NULL) {
         return TIKU_MEM_ERR_INVALID;
     }
 
     pool->used_count = 0;
 
-    build_freelist(pool);
+    {
+        tiku_mem_err_t err = build_freelist(pool);
+        if (err != TIKU_MEM_OK) {
+            pool->active = 0;   /* an unwritable freelist is not a pool */
+            return err;
+        }
+    }
 
     return TIKU_MEM_OK;
 }

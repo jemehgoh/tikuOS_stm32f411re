@@ -105,6 +105,12 @@ static uint8_t       loop_sp;
 static char        **basic_strvars;
 static char         *basic_str_heap;
 static uint16_t      basic_str_heap_pos;
+#if TIKU_BASIC_BIGBUF_COUNT > 0
+/* Big response buffers (#0..): arena-backed, filled by FETCH, read in place by
+ * the extractors. basic_biglen[n] is the current byte length (0 = empty). */
+static char         *basic_bigbuf[TIKU_BASIC_BIGBUF_COUNT];
+static size_t        basic_biglen[TIKU_BASIC_BIGBUF_COUNT];
+#endif
 #endif
 
 /* Multi-letter variable names: index space [26, 26+N) backed by
@@ -199,6 +205,17 @@ static int          basic_auto_active;
  * RESUME NEXT know where to continue from. */
 static uint16_t     basic_err_handler;
 static uint16_t     basic_err_pc;
+
+/* ERR / ERL introspection for ON ERROR handlers.  `basic_errcat` is a
+ * transient per-statement category hint: throw sites that can classify
+ * (range, divide-by-zero, net, I/O, ...) set it, and it is cleared
+ * before each statement.  When an error is trapped it is frozen into
+ * the sticky `basic_err` (returned by ERR) together with the erroring
+ * line in `basic_erl` (returned by ERL), so both survive into the
+ * handler.  Uncategorised errors surface as TIKU_BASIC_ERR_GENERAL. */
+static int          basic_errcat;
+static int          basic_err;
+static uint16_t     basic_erl;
 
 /* EVERY ms : stmt -- recurring scheduled statement. Polled by the
  * RUN loop between program lines. Up to TIKU_BASIC_EVERY_MAX active

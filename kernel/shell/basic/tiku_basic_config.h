@@ -70,32 +70,41 @@
 /* CORE LIMITS                                                               */
 /*---------------------------------------------------------------------------*/
 
+/* Uniform across every platform: a BASIC line -- and each stored program line
+ * -- can be this long everywhere, so a command that fits on Apollo also fits on
+ * RP2350/MSP430 (portable, no silent per-part truncation of e.g. an HTTPPOST$
+ * with a JSON body).  RAM is scaled instead via TIKU_BASIC_PROGRAM_LINES (how
+ * MANY lines fit) per tier below.  The interactive reader is line_buf[LINE_MAX +
+ * 16]; keeping LINE_MAX <= 255 keeps every byte index within a uint8_t. */
 #ifndef TIKU_BASIC_LINE_MAX
-#  if defined(TIKU_BASIC_TIER_BIG)
-#    define TIKU_BASIC_LINE_MAX     80
-#  elif defined(TIKU_BASIC_TIER_FRAM)
-#    define TIKU_BASIC_LINE_MAX     64
-#  else
-#    define TIKU_BASIC_LINE_MAX     48
-#  endif
+#define TIKU_BASIC_LINE_MAX        144
 #endif
 
-/* PROGRAM_LINES is the one limit with a static cost that scales: the save
- * buffer (basic_save_buf) is PROGRAM_LINES * (LINE_MAX + 8) bytes, and on
- * non-MSP430 parts it is plain .bss (the .persistent attribute is MSP430-only),
- * so at LINE_MAX=80 that is ~88 bytes of always-on RAM per line:
- *   HUGE  2048 -> ~180 KB .bss (Apollo510: 512 KB TCM + 3 MB SSRAM)
- *   BIG   1024 ->  ~90 KB .bss (Apollo4 Lite 1 MB SSRAM / RP2350 520 KB)
- *   FRAM   256 -> ~18 KB FRAM .persistent (FR5994/6989, 256 KB FRAM)
- *   else    50 ->  ~3 KB (host harness / small)
- * Line numbers are uint16_t, so the hard ceiling is 65533 lines. */
+/* PROGRAM_LINES scales program CAPACITY (line count) to the arena/RAM -- the
+ * knob that varies per platform now that LINE_MAX is uniform.  It sizes the
+ * prog[] arena block (PROGRAM_LINES * LINE_MAX) and the SAVE buffer
+ * (PROGRAM_LINES * (LINE_MAX + 8)).  The SAVE buffer is DURABLE: on Ambiq it
+ * lives in the carved NVM-region tail, so it must fit TIKU_NVM_RESERVED_BYTES
+ * (256 KB) -- that tail, NOT SSRAM, is what caps HUGE (a _Static_assert in
+ * tiku_basic_persist.inl enforces it).  .persistent FRAM on MSP430 / .bss
+ * elsewhere.  At LINE_MAX=144 that is ~152 bytes/line:
+ *   HUGE (Apollo510) 1700 -> ~239 KB prog + ~252 KB save   (fits 256 KB NVM tail)
+ *   BIG  (Apollo4)    1024 -> ~147 KB prog + ~156 KB save   (fits; 1.6 MB SSRAM)
+ *   RP2350             512 ->  ~74 KB prog +  ~78 KB .bss   (~160 KB arena / 520 KB SRAM)
+ *   FRAM (MSP430)       96 ->  ~14 KB prog +  ~15 KB FRAM   (FR5994/6989, 256 KB FRAM)
+ *   else (host/small)   50 ->   ~7 KB
+ * RP2350 is split out from Apollo (both TIER_BIG) because its arena is an order
+ * of magnitude smaller, so it can't afford 1024 x 144.  Line numbers are
+ * uint16_t, so the hard ceiling is 65533 lines. */
 #ifndef TIKU_BASIC_PROGRAM_LINES
-#  if defined(TIKU_BASIC_TIER_HUGE)
-#    define TIKU_BASIC_PROGRAM_LINES 2048
+#  if defined(PLATFORM_RP2350)
+#    define TIKU_BASIC_PROGRAM_LINES 512
+#  elif defined(TIKU_BASIC_TIER_HUGE)
+#    define TIKU_BASIC_PROGRAM_LINES 1700   /* capped by the 256 KB NVM save tail */
 #  elif defined(TIKU_BASIC_TIER_BIG)
 #    define TIKU_BASIC_PROGRAM_LINES 1024
 #  elif defined(TIKU_BASIC_TIER_FRAM)
-#    define TIKU_BASIC_PROGRAM_LINES 256
+#    define TIKU_BASIC_PROGRAM_LINES 96
 #  else
 #    define TIKU_BASIC_PROGRAM_LINES 50
 #  endif
@@ -210,12 +219,98 @@
 #    define TIKU_BASIC_NET_ENABLE    0
 #  endif
 #endif
+/* BLE : BLEADV / BLEOFF / BLESEND / BLEBEACON + BLEUP / BLEGET$ -- a "serial
+ *       over BLE" vocabulary on the driver-agnostic facade
+ *       (interfaces/bluetooth/tiku_ble_serial).  GENERAL, not chip-specific:
+ *       on whenever the build has a BLE radio backend, which the Makefile
+ *       signals via the generic TIKU_HAS_BLE capability (set today by the
+ *       EM9305 driver on apollo510b).  -D-overridable like the rest. */
+#ifndef TIKU_BASIC_BLE_ENABLE
+#  if (TIKU_HAS_BLE + 0)
+#    define TIKU_BASIC_BLE_ENABLE    1
+#  else
+#    define TIKU_BASIC_BLE_ENABLE    0
+#  endif
+#endif
+/* JSON$ -- extract a value by dotted path (keys + array indices) from a JSON
+ * string; the agent primitive for parsing API/LLM replies. Wraps the
+ * codec/json pull-parser, so it needs TIKU_KIT_CODEC_ENABLE (which compiles
+ * tikukits/codec/json). BIG-only. */
+#ifndef TIKU_BASIC_JSON_ENABLE
+#  if defined(TIKU_BASIC_TIER_BIG) && (TIKU_KIT_CODEC_ENABLE + 0)
+#    define TIKU_BASIC_JSON_ENABLE   1
+#  else
+#    define TIKU_BASIC_JSON_ENABLE   0
+#  endif
+#endif
+/* BASE64$ / SHA256$ / HMAC$ -- expose the crypto kit (base64, SHA-256,
+ * HMAC-SHA256) as string builtins so programs can sign API requests
+ * (Authorization headers) and hash data on-device.  Wraps
+ * tikukits/crypto/{base64,sha256,hmac}; hashes return lowercase hex.
+ * BIG-only.  Auto-on when the full crypto kit is compiled; the Makefile
+ * otherwise forces -DTIKU_BASIC_CRYPTO_ENABLE=1 and pulls just those
+ * three sources whenever BASIC is built (TIKU_BASIC_CRYPTO=0 drops it). */
+#ifndef TIKU_BASIC_CRYPTO_ENABLE
+#  if defined(TIKU_BASIC_TIER_BIG) && (TIKU_KIT_CRYPTO_ENABLE + 0)
+#    define TIKU_BASIC_CRYPTO_ENABLE 1
+#  else
+#    define TIKU_BASIC_CRYPTO_ENABLE 0
+#  endif
+#endif
+
+/* ERR category codes returned by the ERR() builtin inside an ON ERROR
+ * handler.  The classification is deliberately coarse: it exists so a
+ * handler can branch on "is this worth retrying?" (NET) versus "is my
+ * program wrong?" (RANGE/DIVZERO/TYPE).  Sites that cannot cheaply
+ * classify leave the error as GENERAL.  ERL() returns the line number. */
+#define TIKU_BASIC_ERR_GENERAL  1   /* uncategorised */
+#define TIKU_BASIC_ERR_SYNTAX   2   /* malformed statement/expression */
+#define TIKU_BASIC_ERR_TYPE     3   /* string/number type mismatch */
+#define TIKU_BASIC_ERR_RANGE    4   /* array subscript / bounds */
+#define TIKU_BASIC_ERR_DIVZERO  5   /* divide (or MOD) by zero */
+#define TIKU_BASIC_ERR_NET      6   /* HTTP / MQTT / socket failure */
+#define TIKU_BASIC_ERR_IO       7   /* VFS / file access */
+#define TIKU_BASIC_ERR_NOMEM    8   /* string heap / arena exhausted */
+
+/* MQTTWAIT$ inbound payload cap.  Received PUBLISH bodies longer than
+ * this are truncated.  Kept small (commands are short) so the static
+ * capture buffer costs little SRAM. */
+#ifndef TIKU_BASIC_MQTT_RX_CAP
+#  define TIKU_BASIC_MQTT_RX_CAP  256
+#endif
 #ifndef TIKU_BASIC_SUBS_ENABLE
 #  if defined(TIKU_BASIC_TIER_BIG)
 #    define TIKU_BASIC_SUBS_ENABLE   1
 #  else
 #    define TIKU_BASIC_SUBS_ENABLE   0
 #  endif
+#endif
+
+/*---------------------------------------------------------------------------*/
+/* HTTP REQUEST ASSEMBLY BUDGET (HTTPGET$ / HTTPPOST$)                        */
+/*---------------------------------------------------------------------------*/
+
+/* Single source of truth for the bounded inputs basic_https_get() concatenates
+ * into its request buffer.  The caller (tiku_basic_string.inl) sizes its
+ * host/path/content-type buffers from these; HTTPHEADER bounds its block to
+ * TIKU_BASIC_HTTP_HDRS_MAX; and a _Static_assert in tiku_basic_https.inl proves
+ * the worst-case assembled request still fits TIKU_BASIC_HTTP_REQ_MAX.  So the
+ * req[] budget is enforced at compile time across all three files -- bumping any
+ * cap without growing REQ_MAX breaks the build instead of overflowing req[]. */
+#ifndef TIKU_BASIC_HTTP_HOST_MAX
+#define TIKU_BASIC_HTTP_HOST_MAX    64
+#endif
+#ifndef TIKU_BASIC_HTTP_PATH_MAX
+#define TIKU_BASIC_HTTP_PATH_MAX    80
+#endif
+#ifndef TIKU_BASIC_HTTP_CTYPE_MAX
+#define TIKU_BASIC_HTTP_CTYPE_MAX   48
+#endif
+#ifndef TIKU_BASIC_HTTP_HDRS_MAX
+#define TIKU_BASIC_HTTP_HDRS_MAX    192
+#endif
+#ifndef TIKU_BASIC_HTTP_REQ_MAX
+#define TIKU_BASIC_HTTP_REQ_MAX     576
 #endif
 
 /*---------------------------------------------------------------------------*/
@@ -276,6 +371,22 @@
 #  else
 #    define TIKU_BASIC_STR_BUF_CAP  64
 #  endif
+#endif
+
+/* Big response buffers (referenced as #0, #1, ...): arena-backed, filled by the
+ * FETCH statement, read in place by the extractors (JSON$/LINE$/BETWEEN$ with a
+ * #n source, LEN(#n)). They hold a whole HTTP/LLM reply past the STR_BUF_CAP
+ * scratch limit -- FETCH writes straight into the arena, bypassing the 1 KB
+ * stack buffer. BIG-tier only (each buffer is real arena RAM). */
+#ifndef TIKU_BASIC_BIGBUF_COUNT
+#  if defined(TIKU_BASIC_TIER_BIG)
+#    define TIKU_BASIC_BIGBUF_COUNT 2
+#  else
+#    define TIKU_BASIC_BIGBUF_COUNT 0
+#  endif
+#endif
+#ifndef TIKU_BASIC_BIGBUF_SIZE
+#  define TIKU_BASIC_BIGBUF_SIZE    8192
 #endif
 
 /* DEF FN single-line user functions. Each entry stores a name (up

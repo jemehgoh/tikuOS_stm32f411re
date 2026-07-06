@@ -42,6 +42,12 @@ else ifeq ($(MCU),apollo4l)
 TIKU_PLATFORM := ambiq
 else ifeq ($(MCU),apollo4p)
 TIKU_PLATFORM := ambiq
+else ifeq ($(MCU),apollo510b)
+# Apollo510 Blue EVB: the SAME Apollo510 (Cortex-M55) silicon as apollo510 --
+# same register map, linker, J-Link device and arch backends (it inherits them
+# all via the apollo510 `else` branches below). The board just adds an EM9305
+# BLE radio (a later, SPI-gated effort); bring-up is identical to apollo510.
+TIKU_PLATFORM := ambiq
 else
 TIKU_PLATFORM := msp430
 endif
@@ -101,6 +107,11 @@ endif
 ifeq ($(TIKU_PLATFORM),ambiq)
 ifeq ($(MCU),apollo510)
 TIKU_BOARD_DEFINE := TIKU_BOARD_APOLLO510_EVB
+else ifeq ($(MCU),apollo510b)
+# Same Apollo510 silicon as apollo510, but the Blue EVB has its own pinout:
+# console on UART1 (pads 12/14, funcsel 5), LEDs 11/19/83, buttons 46/29 --
+# see tiku_board_apollo510b_evb.h + the TIKU_CONSOLE_UART1 gate below.
+TIKU_BOARD_DEFINE := TIKU_BOARD_APOLLO510B_EVB
 else
 # Apollo4 Lite and Apollo4 Plus EVBs share the M4F board pinout (console UART,
 # LEDs, buttons); apollo4p reuses the apollo4l board config for bring-up.
@@ -391,6 +402,15 @@ TIKU_KIT_ML_ENABLE               ?= 0
 TIKU_KIT_SENSORS_ENABLE          ?= 0
 TIKU_KIT_SIGFEATURES_ENABLE      ?= 0
 TIKU_KIT_TEXTCOMPRESSION_ENABLE  ?= 0
+
+# BASIC JSON$ wraps the json codec, so a BIG (Cortex-M) BASIC build pulls it in
+# automatically -- offline JSON parsing plus API/LLM replies from HTTPGET$.
+# MSP430/FRAM BASIC gates JSON$ off (config), so it stays codec-free there.
+ifeq ($(TIKU_SHELL_BASIC_ENABLE),1)
+ifneq ($(filter ambiq rp2350,$(TIKU_PLATFORM)),)
+TIKU_KIT_CODEC_ENABLE            := 1
+endif
+endif
 
 ifeq ($(TIKU_KITS_ALL),1)
 TIKU_KIT_GFX_ENABLE              := 1
@@ -750,6 +770,49 @@ endif
 ifeq ($(MCU),apollo4p)
 CFLAGS += -DTIKU_CONSOLE_UART0
 endif
+# The Apollo510 Blue EVB routes its J-Link VCOM to UART1 (pads 12/14, funcsel 5);
+# the base Apollo510 EVB uses UART0 (pads 30/55). The shared M55 UART driver, the
+# crt vector table and the wake source all key off TIKU_CONSOLE_UART1.
+ifeq ($(MCU),apollo510b)
+CFLAGS += -DTIKU_CONSOLE_UART1
+endif
+# BLE radio (EM9305 on IOM6 SPI) -- opt-in, apollo510b only. Building it turns
+# the IOM SPI master on (TIKU_SPI_IOM_ENABLE flips tiku_spi_arch.c from stub to
+# the real driver) and compiles the bare-metal EM9305 SPI-HCI transport. The
+# pinout lives in the apollo510b board header, so reject the flag elsewhere up
+# front rather than fail deep in the compile. The `ble` shell command that
+# drives the first-contact probe are added in the arch + shell source blocks
+# below (SRCS is (re)initialised further down, so it cannot be extended here).
+ifeq ($(TIKU_DRV_BLE_EM9305_ENABLE),1)
+ifneq ($(MCU),apollo510b)
+$(error TIKU_DRV_BLE_EM9305_ENABLE=1 requires MCU=apollo510b (the only board \
+with the EM9305 radio); currently MCU=$(MCU))
+endif
+CFLAGS += -DTIKU_DRV_BLE_EM9305_ENABLE=1 -DTIKU_SPI_IOM_ENABLE=1
+# Map the concrete radio driver to the GENERIC BLE capability. Consumers (the
+# BLE-serial facade, the BASIC BLE words) gate on TIKU_HAS_BLE, not on any one
+# chip -- a future BLE backend just sets this too.
+CFLAGS += -DTIKU_HAS_BLE=1
+endif
+# Preemptive worker threads -- opt-in, Cortex-M only. Thread 0 is the whole
+# existing cooperative kernel; workers are stackful compute threads confined
+# to the ISR-safe primitives (see kernel/threads/tiku_thread.h). Per-thread
+# stacks are impossible on a 2 KB MSP430, which stays cooperative AND
+# byte-identical (flag off = none of this compiles). The Ambiq backend is
+# device-proven first; the RP2350 port is the same Cortex-M switcher, gated
+# until it is bench-proven.
+ifeq ($(TIKU_THREADS_ENABLE),1)
+ifeq ($(TIKU_PLATFORM),msp430)
+$(error TIKU_THREADS_ENABLE=1 requires a Cortex-M part (Ambiq); MSP430 \
+stays cooperative -- 2 KB of SRAM has no room for per-thread stacks)
+endif
+ifeq ($(filter apollo510 apollo510b,$(MCU)),)
+$(error TIKU_THREADS_ENABLE=1 is bench-proven on apollo510/apollo510b only \
+so far; the switcher is generic Cortex-M asm -- porting = compiling \
+arch/ambiq/tiku_thread_arch.c for the target and proving the torture suite)
+endif
+CFLAGS += -DTIKU_THREADS_ENABLE=1
+endif
 CFLAGS += -I$(PROJ_DIR)
 # CMSIS register headers, VENDORED in-tree (arch/ambiq/cmsis/) so the build is
 # fully self-contained: it references nothing in temp/AmbiqSuite, only the MRAM
@@ -1083,6 +1146,15 @@ SRCS += arch/ambiq/tiku_i2c_arch.c
 SRCS += arch/ambiq/tiku_onewire_arch.c
 SRCS += arch/ambiq/tiku_wake_arch.c
 SRCS += arch/ambiq/tiku_spi_arch.c
+# EM9305 BLE radio transport rides the IOM SPI master above (apollo510b only).
+# tiku_ble_uart.c layers the connectable GATT/NUS host stack on that transport.
+ifeq ($(TIKU_DRV_BLE_EM9305_ENABLE),1)
+SRCS += arch/ambiq/tiku_em9305.c
+SRCS += arch/ambiq/tiku_ble_uart.c
+# Portable "serial over BLE" facade on top of the host stack -- backs the BASIC
+# BLE words and any app; EM9305 is just its first backend.
+SRCS += interfaces/bluetooth/tiku_ble_serial.c
+endif
 SRCS += arch/ambiq/tiku_lcd_arch.c
 # CryptoCell-312 TRNG (shared across apollo4l/4p/510) -- backs the cert-TLS
 # handshake RNG (TIKU_KITS_CRYPTO_TLS_RNG_FILL).
@@ -1110,6 +1182,10 @@ else
 # Apollo510 (Cortex-M55) device/CPU backends.
 SRCS += arch/ambiq/tiku_adc_arch.c
 SRCS += arch/ambiq/tiku_timer_arch.c
+ifeq ($(TIKU_THREADS_ENABLE),1)
+SRCS += kernel/threads/tiku_thread.c
+SRCS += arch/ambiq/tiku_thread_arch.c
+endif
 SRCS += arch/ambiq/tiku_cpu_common.c
 SRCS += arch/ambiq/tiku_crt_early.c
 SRCS += arch/ambiq/tiku_cpu_freq_boot_arch.c
@@ -1255,6 +1331,7 @@ endif
 SRCS += kernel/shell/tiku_shell_io.c
 SRCS += kernel/shell/tiku_shell_parser.c
 SRCS += kernel/shell/tiku_shell.c
+SRCS += kernel/shell/tiku_shell_pump.c
 SRCS += kernel/shell/commands/tiku_shell_cmd_ps.c
 SRCS += kernel/shell/commands/tiku_shell_cmd_info.c
 SRCS += kernel/shell/commands/tiku_shell_cmd_timer.c
@@ -1263,6 +1340,17 @@ SRCS += kernel/shell/commands/tiku_shell_cmd_resume.c
 SRCS += kernel/shell/commands/tiku_shell_cmd_queue.c
 SRCS += kernel/shell/commands/tiku_shell_cmd_reboot.c
 SRCS += kernel/shell/commands/tiku_shell_cmd_trng.c
+# The mrambench command benches the Ambiq bootrom MRAM programmer — only
+# compile it on Ambiq (the shell config gates the table entry the same way).
+ifeq ($(TIKU_PLATFORM),ambiq)
+SRCS += kernel/shell/commands/tiku_shell_cmd_mrambench.c
+endif
+# The ble command runs the EM9305 radio first-contact probe; only compiled with
+# the BLE driver (apollo510b). The driver + -D flags live in the BLE block near
+# the Ambiq part selectors.
+ifeq ($(TIKU_DRV_BLE_EM9305_ENABLE),1)
+SRCS += kernel/shell/commands/tiku_shell_cmd_ble.c
+endif
 ifeq (,$(findstring TIKU_SHELL_CMD_HISTORY=0,$(EXTRA_CFLAGS)))
 SRCS += kernel/shell/commands/tiku_shell_cmd_history.c
 endif
@@ -1702,6 +1790,11 @@ SRCS   += tikukits/net/ipv4/tiku_kits_net_tcp.c
 endif
 ifeq ($(TIKU_KITS_NET_MQTT_ENABLE),1)
 CFLAGS += -DTIKU_KITS_NET_MQTT_ENABLE=1
+# Same guard as the full-net branch below: the kit flag auto-enables the
+# shell `mqtt` command, whose .c (+ SLIP command + TCP shell-io backend)
+# only the TIKU_SHELL_NET_TEST block compiles. Keep it off here too, or
+# any lean shell+MQTT build dies with undefined references.
+CFLAGS += -DTIKU_SHELL_CMD_MQTT=0
 SRCS   += tikukits/net/mqtt/tiku_kits_net_mqtt.c
 endif
 ifeq ($(TIKU_KITS_NET_HTTP_ENABLE),1)
@@ -1712,6 +1805,25 @@ else
 SRCS   += $(wildcard tikukits/net/ipv4/*.c)
 SRCS   += $(wildcard tikukits/net/http/*.c)
 SRCS   += $(wildcard tikukits/net/mqtt/*.c)
+# The wildcards above compile the MQTT/HTTP clients, but the enable -D that
+# the BASIC/shell builtins gate on -- MQTTPUB / MQTTWAIT$ via
+# `#if (TIKU_KITS_NET_MQTT_ENABLE + 0)`, HTTPGET$ via TIKU_KITS_NET_HTTP_ENABLE
+# -- is only set in the MIN branch above. Without it those words compile out
+# even though their client is linked in (dead code). Propagate the flags into
+# the full-net profile too, opt-in, so requesting the client actually exposes
+# the language/shell surface for it.
+ifeq ($(TIKU_KITS_NET_MQTT_ENABLE),1)
+CFLAGS += -DTIKU_KITS_NET_MQTT_ENABLE=1
+# The kit flag auto-enables the shell `mqtt` command (tiku_shell_config.h),
+# but that command pulls in the SLIP command + TCP shell-io backend which the
+# NET_TEST block compiles alongside it and this full-net profile does not. The
+# BASIC MQTT words (MQTTWAIT$/MQTTPUB) are gated on the kit flag alone, so keep
+# the shell command off here to avoid an undefined-reference link error.
+CFLAGS += -DTIKU_SHELL_CMD_MQTT=0
+endif
+ifeq ($(TIKU_KITS_NET_HTTP_ENABLE),1)
+CFLAGS += -DTIKU_KITS_NET_HTTP_ENABLE=1
+endif
 endif
 # WiFi link backend: requires both the CYW43 driver and the net kit.
 # Compiled only when the build wires both submodules together.
@@ -1760,6 +1872,22 @@ ifeq ($(HAS_TLS),1)
 SRCS   += $(wildcard tikukits/net/tls/psk/*.c)
 SRCS   += $(wildcard tikukits/net/tls/tls13/*.c)
 SRCS   += $(wildcard tikukits/net/tls/tls12/*.c)
+endif
+endif
+
+# BASE64$/SHA256$/HMAC$ BASIC builtins.  On by default whenever BASIC is
+# built; TIKU_BASIC_CRYPTO=0 drops them (~3 KB) on the tightest parts.
+# When the full crypto kit is already compiled the sources come from the
+# block above, so we only add the -D and skip the (duplicate) source lines.
+ifeq ($(TIKU_SHELL_BASIC_ENABLE),1)
+TIKU_BASIC_CRYPTO ?= 1
+ifeq ($(TIKU_BASIC_CRYPTO),1)
+CFLAGS += -DTIKU_BASIC_CRYPTO_ENABLE=1
+ifneq ($(TIKU_KIT_CRYPTO_ENABLE),1)
+SRCS   += tikukits/crypto/sha256/tiku_kits_crypto_sha256.c
+SRCS   += tikukits/crypto/base64/tiku_kits_crypto_base64.c
+SRCS   += tikukits/crypto/hmac/tiku_kits_crypto_hmac.c
+endif
 endif
 endif
 
