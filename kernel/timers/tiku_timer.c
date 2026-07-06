@@ -356,3 +356,37 @@ tiku_clock_time_t tiku_timer_next_expiration(void) {
 }
 
 /*---------------------------------------------------------------------------*/
+
+tiku_clock_time_t tiku_timer_next_delay(void) {
+  struct tiku_timer *t;
+  tiku_clock_time_t now;
+  tiku_clock_time_t best = 0;
+  uint8_t have_best = 0;
+
+  if (timer_list == NULL) {
+    return 0;
+  }
+
+  now = tiku_clock_time();
+
+  for (t = timer_list; t != NULL; t = t->next) {
+    tiku_clock_time_t elapsed;
+    tiku_clock_time_t remaining;
+
+    if (timer_is_due(t, now)) {
+      return 0;
+    }
+
+    elapsed = now - t->start;
+    remaining = t->interval - elapsed;
+
+    if (!have_best || remaining < best) {
+      best = remaining;
+      have_best = 1;
+    }
+  }
+
+  return best;
+}
+
+/*---------------------------------------------------------------------------*/

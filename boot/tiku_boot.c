@@ -34,6 +34,7 @@
 #include "kernel/memory/tiku_mem.h"
 #include "kernel/timers/tiku_clock.h"
 #include "kernel/scheduler/tiku_sched.h"
+#include <hal/tiku_cpu.h>
 #if defined(PLATFORM_MSP430)
 #include "arch/msp430/tiku_uart_arch.h"
 #elif defined(PLATFORM_RP2350)
@@ -74,6 +75,7 @@ static int tiku_boot_init_cpu(unsigned int cpu_freq);
 static int tiku_boot_init_memory(void);
 static int tiku_boot_init_peripherals(void);
 static int tiku_boot_init_services(void);
+static void tiku_boot_configure_idle(void);
 
 /*---------------------------------------------------------------------------*/
 /* PUBLIC FUNCTIONS                                                         */
@@ -225,9 +227,9 @@ tiku_boot_init_peripherals(void)
 
 #if defined(TIKU_CONSOLE_USB)
     /* Native USB CDC-ACM console (TIKU_CONSOLE=usb/both). Polled: serviced
-     * whenever the scheduler is idle, and also nudged from putc/getc. */
+     * whenever the scheduler is idle, and also nudged from putc/getc. The
+     * scheduler hook is installed later, after tiku_sched_init(). */
     tiku_usb_cdc_init();
-    tiku_sched_set_idle_hook(tiku_usb_cdc_poll);
 #endif
 
     /* System clock must be up before timers or scheduler */
@@ -245,6 +247,24 @@ tiku_boot_init_services(void)
 {
     /* Scheduler init brings up processes, htimer, and software timers */
     tiku_sched_init();
+    tiku_boot_configure_idle();
 
     return TIKU_BOOT_SUCCESS;
+}
+
+static void
+tiku_boot_configure_idle(void)
+{
+#if defined(TIKU_CONSOLE_USB)
+    /* USB CDC is polled from the idle hook rather than sleeping. Install the
+     * hook AFTER scheduler init so it is not wiped by tiku_sched_init(). */
+    tiku_sched_set_idle_hook(tiku_usb_cdc_poll);
+    tiku_sched_set_idle_tick_wakes(1u);
+#elif defined(PLATFORM_STM32F411)
+    /* STM32F411 phase 2: default the scheduler's idle hook to plain WFI so
+     * the TIM2-backed tickless stretch can engage automatically when idle. */
+    tiku_sched_set_idle_hook(tiku_cpu_idle_hook(TIKU_CPU_IDLE_LIGHT));
+    tiku_sched_set_idle_tick_wakes(
+        (uint8_t)tiku_cpu_idle_mode_wakes_on_tick(TIKU_CPU_IDLE_LIGHT));
+#endif
 }

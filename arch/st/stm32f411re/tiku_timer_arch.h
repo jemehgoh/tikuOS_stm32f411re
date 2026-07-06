@@ -5,7 +5,7 @@
  *
  * Authors: Jeremy Goh
  *
- * tiku_timer_arch.h - STM32F411RE system tick (Cortex-M SysTick)
+ * tiku_timer_arch.h - STM32F411RE system tick and tickless backend
  *
  * SPDX-License-Identifier: Apache-2.0
  */

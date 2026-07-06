@@ -263,6 +263,17 @@ struct tiku_timer *tiku_timer_get(uint8_t idx);
 tiku_clock_time_t tiku_timer_next_expiration(void);
 
 /**
+ * @brief Get ticks remaining until the earliest armed timer fires.
+ * @return 0 if no timer is armed or if at least one timer is already due;
+ *         otherwise the number of ticks until the nearest deadline.
+ *
+ * This is the scheduler-facing query for deadline-aware idle / tickless
+ * stretch decisions. It hides the current unsorted active-list scan so the
+ * scheduler does not duplicate timer arithmetic or list assumptions.
+ */
+tiku_clock_time_t tiku_timer_next_delay(void);
+
+/**
  * @brief Request the timer process to poll (called from clock ISR)
  */
 void tiku_timer_request_poll(void);
