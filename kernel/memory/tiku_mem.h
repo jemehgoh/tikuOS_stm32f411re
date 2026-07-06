@@ -114,6 +114,35 @@
 /** @} */ /* End of TIKU_HIFRAM group */
 
 /*---------------------------------------------------------------------------*/
+/* DURABILITY GRADES                                                         */
+/*---------------------------------------------------------------------------*/
+
+/*
+ * `.persistent` promises power-cycle durability — FRAM in place on
+ * MSP430, NVM-mirrored SRAM on Ambiq/RP2350.  But some state only
+ * WANTS the weaker half of that deal: skip zero-init so it survives a
+ * warm reset, without earning a slot in the (small, wear-limited)
+ * NVM mirror.  On RP2350 the net stack held exactly that shape via a
+ * linker carve-out, which left one attribute meaning two different
+ * things.  TIKU_PERSIST_WARM names the weaker grade explicitly:
+ *
+ *   .persistent        survives power cycles (durable, mirrored/FRAM)
+ *   TIKU_PERSIST_WARM  survives warm resets only; never mirrored,
+ *                      never MPU-protected, costs zero NVM
+ *
+ * On MSP430 (FRAM in place, everything cheap and durable) WARM
+ * degrades to plain `.persistent` — strictly stronger than promised,
+ * which the contract allows.  RP2350 and Ambiq physically separate
+ * the grades: warm data sits outside the NVM mirror, so its churn
+ * costs no NVM programs and it stays writable outside MPU windows.
+ */
+#if defined(PLATFORM_RP2350) || defined(PLATFORM_AMBIQ)
+#define TIKU_PERSIST_WARM  __attribute__((section(".persistent.warm")))
+#else
+#define TIKU_PERSIST_WARM  __attribute__((section(".persistent")))
+#endif
+
+/*---------------------------------------------------------------------------*/
 /* ERROR CODES                                                               */
 /*---------------------------------------------------------------------------*/
 
@@ -170,7 +199,48 @@ typedef struct {
     tiku_mem_arch_size_t used_bytes;   /**< Currently allocated bytes */
     tiku_mem_arch_size_t peak_bytes;   /**< High-water mark (lifetime maximum) */
     tiku_mem_arch_size_t alloc_count;  /**< Number of successful allocations */
+    tiku_mem_arch_size_t fail_count;   /**< Allocations refused for lack of room */
 } tiku_mem_stats_t;
+
+/*---------------------------------------------------------------------------*/
+/* WORKER-THREAD CONFINEMENT GUARD                                           */
+/*---------------------------------------------------------------------------*/
+
+/*
+ * Nothing in kernel/memory/ takes an atomic bracket: the cooperative
+ * kernel serializes every caller, so locks would be pure cost.  The
+ * preemptive worker threads (TIKU_THREADS_ENABLE) break that premise —
+ * a worker preempted mid-bump could double-hand-out memory, corrupt a
+ * pool freelist, or be parked while holding the NVM MPU window open.
+ * Workers are therefore confined to pure computation by POLICY; this
+ * guard makes the policy ENFORCED: under TIKU_THREADS_ENABLE every
+ * memory mutator refuses calls from worker context (error/NULL return,
+ * violation counted) instead of corrupting silently.  Flag-off builds
+ * compile the guard to nothing — byte-identical binaries.
+ */
+#if defined(TIKU_THREADS_ENABLE) && TIKU_THREADS_ENABLE
+int tiku_thread_in_kernel(void);           /* kernel/threads/tiku_thread.c */
+void     tiku_mem_guard_note_violation(void);
+uint32_t tiku_mem_guard_violations(void);
+
+#define TIKU_MEM_KERNEL_ONLY(retval)              \
+    do {                                          \
+        if (!tiku_thread_in_kernel()) {           \
+            tiku_mem_guard_note_violation();      \
+            return retval;                        \
+        }                                         \
+    } while (0)
+#define TIKU_MEM_KERNEL_ONLY_VOID()               \
+    do {                                          \
+        if (!tiku_thread_in_kernel()) {           \
+            tiku_mem_guard_note_violation();      \
+            return;                               \
+        }                                         \
+    } while (0)
+#else
+#define TIKU_MEM_KERNEL_ONLY(retval)      do { } while (0)
+#define TIKU_MEM_KERNEL_ONLY_VOID()       do { } while (0)
+#endif
 
 /*---------------------------------------------------------------------------*/
 /* MEMORY REGION REGISTRY                                                    */
@@ -337,6 +407,7 @@ typedef struct {
     tiku_mem_arch_size_t  offset;    /**< Current bump-pointer position */
     tiku_mem_arch_size_t  peak;      /**< Lifetime high-water mark */
     tiku_mem_arch_size_t  count;     /**< Allocations since last reset */
+    tiku_mem_arch_size_t  fail;      /**< Refused allocations (no room) */
     uint8_t               id;        /**< Arena identifier for debugging */
     uint8_t               active;    /**< Non-zero if initialized */
     tiku_mem_tier_t       tier;      /**< Memory tier (SRAM or NVM) */
@@ -501,6 +572,7 @@ typedef struct {
                                             MRAM/Flash, in-place store on FRAM)
                                             rather than a direct CPU store. */
     tiku_mem_tier_t       tier;        /**< Memory tier (SRAM or NVM) */
+    tiku_mem_arch_size_t  fail;        /**< Refused allocations (exhausted) */
 } tiku_pool_t;
 
 /*---------------------------------------------------------------------------*/
@@ -1633,6 +1705,11 @@ typedef struct {
     uint32_t magic;       /**< TIKU_HIBERNATE_MAGIC if valid */
     uint32_t boot_count;  /**< Monotonic hibernate cycle counter */
     uint32_t timestamp;   /**< Caller-supplied timestamp */
+    uint32_t crc;         /**< CRC-32 over boot_count+timestamp: a torn
+                               marker write is rejected at resume instead
+                               of yielding a wrong boot_count behind an
+                               intact magic (magic alone proved nothing
+                               about the payload) */
 } tiku_hibernate_marker_t;
 
 /**

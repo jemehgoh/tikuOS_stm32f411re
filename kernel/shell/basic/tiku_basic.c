@@ -56,6 +56,7 @@
 #include <kernel/shell/tiku_shell.h>
 #include <kernel/memory/tiku_mem.h>
 #include <kernel/timers/tiku_clock.h>
+#include <hal/tiku_cpu.h>                /* SLEEP -> real low-power idle */
 #include <stdio.h>
 #include <string.h>
 
@@ -87,16 +88,22 @@
 #include <tikukits/time/tiku_kits_time.h> /* DATE$ / TIME$ calendar breakdown */
 #endif
 #endif
+#if TIKU_BASIC_JSON_ENABLE
+#include <tikukits/codec/json/tiku_kits_codec_json.h>  /* JSON$ path extractor */
+#endif
+#if TIKU_BASIC_CRYPTO_ENABLE
+#include <tikukits/crypto/base64/tiku_kits_crypto_base64.h>  /* BASE64$ */
+#include <tikukits/crypto/sha256/tiku_kits_crypto_sha256.h>  /* SHA256$ */
+#include <tikukits/crypto/hmac/tiku_kits_crypto_hmac.h>      /* HMAC$   */
+#endif
 #if TIKU_BASIC_NET_ENABLE
 #include <tikukits/net/ipv4/tiku_kits_net_udp.h>   /* UDPSEND */
 #include <tikukits/net/ipv4/tiku_kits_net_ipv4.h>  /* IPADDR$ / NETUP */
-#include <kernel/cpu/tiku_watchdog.h>              /* pump kicks the WDT */
+#include <kernel/cpu/tiku_watchdog.h>              /* WDT kick (delay/wait) */
+#include <kernel/shell/tiku_shell_pump.h>          /* shared busy-wait pump */
 #if (TIKU_KITS_NET_MQTT_ENABLE + 0)
-#include <tikukits/net/ipv4/tiku_kits_net_tcp.h>   /* tcp_periodic in pump */
+#include <tikukits/net/ipv4/tiku_kits_net_tcp.h>   /* tcp_init (MQTT words) */
 #include <tikukits/net/mqtt/tiku_kits_net_mqtt.h>  /* MQTTPUB */
-#if defined(TIKU_DRV_WIFI_CYW43_ENABLE) && TIKU_DRV_WIFI_CYW43_ENABLE
-#include <drivers/wifi/cyw43/whd.h>                /* whd_drain_rx in pump */
-#endif
 #endif
 #if (TIKU_KITS_NET_HTTP_ENABLE + 0)
 /* HTTPGET$ runs over the certificate-based TLS 1.3 client (not the PSK-only
@@ -110,6 +117,9 @@
 #include <arch/arm-rp2350/tiku_trng_arch.h>        /* TLS entropy          */
 #endif
 #endif
+#endif
+#if TIKU_BASIC_BLE_ENABLE
+#include <interfaces/bluetooth/tiku_ble_serial.h>  /* BLEADV/BLESEND/BLEUP/BLEGET$ */
 #endif
 
 /*---------------------------------------------------------------------------*/
@@ -135,6 +145,7 @@
 #include "tiku_basic_program.inl"
 #include "tiku_basic_stmt.inl"
 #include "tiku_basic_net.inl"
+#include "tiku_basic_ble.inl"
 #include "tiku_basic_subs.inl"
 #include "tiku_basic_multi_if.inl"
 #include "tiku_basic_select.inl"

@@ -19,7 +19,19 @@
 
 static int basic_net_parse_ip(const char *s, uint8_t out[4]); /* in tiku_basic_net.inl */
 
-static int basic_http_status;          /* last HTTPGET$ status */
+static int basic_http_status;          /* last HTTPGET$/HTTPPOST$ status */
+static char basic_http_hdrs[TIKU_BASIC_HTTP_HDRS_MAX];  /* extra request headers
+                                        * set by HTTPHEADER ("Name: value\r\n"...); "" = none */
+
+/* Compile-time budget for req[] in basic_https_get(): the four bounded inputs
+ * (host + path + HTTPHEADER block + content-type) plus a generous fixed
+ * allowance (128) for the method, the HTTP/Host/Connection/Content-* tokens, the
+ * decimal Content-Length and the CRLFs.  Bumping any cap in tiku_basic_config.h
+ * without growing REQ_MAX breaks the build here instead of overflowing req[]. */
+_Static_assert(TIKU_BASIC_HTTP_HOST_MAX + TIKU_BASIC_HTTP_PATH_MAX +
+               TIKU_BASIC_HTTP_HDRS_MAX + TIKU_BASIC_HTTP_CTYPE_MAX + 128u
+               <= TIKU_BASIC_HTTP_REQ_MAX,
+               "BASIC HTTP request buffer too small for its bounded inputs");
 
 
 #if defined(PLATFORM_RP2350)
@@ -282,14 +294,15 @@ basic_tls_stage_str(int s)
 }
 
 static int
-basic_https_get(const char *host, const char *path, char *out, size_t cap)
+basic_https_get(const char *method, const char *host, const char *path,
+                const char *body, const char *ctype, char *out, size_t cap)
 {
     static tiku_kits_crypto_tls13_conn_t tls;       /* ~16 KB: keep off-stack */
     static tiku_kits_crypto_tls12_conn_t tls12;     /* TLS 1.2 fallback state */
     tiku_kits_crypto_tls13_io_t io;
     tiku_kits_net_tcp_conn_t   *tcp;
     uint8_t  ip[4];
-    char     req[256];
+    char     req[TIKU_BASIC_HTTP_REQ_MAX];  /* method+path+host+HTTPHEADER+POST hdrs; budget _Static_assert'd above */
     size_t   total = 0, rl;
     int      n, use12 = 0;
     tiku_clock_time_t dl;
@@ -402,14 +415,35 @@ basic_https_get(const char *host, const char *path, char *out, size_t cap)
         }
     }
 
-    /* GET <path> HTTP/1.0 */
+    /* <METHOD> <path> HTTP/1.0 + Host + any HTTPHEADER lines, and -- for a body
+     * (POST) -- Content-Type + Content-Length.  Headers go out first; the body
+     * follows as a second TLS record so it need not fit in req[]. */
     req[0] = '\0';
-    strcat(req, "GET ");  strcat(req, path);
+    strcat(req, method); strcat(req, " "); strcat(req, path);
     strcat(req, " HTTP/1.0\r\nHost: "); strcat(req, host);
-    strcat(req, "\r\nConnection: close\r\n\r\n");
+    strcat(req, "\r\nConnection: close\r\n");
+    if (basic_http_hdrs[0]) strcat(req, basic_http_hdrs);   /* each line ends \r\n */
+    if (body) {
+        char cl[16], tmp[16]; size_t bl = strlen(body); int ci = 0, ti = 0;
+        strcat(req, "Content-Type: ");
+        strcat(req, (ctype && ctype[0]) ? ctype : "application/json");
+        strcat(req, "\r\nContent-Length: ");
+        if (bl == 0) cl[ci++] = '0';
+        else { do { tmp[ti++] = (char)('0' + (int)(bl % 10)); bl /= 10; } while (bl && ti < 15);
+               while (ti > 0) cl[ci++] = tmp[--ti]; }
+        cl[ci] = '\0';
+        strcat(req, cl);
+        strcat(req, "\r\n");
+    }
+    strcat(req, "\r\n");                                     /* end of headers */
     rl = strlen(req);
     n = use12 ? tiku_kits_crypto_tls12_write(&tls12, (const uint8_t *)req, rl)
               : tiku_kits_crypto_tls13_write(&tls,  (const uint8_t *)req, rl);
+    if (n >= 0 && body && body[0]) {                        /* POST body record */
+        size_t blen = strlen(body);
+        n = use12 ? tiku_kits_crypto_tls12_write(&tls12, (const uint8_t *)body, blen)
+                  : tiku_kits_crypto_tls13_write(&tls,  (const uint8_t *)body, blen);
+    }
     if (n < 0) {
         tiku_kits_net_tcp_close(tcp);
         return -1;

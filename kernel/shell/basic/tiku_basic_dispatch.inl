@@ -304,7 +304,17 @@ exec_stmt(const char **p)
 #endif
 #if (TIKU_KITS_NET_HTTP_ENABLE + 0)
     if (match_kw(p, "BROWSE"))   { exec_browse(p);   return; }
+    if (match_kw(p, "HTTPHEADER")) { exec_httpheader(p); return; }
+#if TIKU_BASIC_BIGBUF_COUNT > 0
+    if (match_kw(p, "FETCH"))    { exec_fetch(p);    return; }
 #endif
+#endif
+#endif
+#if TIKU_BASIC_BLE_ENABLE
+    if (match_kw(p, "BLEADV"))    { exec_bleadv(p);    return; }
+    if (match_kw(p, "BLEOFF"))    { exec_bleoff(p);    return; }
+    if (match_kw(p, "BLESEND"))   { exec_blesend(p);   return; }
+    if (match_kw(p, "BLEBEACON")) { exec_blebeacon(p); return; }
 #endif
 #if TIKU_BASIC_SUBS_ENABLE
     if (match_kw(p, "ENDSUB"))   { exec_endsub();    return; }

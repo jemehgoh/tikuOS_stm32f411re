@@ -35,6 +35,7 @@
 /*---------------------------------------------------------------------------*/
 
 #include "tiku_mem.h"
+#include "hal/tiku_cpu.h"
 #include <string.h>
 
 /*---------------------------------------------------------------------------*/
@@ -89,6 +90,7 @@ static tiku_persist_entry_t *persist_find(tiku_persist_store_t *store,
  */
 tiku_mem_err_t tiku_persist_init(tiku_persist_store_t *store)
 {
+    TIKU_MEM_KERNEL_ONLY(TIKU_MEM_ERR_INVALID);
     tiku_mem_arch_size_t i;
     tiku_mem_arch_size_t count;
 
@@ -96,16 +98,33 @@ tiku_mem_err_t tiku_persist_init(tiku_persist_store_t *store)
         return TIKU_MEM_ERR_INVALID;
     }
 
-    count = 0;
-    for (i = 0; i < TIKU_PERSIST_MAX_ENTRIES; i++) {
-        if (store->entries[i].magic == TIKU_PERSIST_MAGIC &&
-            store->entries[i].valid) {
-            count++;
-        } else {
-            memset(&store->entries[i], 0, sizeof(tiku_persist_entry_t));
+    /* The store API owns its MPU windows (same doctrine as the cell
+     * API): the store struct and value buffers commonly live in the
+     * protected .persistent/.uninit region, and with real write
+     * protection an un-windowed store op is a MemManage fault --
+     * found exactly that way (test_nvm_pool, hardfault @0x2000433c).
+     * Nest-safe under callers holding their own window. */
+    {
+        uint16_t mpu_saved;
+
+        tiku_atomic_enter();
+        mpu_saved = tiku_mpu_unlock_nvm();
+
+        count = 0;
+        for (i = 0; i < TIKU_PERSIST_MAX_ENTRIES; i++) {
+            if (store->entries[i].magic == TIKU_PERSIST_MAGIC &&
+                store->entries[i].valid) {
+                count++;
+            } else {
+                memset(&store->entries[i], 0,
+                       sizeof(tiku_persist_entry_t));
+            }
         }
+        store->count = count;
+
+        tiku_mpu_lock_nvm(mpu_saved);
+        tiku_atomic_exit();
     }
-    store->count = count;
 
     return TIKU_MEM_OK;
 }
@@ -135,6 +154,7 @@ tiku_mem_err_t tiku_persist_register(tiku_persist_store_t *store,
                                      uint8_t *fram_buf,
                                      tiku_mem_arch_size_t capacity)
 {
+    TIKU_MEM_KERNEL_ONLY(TIKU_MEM_ERR_INVALID);
     tiku_persist_entry_t *entry;
     tiku_mem_arch_size_t i;
 
@@ -147,35 +167,49 @@ tiku_mem_err_t tiku_persist_register(tiku_persist_store_t *store,
         return TIKU_MEM_ERR_INVALID;
     }
 
-    /* If key already exists, update pointer but preserve data */
-    entry = persist_find(store, key);
-    if (entry != NULL) {
-        entry->fram_ptr = fram_buf;
-        entry->capacity = capacity;
-        return TIKU_MEM_OK;
-    }
+    /* Self-windowed (see tiku_persist_init): the entry slots may live
+     * in the protected region. */
+    {
+        uint16_t mpu_saved;
+        tiku_mem_err_t err = TIKU_MEM_ERR_FULL;
 
-    /* Find first empty slot */
-    for (i = 0; i < TIKU_PERSIST_MAX_ENTRIES; i++) {
-        if (!store->entries[i].valid) {
-            entry = &store->entries[i];
+        tiku_atomic_enter();
+        mpu_saved = tiku_mpu_unlock_nvm();
 
-            memset(entry, 0, sizeof(tiku_persist_entry_t));
-            strncpy(entry->key, key, TIKU_PERSIST_MAX_KEY_LEN - 1);
-            entry->key[TIKU_PERSIST_MAX_KEY_LEN - 1] = '\0';
-            entry->fram_ptr    = fram_buf;
-            entry->capacity    = capacity;
-            entry->value_len   = 0;
-            entry->write_count = 0;
-            entry->magic       = TIKU_PERSIST_MAGIC;
-            entry->valid       = 1;
+        /* If key already exists, update pointer but preserve data */
+        entry = persist_find(store, key);
+        if (entry != NULL) {
+            entry->fram_ptr = fram_buf;
+            entry->capacity = capacity;
+            err = TIKU_MEM_OK;
+        } else {
+            /* Find first empty slot */
+            for (i = 0; i < TIKU_PERSIST_MAX_ENTRIES; i++) {
+                if (!store->entries[i].valid) {
+                    entry = &store->entries[i];
 
-            store->count++;
-            return TIKU_MEM_OK;
+                    memset(entry, 0, sizeof(tiku_persist_entry_t));
+                    strncpy(entry->key, key,
+                            TIKU_PERSIST_MAX_KEY_LEN - 1);
+                    entry->key[TIKU_PERSIST_MAX_KEY_LEN - 1] = '\0';
+                    entry->fram_ptr    = fram_buf;
+                    entry->capacity    = capacity;
+                    entry->value_len   = 0;
+                    entry->write_count = 0;
+                    entry->magic       = TIKU_PERSIST_MAGIC;
+                    entry->valid       = 1;
+
+                    store->count++;
+                    err = TIKU_MEM_OK;
+                    break;
+                }
+            }
         }
-    }
 
-    return TIKU_MEM_ERR_FULL;
+        tiku_mpu_lock_nvm(mpu_saved);
+        tiku_atomic_exit();
+        return err;
+    }
 }
 
 /**
@@ -255,6 +289,7 @@ tiku_mem_err_t tiku_persist_write(tiku_persist_store_t *store,
                                    const uint8_t *data,
                                    tiku_mem_arch_size_t data_len)
 {
+    TIKU_MEM_KERNEL_ONLY(TIKU_MEM_ERR_INVALID);
     tiku_persist_entry_t *entry;
 
     if (store == NULL || key == NULL || data == NULL) {
@@ -270,9 +305,21 @@ tiku_mem_err_t tiku_persist_write(tiku_persist_store_t *store,
         return TIKU_MEM_ERR_NOMEM;
     }
 
-    tiku_mem_arch_nvm_write(entry->fram_ptr, data, data_len);
-    entry->value_len = data_len;
-    entry->write_count++;
+    /* Self-windowed (see tiku_persist_init): the value buffer and the
+     * store metadata may live in the protected region. */
+    {
+        uint16_t mpu_saved;
+
+        tiku_atomic_enter();
+        mpu_saved = tiku_mpu_unlock_nvm();
+
+        tiku_mem_arch_nvm_write(entry->fram_ptr, data, data_len);
+        entry->value_len = data_len;
+        entry->write_count++;
+
+        tiku_mpu_lock_nvm(mpu_saved);
+        tiku_atomic_exit();
+    }
 
     return TIKU_MEM_OK;
 }
@@ -289,6 +336,7 @@ tiku_mem_err_t tiku_persist_write(tiku_persist_store_t *store,
 tiku_mem_err_t tiku_persist_delete(tiku_persist_store_t *store,
                                     const char *key)
 {
+    TIKU_MEM_KERNEL_ONLY(TIKU_MEM_ERR_INVALID);
     tiku_persist_entry_t *entry;
 
     if (store == NULL || key == NULL) {
@@ -300,8 +348,19 @@ tiku_mem_err_t tiku_persist_delete(tiku_persist_store_t *store,
         return TIKU_MEM_ERR_NOT_FOUND;
     }
 
-    memset(entry, 0, sizeof(tiku_persist_entry_t));
-    store->count--;
+    /* Self-windowed (see tiku_persist_init). */
+    {
+        uint16_t mpu_saved;
+
+        tiku_atomic_enter();
+        mpu_saved = tiku_mpu_unlock_nvm();
+
+        memset(entry, 0, sizeof(tiku_persist_entry_t));
+        store->count--;
+
+        tiku_mpu_lock_nvm(mpu_saved);
+        tiku_atomic_exit();
+    }
 
     return TIKU_MEM_OK;
 }
@@ -414,8 +473,25 @@ static uint8_t cell_primed;
  * @return 1 when the cell was primed this boot, 0 when the persisted
  *         value was kept
  */
+/* A value wider than one aligned arch-word store can tear on a power
+ * cut (16-bit words on MSP430, 32-bit on ARM).  For those, cell_write/
+ * cell_commit run the crash-consistent protocol: INVALIDATE the gate,
+ * write the value, REVALIDATE.  A cut mid-value then leaves an invalid
+ * gate — the next boot re-primes the default — instead of a torn value
+ * that a reader would trust.  Single-word values skip the protocol:
+ * the store itself is the atom.
+ *
+ * Mirror-platform note (Ambiq/RP2350): inside one unlock window all
+ * three steps land in SRAM and only the final state reaches the NVM
+ * mirror at relock — there the equivalent hole is a TORN FLUSH, which
+ * the mirror's V2 CRC (tiku_nvm_mirror.h) detects at boot restore.
+ * On MSP430 (FRAM in place) each step is individually durable and the
+ * protocol carries the full weight. */
+#define CELL_CAN_TEAR(len)  ((len) > sizeof(unsigned int))
+
 uint8_t tiku_persist_cell_init(const tiku_persist_cell_t *c)
 {
+    TIKU_MEM_KERNEL_ONLY(0);
     uint16_t saved;
     uint16_t n;
 
@@ -432,6 +508,8 @@ uint8_t tiku_persist_cell_init(const tiku_persist_cell_t *c)
     /* Virgin (or corrupted) NVM: prime defaults, gate stamped last.
      * Data flows through the NVM HAL; the gate is one direct word
      * store (power-cut-atomic — see the routing note above). */
+    tiku_atomic_enter();        /* an ISR inside the window would have
+                                 * NVM write access — keep it closed  */
     saved = tiku_mpu_unlock_nvm();
     cell_zero_fill(c);
     if (c->def != NULL && c->def_size > 0) {
@@ -441,6 +519,7 @@ uint8_t tiku_persist_cell_init(const tiku_persist_cell_t *c)
     }
     *c->gate = c->key;          /* commit point */
     tiku_mpu_lock_nvm(saved);
+    tiku_atomic_exit();
 
     cell_primed++;
     return 1;
@@ -458,7 +537,12 @@ uint8_t tiku_persist_cell_valid(const tiku_persist_cell_t *c)
 }
 
 /**
- * @brief Update a cell's value (gate untouched).
+ * @brief Update a cell's value (crash-consistently for wide values).
+ *
+ * Values wider than one arch word run invalidate->write->revalidate
+ * (see CELL_CAN_TEAR): a power cut mid-write re-primes the default on
+ * the next boot instead of leaving a torn value behind a valid gate.
+ * Single-word values are written directly; the gate is untouched.
  *
  * @param c    Cell descriptor
  * @param src  New value bytes
@@ -467,6 +551,7 @@ uint8_t tiku_persist_cell_valid(const tiku_persist_cell_t *c)
 void tiku_persist_cell_write(const tiku_persist_cell_t *c,
                              const void *src, uint16_t len)
 {
+    TIKU_MEM_KERNEL_ONLY_VOID();
     uint16_t saved;
 
     if (c == NULL || src == NULL) {
@@ -476,10 +561,18 @@ void tiku_persist_cell_write(const tiku_persist_cell_t *c,
         len = c->size;
     }
 
+    tiku_atomic_enter();
     saved = tiku_mpu_unlock_nvm();
+    if (CELL_CAN_TEAR(len)) {
+        *c->gate = 0;           /* invalidate: a tear re-primes      */
+    }
     tiku_mem_arch_nvm_write((uint8_t *)c->data,
                             (const uint8_t *)src, len);
+    if (CELL_CAN_TEAR(len)) {
+        *c->gate = c->key;      /* revalidate: value fully written   */
+    }
     tiku_mpu_lock_nvm(saved);
+    tiku_atomic_exit();
 }
 
 /**
@@ -492,6 +585,7 @@ void tiku_persist_cell_write(const tiku_persist_cell_t *c,
 void tiku_persist_cell_commit(const tiku_persist_cell_t *c,
                               const void *src, uint16_t len)
 {
+    TIKU_MEM_KERNEL_ONLY_VOID();
     uint16_t saved;
 
     if (c == NULL || src == NULL) {
@@ -501,11 +595,17 @@ void tiku_persist_cell_commit(const tiku_persist_cell_t *c,
         len = c->size;
     }
 
+    tiku_atomic_enter();
     saved = tiku_mpu_unlock_nvm();
+    if (CELL_CAN_TEAR(len)) {
+        *c->gate = 0;           /* a previously-valid gate must not
+                                 * survive a mid-value tear          */
+    }
     tiku_mem_arch_nvm_write((uint8_t *)c->data,
                             (const uint8_t *)src, len);
     *c->gate = c->key;          /* commit point — after the data */
     tiku_mpu_lock_nvm(saved);
+    tiku_atomic_exit();
 }
 
 /**
@@ -521,23 +621,34 @@ void tiku_persist_cell_commit(const tiku_persist_cell_t *c,
 void tiku_persist_cell_write_u32(const tiku_persist_cell_t *c,
                                  uint32_t v)
 {
+    TIKU_MEM_KERNEL_ONLY_VOID();
     uint16_t saved;
 
     if (c == NULL) {
         return;
     }
 
+    tiku_atomic_enter();
     saved = tiku_mpu_unlock_nvm();
     if (c->size == sizeof(uint32_t)) {
-        /* Direct aligned store on purpose: power-cut-atomic at
-         * word granularity, where the HAL's byte loop is not. */
+        /* Direct aligned store on purpose: power-cut-atomic at word
+         * granularity on ARM.  On MSP430 a uint32_t is TWO 16-bit
+         * word stores and can tear — bracket with the gate protocol
+         * there (compile-time: CELL_CAN_TEAR(4) is false on ARM). */
+        if (CELL_CAN_TEAR(sizeof(uint32_t))) {
+            *c->gate = 0;
+        }
         *(uint32_t *)c->data = v;
+        if (CELL_CAN_TEAR(sizeof(uint32_t))) {
+            *c->gate = c->key;
+        }
     } else {
         tiku_mem_arch_nvm_write((uint8_t *)c->data, (const uint8_t *)&v,
                                 (c->size < sizeof(uint32_t))
                                     ? c->size : (uint16_t)sizeof(uint32_t));
     }
     tiku_mpu_lock_nvm(saved);
+    tiku_atomic_exit();
 }
 
 /**

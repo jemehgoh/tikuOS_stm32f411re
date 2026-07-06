@@ -82,6 +82,25 @@ parse_call_2arg(const char **p, long *a, long *b)
     return 1;
 }
 
+/* Zero-arg call: consume an empty `()`.  Used by ERR()/ERL() and any
+ * other stateful builtin that takes no argument but keeps the parens
+ * so the lexer treats it as a function rather than an identifier. */
+static int
+parse_call_0arg(const char **p)
+{
+    skip_ws(p);
+    if (**p != '(') {
+        basic_error = 1; SHELL_PRINTF(SH_RED "? '(' expected\n" SH_RST); return 0;
+    }
+    (*p)++;
+    skip_ws(p);
+    if (**p != ')') {
+        basic_error = 1; SHELL_PRINTF(SH_RED "? ')' expected\n" SH_RST); return 0;
+    }
+    (*p)++;
+    return 1;
+}
+
 /* Detect and dispatch a built-in function call. Returns 1 if the
  * cursor sat on a function call (advanced past the closing paren,
  * @p out_v filled), 0 otherwise. Each branch must consume `(`...`)`
@@ -129,6 +148,7 @@ expr_call(const char **p, long *out_v)
         if (!parse_call_2arg(p, &a, &b)) return 1;
         if (b == 0) {
             basic_error = 1;
+            basic_errcat = TIKU_BASIC_ERR_DIVZERO;
             SHELL_PRINTF(SH_RED "? MOD by zero\n" SH_RST);
             return 1;
         }
@@ -215,6 +235,43 @@ expr_call(const char **p, long *out_v)
         return 1;
     }
 #endif
+    /* ERR() / ERL() -- error introspection for ON ERROR handlers.
+     * ERR is the category code (see TIKU_BASIC_ERR_* in the config;
+     * GENERAL=1 for anything the throw site could not classify), ERL
+     * the line that errored.  Both are 0 until the first error of the
+     * run.  Empty-paren form like the time builtins so the lexer knows
+     * they are functions, not variables.  The typical handler:
+     *   ON ERROR GOTO 900
+     *   ...
+     *   900 IF ERR() = 6 THEN PRINT "net down @"; ERL() : RESUME NEXT */
+    if (match_kw(p, "ERR")) {
+        if (!parse_call_0arg(p)) return 1;
+        *out_v = (long)basic_err;
+        return 1;
+    }
+    if (match_kw(p, "ERL")) {
+        if (!parse_call_0arg(p)) return 1;
+        *out_v = (long)basic_erl;
+        return 1;
+    }
+#if TIKU_BASIC_BLE_ENABLE
+    /* BLEUP() -- 1 when a central is connected AND subscribed (ready to send),
+     * else 0.  Empty-paren form.  Polls the BLE stack as a side effect, so a
+     * `IF BLEUP()=0 THEN ...` wait loop keeps the link serviced. */
+    if (match_kw(p, "BLEUP")) {
+        if (!parse_call_0arg(p)) return 1;
+        *out_v = (long)(tiku_ble_serial_ready() ? 1 : 0);
+        return 1;
+    }
+    /* BLEAVAIL() -- 1 when received bytes are waiting to be read, else 0.  The
+     * allocation-free predicate to gate a read loop: `IF BLEAVAIL() THEN
+     * A$=BLEGET$()` avoids churning the string heap on empty polls. */
+    if (match_kw(p, "BLEAVAIL")) {
+        if (!parse_call_0arg(p)) return 1;
+        *out_v = (long)(tiku_ble_serial_rx_ready() ? 1 : 0);
+        return 1;
+    }
+#endif
     /* Time builtins. Both take a () with no arg so the parser knows
      * they're functions (otherwise MILLIS would parse as a multi-char
      * identifier with nothing to do). */
@@ -267,6 +324,7 @@ expr_call(const char **p, long *out_v)
         if (!parse_call_2arg(p, &a, &b)) return 1;
         if (b == 0) {
             basic_error = 1;
+            basic_errcat = TIKU_BASIC_ERR_DIVZERO;
             SHELL_PRINTF(SH_RED "? FDIV by zero" SH_RST "\n");
             return 1;
         }
@@ -390,18 +448,20 @@ expr_call(const char **p, long *out_v)
 #if TIKU_BASIC_STRVARS_ENABLE
     if (match_kw(p, "LEN")) {
         char buf[TIKU_BASIC_STR_BUF_CAP];
+        const char *S; size_t SL;
         skip_ws(p);
         if (**p != '(') {
             basic_error = 1; SHELL_PRINTF(SH_RED "? '(' expected\n" SH_RST); return 1;
         }
         (*p)++;
-        if (parse_strexpr(p, buf, sizeof(buf)) != 0) return 1;
+        if (parse_str_ref(p, &S, &SL, buf, sizeof(buf)) != 0) return 1;  /* LEN(#n) too */
+        (void)S;
         skip_ws(p);
         if (**p != ')') {
             basic_error = 1; SHELL_PRINTF(SH_RED "? ')' expected\n" SH_RST); return 1;
         }
         (*p)++;
-        *out_v = (long)strlen(buf);
+        *out_v = (long)SL;
         return 1;
     }
     if (match_kw(p, "ASC")) {
@@ -487,6 +547,45 @@ expr_call(const char **p, long *out_v)
         }
         match = strstr(haystack + (start - 1), needle);
         *out_v = match ? (long)(match - haystack + 1) : 0;
+        return 1;
+    }
+    /* COUNT(haystack, needle) -- number of non-overlapping occurrences (0 if the
+     * needle is empty or absent). Count list items, lines COUNT(s$,CHR$(10)),
+     * delimiters, keyword hits in LLM/API text. */
+    if (match_kw(p, "COUNT")) {
+        char haystack[TIKU_BASIC_STR_BUF_CAP];
+        char needle[TIKU_BASIC_STR_BUF_CAP];
+        const char *hp;
+        long cnt = 0;
+        size_t nl;
+        skip_ws(p);
+        if (**p != '(') {
+            basic_error = 1; SHELL_PRINTF(SH_RED "? '(' expected\n" SH_RST); return 1;
+        }
+        (*p)++;
+        if (parse_strexpr(p, haystack, sizeof(haystack)) != 0) return 1;
+        skip_ws(p);
+        if (**p != ',') {
+            basic_error = 1; SHELL_PRINTF(SH_RED "? ',' expected\n" SH_RST); return 1;
+        }
+        (*p)++;
+        if (parse_strexpr(p, needle, sizeof(needle)) != 0) return 1;
+        skip_ws(p);
+        if (**p != ')') {
+            basic_error = 1; SHELL_PRINTF(SH_RED "? ')' expected\n" SH_RST); return 1;
+        }
+        (*p)++;
+        nl = strlen(needle);
+        if (nl > 0) {
+            hp = haystack;
+            for (;;) {
+                const char *m = strstr(hp, needle);
+                if (m == NULL) break;
+                cnt++;
+                hp = m + nl;
+            }
+        }
+        *out_v = cnt;
         return 1;
     }
 #endif

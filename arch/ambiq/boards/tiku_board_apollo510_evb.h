@@ -82,6 +82,7 @@
  */
 #define TIKU_BOARD_UART_TX_PIN      30U     /**< UART TX pad number. */
 #define TIKU_BOARD_UART_RX_PIN      55U     /**< UART RX pad number. */
+#define TIKU_BOARD_UART_PIN_FUNCSEL 4U      /**< FUNCSEL for pads 30/55 -> UART0. */
 /** @brief Board-level UART pin mux init (no-op; handled by am_hal). */
 #define TIKU_BOARD_UART_PINS_INIT() do { } while (0)
 
