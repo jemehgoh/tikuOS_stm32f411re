@@ -217,8 +217,20 @@ static volatile struct tiku_mpu_diag mpu_diag;
  *  Enlarge MPU_STACK_RESERVED_BYTES if a profiling run shows the guard is
  *  being approached.
  */
-#define MPU_STACK_RESERVED_BYTES   8192U
-#define MPU_STACK_GUARD_BYTES      32U
+/* Stack budget + guard sizing.  8 KB + a 32-byte guard proved wrong on
+ * two counts (found by Tiku BASIC's string parser, July 2026): the
+ * parser's KB-sized frames (1 KB string buffers, two recursion levels)
+ * legitimately reach ~10 KB of stack, and a 32-byte guard is LEAPT by
+ * KB-sized frame allocations -- SP lands below the guard without ever
+ * touching it, execution continues in SRAM_MID, and only a stray local
+ * that happens to fall inside the 32-byte window faults (BASIC's
+ * PRINT LEFT$(A$,3) stored is_str at 0x2007fff8 -> MemManage -> reset
+ * loop).  32 KB covers the deepest realistic BASIC nesting (~24 KB)
+ * with margin; a 4 KB guard cannot be jumped by any frame smaller than
+ * 4 KB, which bounds every frame in the tree today.  Update the copies
+ * in TikuBench tests/memory/test_mem_mpu.c in lockstep. */
+#define MPU_STACK_RESERVED_BYTES   32768U
+#define MPU_STACK_GUARD_BYTES      4096U
 
 /**
  * @brief Issue a full DSB + ISB memory barrier pair.
@@ -385,6 +397,16 @@ static inline uint32_t mpu_stack_guard_base(void) {
 static void mpu_program_seg2_sram_mid(void) {
     uint32_t base = (uint32_t)&__uninit_end;
     uint32_t end  = mpu_stack_guard_base() - 1U;
+    /* Defensive: if static data ever reached the guard base, base > end would
+     * program an INVERTED region (RLAR limit below RBAR base) -- undefined on
+     * ARMv8-M. The link-time ASSERT in rp2350.ld ((__stack - _end) >= 36 KB)
+     * makes this impossible; this guards only the exact-granule boundary and
+     * any future symbol drift. The range is empty when base > end, so leaving
+     * region 3 disabled is correct -- the guard + SRAM_TOP still cover the
+     * stack, and .uninit stays protected by region 0. */
+    if (base > end) {
+        return;
+    }
     mpu_program_region(MPU_REGION_SRAM_MID, base, end,
                        RP2350_MPU_RBAR_AP_RW_ANY,
                        RP2350_MPU_RBAR_XN);

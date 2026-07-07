@@ -58,6 +58,10 @@
 #include "tiku_vfs_tree_persist.h"
 #include "tiku_vfs_tree_watch.h"
 #include "tiku_vfs_tree_inittab.h"
+#if TIKU_SHELL_ENABLE
+#include <kernel/shell/tiku_shell_rules.h>   /* /sys/rules/* observability */
+#include <kernel/shell/tiku_shell_jobs.h>    /* /sys/jobs/* observability  */
+#endif
 #include "tiku.h"
 #include <kernel/timers/tiku_clock.h>
 #include <kernel/cpu/tiku_common.h>
@@ -152,13 +156,16 @@ time_write(const char *buf, size_t len)
             break;
         }
         if (c < '0' || c > '9') {
-            return -1;
+            return TIKU_VFS_EINVAL;
+        }
+        if (v > (UINT32_MAX - (uint32_t)(c - '0')) / 10u) {
+            return TIKU_VFS_ERANGE;   /* would overflow the 32-bit seconds field */
         }
         v = v * 10U + (uint32_t)(c - '0');
         seen_digit = 1;
     }
     if (!seen_digit) {
-        return -1;
+        return TIKU_VFS_EINVAL;
     }
     tiku_rtc_set_seconds(v);
     return 0;
@@ -362,12 +369,15 @@ mem_free_read(char *buf, size_t max)
 /**
  * @brief Read handler for /sys/mem/used.
  *
- * Renders the sum of every registered process's sram_used
- * accounting field as a decimal line.  This measures what
- * processes *declared* through the proc-mem API, not actual SRAM
- * consumption — kernel statics and the stack are not included.
- * Walks the registry by pid; empty slots return NULL from
- * tiku_process_get() and are skipped.
+ * Renders the sum of every registered process's SRAM use as a decimal
+ * line: each process's declared proc-mem footprint plus its measured
+ * live allocation (e.g. the BASIC arena), via tiku_process_sram_used().
+ * Kernel statics and the stack are not included.  Walks the registry by
+ * pid; empty slots return NULL from tiku_process_get() and are skipped.
+ *
+ * The accumulator is 32-bit: tiku_process_sram_used() returns a uint32_t
+ * (a BASIC arena alone is hundreds of KB on the big-RAM parts), so a
+ * 16-bit sum here would wrap modulo 65536 and under-report.
  *
  * @param buf  Output buffer for the rendered text
  * @param max  Capacity of @p buf in bytes
@@ -376,7 +386,7 @@ mem_free_read(char *buf, size_t max)
 static int
 mem_used_read(char *buf, size_t max)
 {
-    uint16_t total = 0;
+    uint32_t total = 0;
     uint8_t i;
     for (i = 0; i < TIKU_PROCESS_MAX; i++) {
         struct tiku_process *p = tiku_process_get((int8_t)i);
@@ -669,12 +679,107 @@ static const tiku_vfs_node_t sys_device_children[] = {
  * module), append the entry, and — if referencing a sibling's
  * table — keep its NCHILD macro beside the children pointer.
  */
+#if TIKU_SHELL_ENABLE
+/*---------------------------------------------------------------------------*/
+/* /sys/rules, /sys/jobs — read-only view of the shell's reactive automation */
+/*---------------------------------------------------------------------------*/
+/*
+ * Observability only (an agent can see what automation is armed).  Mutating
+ * add/del still goes through the `rules`/`on`/`every`/`once` shell commands;
+ * writable VFS control is a deliberate follow-up.
+ */
+static int
+rules_count_read(char *buf, size_t max)
+{
+    uint8_t  i;
+    unsigned n = 0;
+    for (i = 0; i < TIKU_SHELL_RULES_MAX; i++) {
+        if (tiku_shell_rules_get(i) != (const tiku_shell_rule_t *)0) {
+            n++;
+        }
+    }
+    return snprintf(buf, max, "%u\n", n);
+}
+
+/* One line per armed rule: "<id> <path> <op> <value> -> <action>". */
+static int
+rules_list_read(char *buf, size_t max)
+{
+    uint8_t i;
+    int     off = 0;
+    for (i = 0; i < TIKU_SHELL_RULES_MAX; i++) {
+        const tiku_shell_rule_t *r = tiku_shell_rules_get(i);
+        size_t room;
+        int    m;
+        if (r == (const tiku_shell_rule_t *)0) {
+            continue;
+        }
+        room = ((size_t)off < max) ? (max - (size_t)off) : 0u;
+        m = snprintf(buf + off, room, "%u %s %s %s -> %s\n",
+                     (unsigned)i, r->path, tiku_shell_rules_op_name(r->op),
+                     r->value, r->action);
+        if (m > 0) {
+            off += m;
+        }
+    }
+    return off;   /* 0 = no rules armed (empty read) */
+}
+
+static int
+jobs_count_read(char *buf, size_t max)
+{
+    uint8_t  i;
+    unsigned n = 0;
+    for (i = 0; i < TIKU_SHELL_JOBS_MAX; i++) {
+        if (tiku_shell_jobs_get(i) != (const tiku_shell_job_t *)0) {
+            n++;
+        }
+    }
+    return snprintf(buf, max, "%u\n", n);
+}
+
+/* One line per scheduled job: "<id> every|once <interval>s -> <cmd>". */
+static int
+jobs_list_read(char *buf, size_t max)
+{
+    uint8_t i;
+    int     off = 0;
+    for (i = 0; i < TIKU_SHELL_JOBS_MAX; i++) {
+        const tiku_shell_job_t *j = tiku_shell_jobs_get(i);
+        size_t room;
+        int    m;
+        if (j == (const tiku_shell_job_t *)0) {
+            continue;
+        }
+        room = ((size_t)off < max) ? (max - (size_t)off) : 0u;
+        m = snprintf(buf + off, room, "%u %s %us -> %s\n",
+                     (unsigned)i,
+                     (j->type == TIKU_SHELL_JOB_EVERY) ? "every" : "once",
+                     (unsigned)j->interval_sec, j->cmd);
+        if (m > 0) {
+            off += m;
+        }
+    }
+    return off;
+}
+
+static const tiku_vfs_node_t sys_rules_children[] = {
+    { "count", TIKU_VFS_FILE, rules_count_read, NULL, NULL, 0 },
+    { "list",  TIKU_VFS_FILE, rules_list_read,  NULL, NULL, 0 },
+};
+static const tiku_vfs_node_t sys_jobs_children[] = {
+    { "count", TIKU_VFS_FILE, jobs_count_read, NULL, NULL, 0 },
+    { "list",  TIKU_VFS_FILE, jobs_list_read,  NULL, NULL, 0 },
+};
+#endif /* TIKU_SHELL_ENABLE */
+
 static const tiku_vfs_node_t sys_children[] = {
     { "version",    TIKU_VFS_FILE, version_read,    NULL, NULL, 0 },
     { "device",     TIKU_VFS_DIR,  NULL, NULL, sys_device_children, 4 },
     { "uptime",     TIKU_VFS_FILE, uptime_read,     NULL, NULL, 0,
       &desc_uptime },
-    { "time",       TIKU_VFS_FILE, time_read,       time_write, NULL, 0 },
+    { "time",       TIKU_VFS_FILE, time_read,       time_write, NULL, 0,
+      NULL, NULL, TIKU_VFS_CAP_SYS },   /* clock skew breaks TLS cert validity */
     { "boot_count", TIKU_VFS_FILE,
       tiku_vfs_tree_boot_count_read,      NULL, NULL, 0 },
     { "last_reset", TIKU_VFS_FILE,
@@ -701,6 +806,10 @@ static const tiku_vfs_node_t sys_children[] = {
       tiku_vfs_tree_watch_children,    TIKU_VFS_TREE_WATCH_NCHILD },
     { "vfs",      TIKU_VFS_DIR,  NULL, NULL,
       tiku_vfs_tree_vfs_children,      TIKU_VFS_TREE_VFS_NCHILD },
+#if TIKU_SHELL_ENABLE
+    { "rules",    TIKU_VFS_DIR,  NULL, NULL, sys_rules_children, 2 },
+    { "jobs",     TIKU_VFS_DIR,  NULL, NULL, sys_jobs_children,  2 },
+#endif
     { "sched",    TIKU_VFS_DIR,  NULL, NULL, sys_sched_children, 1 },
 #if TIKU_INIT_ENABLE
     { "init",     TIKU_VFS_DIR,  NULL, NULL,

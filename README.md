@@ -26,35 +26,21 @@
 
 ## Supported Boards
 
-| Board | MCU / Core | RAM | NVM | Notable | Status |
-|-------|-----------|-----|-----|---------|--------|
-| MSP-EXP430FR5969 LaunchPad | MSP430FR5969 · 16-bit | 2 KB | 64 KB FRAM | The reference part | :green_circle: Primary |
-| MSP-EXP430FR5994 LaunchPad | MSP430FR5994 · 16-bit | 8 KB | 256 KB FRAM | 208 KB HIFRAM, 8 KB merged SRAM (`LEA_ENABLE=0` default) | :green_circle: Primary |
-| MSP-EXP430FR6989 LaunchPad | MSP430FR6989 · 16-bit | 2 KB | 128 KB FRAM | On-board FH-1138P 96-segment LCD, HIFRAM/large mode | :green_circle: Primary |
-| Ambiq Apollo510 EVB | Apollo510 · Cortex-M55 @ 96-192 MHz | 512 KB | 4 MB MRAM | TLS 1.3/1.2 to the live web, Tiku BASIC, IP-over-SLIP | :green_circle: Primary |
-| Ambiq Apollo4 Lite EVB | Apollo4 Lite · Cortex-M4F @ 96 MHz | 384 KB | 2 MB MRAM | IP-over-SLIP, durable MRAM object store | :green_circle: Primary |
-| Ambiq Apollo510 Blue EVB | Apollo510 + EM9305 · Cortex-M55 | 512 KB | 4 MB MRAM | Console on UART1; experimental BLE (beacon + GATT / Nordic UART Service) | :yellow_circle: Experimental |
-| Raspberry Pi Pico 2 W | RP2350 · Cortex-M33 @ 150 MHz | 520 KB | 4 MB flash | Bare-metal (no Pico SDK dep); experimental Wi-Fi (from-scratch CYW43 driver) | :yellow_circle: Compatible |
-| Raspberry Pi Pico 2 | RP2350 · Cortex-M33 @ 150 MHz | 520 KB | 4 MB flash | Bare-metal; UART shell, GPIO | :yellow_circle: Compatible |
-
-<sub>Apollo4 Plus (`MCU=apollo4p`) builds on the Apollo4 Lite backend. All Ambiq targets flash over J-Link (SEGGER).</sub>
+| Family | Board · core | RAM | NVM | Status |
+|--------|--------------|-----|-----|--------|
+| **MSP430**<br><sub>16-bit · FRAM</sub> | FR5994 LaunchPad | 8 KB | 256 KB | :green_circle: |
+| | FR6989 LaunchPad | 2 KB | 128 KB | :green_circle: |
+| **Ambiq Apollo**<br><sub>32-bit · Cortex-M</sub> | Apollo510 EVB · M55 96/250 MHz | 512 KB | 4 MB MRAM | :green_circle: |
+| | Apollo4 Lite EVB · M4F 96/192 MHz | 384 KB | 2 MB MRAM | :green_circle: |
+| | Apollo4 Plus EVB · M4F 96/192 MHz | 384 KB | 2 MB MRAM | :green_circle: |
+| | Apollo510 Blue EVB · M55 + EM9305 | 512 KB | 4 MB MRAM | :green_circle: |
+| **Raspberry Pi**<br><sub>32-bit · RP2350 · Cortex-M33 @ 150 MHz</sub> | Pico 2 / Pico 2 W | 520 KB | 4 MB flash | :green_circle: |
 
 ---
 
 ## Quick Start
 
 ```bash
-# --- MSP430 builds ---------------------------------------------------------
-make MCU=msp430fr5969
-make MCU=msp430fr6989 MEMORY_MODEL=large    # FR6989 needs large mode for HIFRAM
-make flash MCU=msp430fr5969
-make flash MCU=msp430fr6989 MEMORY_MODEL=large
-
-# Build with the Tiku BASIC interpreter (MSP430 needs large mode;
-# the Cortex-M parts, e.g. MCU=apollo510 / rp2350, do not)
-make flash MCU=msp430fr5994 TIKU_SHELL_ENABLE=1 \
-           TIKU_SHELL_BASIC_ENABLE=1 MEMORY_MODEL=large
-
 # --- Raspberry Pi Pico 2 W (RP2350) ----------------------------------------
 # Requires: arm-none-eabi-gcc + python3 (and optionally picotool).
 make MCU=rp2350                              # builds main.elf, main.bin, main.uf2
@@ -64,16 +50,13 @@ make flash MCU=rp2350                        # picotool, or copies UF2 to RPI-RP
 # Requires: arm-none-eabi-gcc; flashing uses J-Link (SEGGER JLinkExe).
 make MCU=apollo510                           # also apollo4l / apollo4p / apollo510b
 make flash MCU=apollo510                     # J-Link
-
-# Open serial monitor (RP2350 default baud is 115200; MSP430 is 9600)
-make monitor MCU=rp2350
 ```
 
 ---
 
 ## :computer: Interactive Shell
 
-TikuOS includes a full interactive shell over UART or Telnet. Control GPIO pins, read sensors, manage processes, configure boot sequences, and inspect memory — **all without recompiling**. Build with `TIKU_SHELL_COLOR=1` for ANSI color output.
+TikuOS includes a full interactive shell over UART or Telnet. Control GPIO pins, read sensors, manage processes, configure boot sequences, and inspect memory — **all without recompiling**.
 
 ```
   ___ _ _         ___  ___
@@ -82,103 +65,18 @@ TikuOS includes a full interactive shell over UART or Telnet. Control GPIO pins,
   |_||_|_\_\\_,_|\___/|___/  v0.05
   Simple. Ubiquitous. Intelligence, Everywhere.
 
-  MSP430FR5969  |  SRAM 2048B  FRAM 64KB
+  Apollo510  |  SRAM 512KB  MRAM 4MB
   Type 'help' for commands.
 
 tikuOS> help
- --- System ---
-  help       Show available commands
-  info       Device, CPU, uptime, clock
-  free       Memory usage (SRAM/FRAM)
-  reboot     System reset
-  history    Last N commands from FRAM
-  calc       Integer arithmetic
-  clear      Clear screen (ANSI)
- --- Processes ---
-  ps         List active processes
-  start      Start/resume by name
-  kill       Stop a process (by pid)
-  resume     Resume a stopped process
-  queue      List pending events
-  timer      Software timer status
-  every      Schedule a recurring command
-  once       Schedule a one-shot command
-  jobs       List/delete scheduled jobs
-  on         Register a reactive rule
-  rules      List/delete reactive rules
- --- Filesystem ---
-  ls         List directory
-  tree       Recursive directory listing
-  cd         Change directory
-  pwd        Print working directory
-  read       Read a VFS node
-  watch      Read VFS node every N sec
-  changed    Block until VFS node changes
-  write      Write a VFS node
-  name       Read/set device name
-  irq        Enable/disable GPIO edge IRQ
-  alias      Define/list FRAM-backed aliases
-  unalias    Remove an alias
-  toggle     Flip a binary VFS node
-  cat        Read (alias)
-  echo       Print arguments + newline
- --- Hardware ---
-  gpio       Read/write GPIO pins
-  adc        Read analog channel
- --- Power ---
-  sleep      Set low-power idle mode
-  wake       Show active wake sources
- --- Boot ---
-  init       Manage FRAM boot entries
+ System     help  info  free  reboot  history  clear
+ Processes  ps  start  kill  every  once  on  rules
+ Files      ls  tree  cd  read  write  watch  name  alias
+ Hardware   gpio  adc
+ Power      sleep  wake
+ Boot       init
+ (38 commands total — run 'help' on the device for the full list)
 ```
-
-> :bulb: Opt-in extras (off by default; enable via `EXTRA_CFLAGS`): `if`
-> (conditional), `i2c` (bus scan/read/write), `delay`, `repeat`, `peek`,
-> `poke`. See `kernel/shell/tiku_shell_config.h` for the full list and
-> rationale (each has a FRAM cost on FR5969).
->
-> :bulb: `basic` (Tiku BASIC interpreter REPL) is its own opt-in via
-> `TIKU_SHELL_BASIC_ENABLE=1` — see [Tiku BASIC](#tiku-basic) below.
-
-> :art: Build with `TIKU_SHELL_COLOR=1` for ANSI colored output (cyan logo, green prompt, categorized help). Add a screenshot from picocom here.
-
----
-
-### :zap: Configurable Boot Sequence (FRAM-backed)
-
-> **Every other RTOS:** change boot behavior :arrow_right: recompile :arrow_right: reflash.
->
-> **TikuOS:** change boot behavior :arrow_right: edit over shell :arrow_right: reboot.
-
-```
-tikuOS> init add 05 network start net
-OK: 'network' at seq 05
-
-tikuOS> init add 10 mqtt    start mqtt
-OK: 'mqtt' at seq 10
-
-tikuOS> init add 20 leds    write /dev/led0 1
-OK: 'leds' at seq 20
-
-tikuOS> init list
- 05  network      [on ]  start net
- 10  mqtt         [on ]  start mqtt
- 20  leds         [on ]  write /dev/led0 1
-```
-
-Boot entries are stored in **FRAM** — they survive power cycles without flash erase cycles. Same firmware, different boot sequences per device. Disable a service without removing it:
-
-```
-tikuOS> init disable mqtt
-OK: disabled 'mqtt'
-
-tikuOS> init list
- 05  network      [on ]  start net
- 10  mqtt         [off]  start mqtt
- 20  leds         [on ]  write /dev/led0 1
-```
-
-Reboot. New behavior. No recompile. No reflash.
 
 ---
 
@@ -203,8 +101,6 @@ Abat = 2048 (0x800)
 ---
 
 ### :bar_chart: Memory Introspection
-
-Real numbers from linker symbols and the stack pointer — not placeholders.
 
 ```
 tikuOS> free
@@ -231,31 +127,9 @@ FRAM
 
 ---
 
-### :battery: Power Management
-
-Enter low-power modes from the shell. See what will wake you up.
-
-```
-tikuOS> sleep lpm3
-Idle: LPM3
-
-tikuOS> wake
-Wake sources:
-  Timer A0 (sys clock)  [on ]  wakes LPM0-3
-  Timer A1 (htimer)     [off]  wakes LPM0-3
-  UART RX  (eUSCI_A0)   [on ]  wakes LPM0
-  Watchdog (interval)   [off]  wakes LPM0-3
-  GPIO IRQ              [off]  wakes LPM0-4
-
-Note: LPM4 disables all clocks.
-  Only GPIO IRQ can wake from LPM4.
-```
-
----
-
 ### :open_file_folder: Virtual Filesystem
 
-A unified namespace for the entire system — peripherals, OS state, config, and processes are all paths, just like a desktop operating system. No other MCU RTOS does this. The same `read`/`write` interface works for LEDs, sensors, timers, processes, and everything else.
+A unified namespace for the entire system — peripherals, OS state, config, and processes are all paths. The same `read`/`write` interface works for LEDs, sensors, timers, processes, and everything else.
 
 ```
 /
@@ -264,7 +138,7 @@ A unified namespace for the entire system — peripherals, OS state, config, and
 │   ├── device/
 │   │   ├── name             user-set device name (FRAM-backed, R/W)
 │   │   ├── id               unique tiku-XXXX hostname-style ID
-│   │   ├── mcu              silicon part number ("MSP430FR5969")
+│   │   ├── mcu              silicon part number ("MSP430FR5994")
 │   │   └── version          OS version string
 │   ├── uptime               seconds since boot
 │   ├── mem/
@@ -344,207 +218,14 @@ A unified namespace for the entire system — peripherals, OS state, config, and
 ```
 
 ```
-tikuOS> cat /sys/version
-0.05
-
 tikuOS> cat /sys/device/mcu
-MSP430FR5969
-
-tikuOS> cat /sys/device/name
-tiku
-
-tikuOS> cat /sys/mem/free
-752
-
-tikuOS> cat /sys/timer/fired
-1862
-
-tikuOS> cat /sys/timer/list/0
-evt rem=6 int=6
-
-tikuOS> cat /sys/watchdog/mode
-watchdog
-tikuOS> write /sys/watchdog/interval 8192
-tikuOS> cat /sys/watchdog/interval
-8192
-
-tikuOS> cat /sys/boot/reason
-rstnmi
-tikuOS> cat /sys/boot/rstiv
-0x0004
-tikuOS> cat /sys/boot/stage
-complete
-tikuOS> cat /sys/boot/clock/mclk
-8000000
-tikuOS> cat /sys/boot/clock/fault
-0
-tikuOS> cat /sys/boot/mpu/violations
-0x00
-
-tikuOS> cat /sys/sched/idle
-0
-
-tikuOS> cat /dev/uart/baud
-115200
-
-tikuOS> cat /dev/gpio_dir/1
-OOOOOOOO
-
-tikuOS> write /dev/console hello
-tikuOS> write /dev/null anything
-
-tikuOS> cat /proc/0/name
-Shell
-
-tikuOS> cat /proc/0/wake_count
-2063
-
-tikuOS> cat /proc/queue/space
-31
-
-tikuOS> ls /dev
-  led0
-  led1
-  console
-  null
-  zero
-  gpio/
-  gpio_dir/
-  uart/
-  adc/
-  i2c/
-  spi/
+Apollo510
 
 tikuOS> write /dev/led0 1
 
-tikuOS> cat /sys/cpu/freq
-8000000
+tikuOS> cat /proc/0/name
+Shell
 ```
-
----
-
-### :keyboard: Tiku BASIC
-
-An opt-in BASIC interpreter that runs as a shell command. Useful for
-quick experiments, teaching, and storing small programs in FRAM that
-survive power cycles. The interpreter adds ~25 KB of code plus a
-~3 KB arena at full feature set; see the
-[Tiku BASIC Definitive Guide](handbook/references/basic.md) for the
-complete reference.
-
-```
-tikuOS> basic
-Tiku BASIC ready. HELP / BYE.
-ok> 10 FOR I = 1 TO 5
-ok> 20 PRINT I, I*I
-ok> 30 NEXT I
-ok> RUN
-1 1
-2 4
-3 9
-4 16
-5 25
-ok> SAVE
-saved 41 bytes
-ok> BYE
-bye.
-```
-
-**Supported:** integer (32-bit signed) variables `A..Z`, `LET`,
-`PRINT`, `IF/THEN/ELSE`, `GOTO`, `GOSUB`/`RETURN`, `FOR/TO/STEP`/`NEXT`,
-`INPUT`, `END`, `STOP`, `REM`, `CLS`, `DELAY`, `SLEEP`, `POKE`;
-functions `RND ABS INT SGN MIN MAX MOD SHL SHR PEEK`; constants
-`TRUE FALSE PI`; bitwise `AND OR XOR NOT`; multi-statement lines via
-`:`. `SAVE`/`LOAD` persist programs across reboots in FRAM via the
-kernel's persist API; `basic run` autoruns the saved program (use
-with `init add` to autostart at boot).
-
-**Hardware constraints.** BASIC needs writable RAM for its arena. On
-MSP430 that means `MEMORY_MODEL=large` (hence HIFRAM); the flat-memory
-Cortex-M parts (RP2350, Apollo) need neither. Concretely:
-
-| MCU | BASIC supported |
-|---|---|
-| MSP430FR2433 / FR5969 | :red_circle: no — too little RAM, no HIFRAM |
-| MSP430FR5994 / FR6989 | :green_circle: yes (with `MEMORY_MODEL=large`) |
-| RP2350 · Apollo4 Lite · Apollo510 | :green_circle: yes (flat memory; no `MEMORY_MODEL`) |
-
-The Makefile rejects unsupported combinations at parse time with an
-actionable error.
-
-```bash
-make MCU=msp430fr5994 TIKU_SHELL_ENABLE=1 \
-     TIKU_SHELL_BASIC_ENABLE=1 MEMORY_MODEL=large
-```
-
----
-
-### Build Options
-
-| Flag | Effect |
-|------|--------|
-| `TIKU_SHELL_ENABLE=1` | Enable interactive shell (UART) |
-| `TIKU_SHELL_BASIC_ENABLE=1` | Enable the [Tiku BASIC](#tiku-basic) interpreter (MSP430: FR5994 / FR6989 with `MEMORY_MODEL=large`; RP2350 / Apollo need no memory model) |
-| `TIKU_INIT_ENABLE=1` | Enable FRAM-backed init system (implies shell) |
-| `TIKU_SHELL_COLOR=1` | Enable ANSI color output (banner, prompt, help, free) |
-| `UART_BAUD=115200` | Set UART baud rate (default 9600) |
-| `MCU=msp430fr5969` | Target MCU. Also `msp430fr5994` · `msp430fr6989` · `rp2350` · `apollo510` · `apollo4l` · `apollo4p` · `apollo510b` |
-| `MEMORY_MODEL=large` | 20-bit pointers + HIFRAM placement. Only valid on parts with HIFRAM (FR5994, FR6989); rejected at parse time on FR5969 / FR2433. |
-
-```bash
-# Shell with color output
-make TIKU_SHELL_ENABLE=1 TIKU_SHELL_COLOR=1 MCU=msp430fr5969
-
-# Shell + init system + color
-make TIKU_INIT_ENABLE=1 TIKU_SHELL_COLOR=1 MCU=msp430fr5969
-
-# Flash and connect
-make flash MCU=msp430fr5969 && make monitor
-
-# Connect over Telnet (requires TCP stack)
-telnet 172.16.7.2
-```
-
-> :bulb: **Tip:** Color requires a terminal that renders ANSI escapes (picocom, screen, minicom, PuTTY). Disable for raw serial logging.
-
----
-
-## Minimal Example
-
-```c
-#include "tiku.h"
-
-TIKU_PROCESS(blink_process, "Blink");
-
-static struct tiku_timer timer;
-
-TIKU_PROCESS_THREAD(blink_process, ev, data)
-{
-    TIKU_PROCESS_BEGIN();
-
-    tiku_common_led1_init();
-    tiku_timer_set_event(&timer, TIKU_CLOCK_SECOND);
-
-    while (1) {
-        TIKU_PROCESS_WAIT_EVENT_UNTIL(ev == TIKU_EVENT_TIMER);
-        tiku_common_led1_toggle();
-        tiku_timer_reset(&timer);
-    }
-
-    TIKU_PROCESS_END();
-}
-
-TIKU_AUTOSTART_PROCESSES(&blink_process);
-```
-
----
-
-## Handbook
-
-- **API References**
-  - [Core Kernel API Reference](handbook/references/api-reference.md)
-  - [TikuShell Definitive Guide](handbook/references/shell.md)
-  - [Tiku BASIC Definitive Guide](handbook/references/basic.md)
 
 ---
 

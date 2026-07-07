@@ -2,12 +2,12 @@
 # TikuOS Makefile
 #
 # Usage:
-#   make MCU=msp430fr5969                      — build for FR5969
-#   make flash MCU=msp430fr5969                — compile + flash
-#   make flash MCU=msp430fr5969 DEBUGGER=tilib — explicit debugger
-#   make debug MCU=msp430fr5969                — compile + start GDB server
-#   make run MCU=msp430fr5969                  — alias for flash
-#   make erase MCU=msp430fr5969                — erase chip
+#   make MCU=msp430fr5994                      — build for FR5994
+#   make flash MCU=msp430fr5994                — compile + flash
+#   make flash MCU=msp430fr5994 DEBUGGER=tilib — explicit debugger
+#   make debug MCU=msp430fr5994                — compile + start GDB server
+#   make run MCU=msp430fr5994                  — alias for flash
+#   make erase MCU=msp430fr5994                — erase chip
 #   make monitor                               — open serial console (auto-detect)
 #   make monitor PORT=/dev/ttyACM1 BAUD=9600   — explicit port/baud
 #   make clean                                 — clean build artifacts
@@ -20,7 +20,7 @@
 .DEFAULT_GOAL := all
 
 # ---------------------------------------------------------------------------
-# Target MCU  (override on command line: make MCU=msp430fr5969 / MCU=rp2350)
+# Target MCU  (override on command line: make MCU=msp430fr5994 / MCU=rp2350)
 # Accepts uppercase (MSP430FR5969 / RP2350) or lowercase MCU names.
 # ---------------------------------------------------------------------------
 MCU ?= $(mcu)
@@ -296,15 +296,24 @@ BUILD_DIR = build/$(MCU)
 
 # ---------------------------------------------------------------------------
 # App selection (mutually exclusive with tests and examples)
-#   make APP=cli MCU=msp430fr5969   — build with CLI app
-#   make MCU=msp430fr5969           — default (tests/examples as before)
+#   make APP=cli MCU=msp430fr5994   — build with CLI app
+#   make MCU=msp430fr5994           — default (tests/examples as before)
 # ---------------------------------------------------------------------------
 APP ?=
 
+# App firmware sources (formerly the in-tree apps/ dir) now live OUT of core
+# tikuOS, in the TikuBench harness.  The build that drives `make APP=net` or
+# `TIKU_TURBO_BENCH=1` passes their location in via TIKU_APP_DIR (TikuBench
+# exports it from tikubench/__init__.py; it may also be given on the make
+# line).  Empty by default, so a bare `make APP=net` with no harness fails
+# loudly (see the guard in the Apps section) instead of silently missing the
+# source file.
+TIKU_APP_DIR ?=
+
 # ---------------------------------------------------------------------------
 # Shell service (kernel service — orthogonal to APP/tests/examples)
-#   make TIKU_SHELL_ENABLE=1 MCU=msp430fr5969   — build with shell
-#   make APP=cli MCU=msp430fr5969                — legacy alias (also enables shell)
+#   make TIKU_SHELL_ENABLE=1 MCU=msp430fr5994   — build with shell
+#   make APP=cli MCU=msp430fr5994                — legacy alias (also enables shell)
 #
 # Optional shell add-ons (off by default; opt in alongside the shell):
 #   TIKU_SHELL_BASIC_ENABLE=1   — Tiku BASIC interpreter REPL
@@ -569,13 +578,37 @@ endif
 # Caveat: 20-bit pointers and CALLA/MOVA inflate text by ~15-20% and
 # data by ~25%, so prefer small model unless you actually need HIFRAM.
 # ---------------------------------------------------------------------------
+# Memory model.  On MSP430 the part decides: large where there is HIFRAM to
+# spill into (FR5994 / FR6989), small on the 64-KB-or-smaller parts (FR5969 /
+# FR2433).  This removes the old footgun where `make MCU=msp430fr5994` silently
+# defaulted to the SMALL model -- the very one that overflows -- so the big
+# parts only linked if you remembered MEMORY_MODEL=large.  Now they just build.
+# (ambiq / rp2350 keep the plain small default; they force large where needed,
+# e.g. BASIC.)  An explicit MEMORY_MODEL=... on the make line still wins.
+ifeq ($(TIKU_PLATFORM),msp430)
+MEMORY_MODEL ?= $(if $(filter 1,$(DEVICE_HAS_HIFRAM)),large,small)
+else
 MEMORY_MODEL ?= small
+endif
 
 # ---------------------------------------------------------------------------
 # Build-time consistency guards (MSP430 only — RP2350 has no HIFRAM
 # concept and the BASIC interpreter is platform-neutral C).
 # ---------------------------------------------------------------------------
 ifeq ($(TIKU_PLATFORM),msp430)
+# 0. Parts without HIFRAM (FR5969 64 KB, FR2433 16 KB, and smaller) are no
+#    longer supported build targets.  TikuOS core is the kernel PLUS the VFS
+#    namespace -- the VFS *is* TikuOS, not an add-on -- and that overruns the
+#    ~48 KB a small-model image can address (a bare `make MCU=msp430fr5994`
+#    overflows FRAM by ~25 KB).  Their arch code (device/board headers, linker
+#    scripts) is kept in the tree for reference, but the build refuses them.
+ifneq ($(DEVICE_HAS_HIFRAM),1)
+$(error MCU=$(MCU) is not a supported TikuOS target: the core (kernel + VFS) \
+does not fit a 64-KB-or-smaller MSP430.  Supported MSP430 parts are \
+msp430fr5994 (256 KB) and msp430fr6989 (128 KB).  The FR5969/FR2433 arch code \
+remains in-tree for reference)
+endif
+
 # 1. MEMORY_MODEL=large is only meaningful on parts with HIFRAM (FRAM >
 #    64 KB).  On FR5969 / FR2433 the large model inflates code/data by
 #    ~20-25 % with no upper-FRAM region to spill into.  Refuse the build
@@ -794,25 +827,6 @@ CFLAGS += -DTIKU_DRV_BLE_EM9305_ENABLE=1 -DTIKU_SPI_IOM_ENABLE=1
 # chip -- a future BLE backend just sets this too.
 CFLAGS += -DTIKU_HAS_BLE=1
 endif
-# Preemptive worker threads -- opt-in, Cortex-M only. Thread 0 is the whole
-# existing cooperative kernel; workers are stackful compute threads confined
-# to the ISR-safe primitives (see kernel/threads/tiku_thread.h). Per-thread
-# stacks are impossible on a 2 KB MSP430, which stays cooperative AND
-# byte-identical (flag off = none of this compiles). The Ambiq backend is
-# device-proven first; the RP2350 port is the same Cortex-M switcher, gated
-# until it is bench-proven.
-ifeq ($(TIKU_THREADS_ENABLE),1)
-ifeq ($(TIKU_PLATFORM),msp430)
-$(error TIKU_THREADS_ENABLE=1 requires a Cortex-M part (Ambiq); MSP430 \
-stays cooperative -- 2 KB of SRAM has no room for per-thread stacks)
-endif
-ifeq ($(filter apollo510 apollo510b,$(MCU)),)
-$(error TIKU_THREADS_ENABLE=1 is bench-proven on apollo510/apollo510b only \
-so far; the switcher is generic Cortex-M asm -- porting = compiling \
-arch/ambiq/tiku_thread_arch.c for the target and proving the torture suite)
-endif
-CFLAGS += -DTIKU_THREADS_ENABLE=1
-endif
 CFLAGS += -I$(PROJ_DIR)
 # CMSIS register headers, VENDORED in-tree (arch/ambiq/cmsis/) so the build is
 # fully self-contained: it references nothing in temp/AmbiqSuite, only the MRAM
@@ -865,6 +879,33 @@ endif
 # across all platforms rather than churn ~150 initializers on each
 # future field addition.  -Wextra otherwise stays on.
 CFLAGS += -Wno-missing-field-initializers
+
+# Preemptive worker threads -- opt-in, Cortex-M only. Thread 0 is the whole
+# existing cooperative kernel; workers are stackful compute threads confined
+# to the ISR-safe primitives (see kernel/threads/tiku_thread.h). Per-thread
+# stacks are impossible on a 2 KB MSP430, which stays cooperative AND
+# byte-identical (flag off = none of this compiles). One generic Cortex-M
+# switcher (kernel/threads/tiku_thread_cortexm.inl) serves every part via a
+# per-platform PendSV shim.
+# COMMON SCOPE on purpose: this must sit AFTER the per-platform CFLAGS
+# blocks above (each starts with `CFLAGS = ...`), or the define only
+# reaches whichever branch hosts it -- it lived inside the Ambiq branch
+# once, and RP2350 builds silently compiled threads (and their tests)
+# to empty stubs: firmware booted, reported total=0, nothing ran.
+ifeq ($(TIKU_THREADS_ENABLE),1)
+ifeq ($(TIKU_PLATFORM),msp430)
+$(error TIKU_THREADS_ENABLE=1 requires a Cortex-M part; MSP430 \
+stays cooperative -- 2 KB of SRAM has no room for per-thread stacks)
+endif
+ifeq ($(filter apollo510 apollo510b apollo4l apollo4p rp2350,$(MCU)),)
+$(error TIKU_THREADS_ENABLE=1 needs a supported Cortex-M part -- \
+apollo510/apollo510b (M55), apollo4l/apollo4p (M4F) or rp2350 (M33); \
+$(MCU) has no thread backend. The switcher is generic Cortex-M asm \
+(kernel/threads/tiku_thread_cortexm.inl); adding a part = a two-line shim \
+that names its PendSV vector symbol, plus proving the torture suite)
+endif
+CFLAGS += -DTIKU_THREADS_ENABLE=1
+endif
 
 # UART baud rate (default 9600; override: make UART_BAUD=115200)
 UART_BAUD ?=
@@ -1098,6 +1139,12 @@ SRCS += arch/arm-rp2350/tiku_pio_arch.c
 SRCS += arch/arm-rp2350/tiku_pwm_arch.c
 SRCS += arch/arm-rp2350/tiku_dma_arch.c
 SRCS += arch/arm-rp2350/tiku_trng_arch.c
+ifeq ($(TIKU_THREADS_ENABLE),1)
+# Cortex-M33 workers (core 0): the generic switcher via the RP2350 shim
+# (its strong tiku_rp2350_pendsv_handler overrides the crt weak alias).
+SRCS += kernel/threads/tiku_thread.c
+SRCS += arch/arm-rp2350/tiku_thread_arch.c
+endif
 
 # Console backend: add the native USB CDC stack for TIKU_CONSOLE=usb|both.
 ifeq ($(TIKU_CONSOLE),usb)
@@ -1178,6 +1225,12 @@ SRCS += arch/ambiq/tiku_region_apollo4l.c
 SRCS += arch/ambiq/tiku_nvm_region_apollo4l.c
 SRCS += arch/ambiq/tiku_gpio_apollo4l.c
 SRCS += arch/ambiq/tiku_adc_apollo4l.c
+ifeq ($(TIKU_THREADS_ENABLE),1)
+# Cortex-M4F workers: the generic switcher via the shared Ambiq shim
+# (its strong tiku_ambiq_pendsv_handler overrides the crt weak alias).
+SRCS += kernel/threads/tiku_thread.c
+SRCS += arch/ambiq/tiku_thread_arch.c
+endif
 else
 # Apollo510 (Cortex-M55) device/CPU backends.
 SRCS += arch/ambiq/tiku_adc_arch.c
@@ -1229,6 +1282,7 @@ SRCS += boot/tiku_boot.c
 SRCS += hal/tiku_cpu.c
 SRCS += kernel/cpu/tiku_common.c
 SRCS += kernel/cpu/tiku_watchdog.c
+SRCS += kernel/cpu/tiku_hang.c
 SRCS += kernel/cpu/tiku_rtc.c
 
 # Driver-registry layer. Always built so the kernel exposes
@@ -1669,8 +1723,16 @@ CFLAGS += -DTIKU_APP_CLI=1
 endif
 
 ifeq ($(APP),net)
+# The net app source lives in the TikuBench harness (see TIKU_APP_DIR above).
+# Guard against a missing path so the failure is legible; exempt `clean`,
+# which parses this block but compiles nothing.
+ifeq ($(strip $(TIKU_APP_DIR)),)
+ifeq ($(filter clean,$(MAKECMDGOALS)),)
+$(error APP=net needs TIKU_APP_DIR=<dir containing net/tiku_app_net.c>; the app firmware lives in the TikuBench harness now, not core tikuOS)
+endif
+endif
 CFLAGS += -DTIKU_APP_NET=1
-SRCS += apps/net/tiku_app_net.c
+SRCS += $(TIKU_APP_DIR)/net/tiku_app_net.c
 # CoAP client/server (library + demo process) lives in tikukits/net/coap/.
 # Pull it in and define TIKU_KITS_NET_COAP so the net app starts the CoAP
 # server process; the C side #if's its use on the same flag.
@@ -1709,11 +1771,17 @@ endif
 # add the benchmark source (after the SRCS=main.c reset, so it sticks); main.c
 # calls turbo_bench_run() then halts. kernel/ is untouched.
 ifeq ($(TIKU_TURBO_BENCH),1)
+# The benchmark firmware source lives in the TikuBench harness (TIKU_APP_DIR).
+ifeq ($(strip $(TIKU_APP_DIR)),)
+ifeq ($(filter clean,$(MAKECMDGOALS)),)
+$(error TIKU_TURBO_BENCH=1 needs TIKU_APP_DIR=<dir containing turbo_bench/turbo_bench.c>; the benchmark firmware lives in the TikuBench harness now)
+endif
+endif
 CFLAGS += -DTIKU_TURBO_BENCH=1
 TIKU_KIT_CRYPTO_ENABLE := 1
 TIKU_KIT_MATHS_ENABLE  := 1
 TIKU_KIT_ML_ENABLE     := 1
-SRCS   += apps/turbo_bench/turbo_bench.c
+SRCS   += $(TIKU_APP_DIR)/turbo_bench/turbo_bench.c
 endif
 
 ifeq ($(HAS_TIKUKITS),1)
@@ -1982,6 +2050,14 @@ ifneq ($(BASIC_PROGRAM),)
 OBJS += $(TIKU_BASIC_EMBEDDED_O)
 endif
 
+# Header-dependency tracking.  Each compile emits a .d next to its .o (via
+# -MMD -MP in the rules above) listing every header it pulled in; pull those
+# back in so editing a header rebuilds exactly the objects that include it --
+# no more stale objects (and no more `make clean` after a header edit).  -MP
+# adds phony targets for each header so a later-deleted header can't break the
+# build.  Silently absent on the first build, which is fine.
+-include $(OBJS:.o=.d)
+
 # ---------------------------------------------------------------------------
 # Output
 # ---------------------------------------------------------------------------
@@ -2025,13 +2101,13 @@ $(TARGET): $(OBJS) $(PLATFORM_STAMP) $(NOSYS_FIXED)
 
 $(BUILD_DIR)/%.o: %.c
 	@mkdir -p $(dir $@)
-	$(CC) $(CFLAGS) -c -o $@ $<
+	$(CC) $(CFLAGS) -MMD -MP -c -o $@ $<
 
 # Assembly-source rule. Used by firmware-blob wrappers that pull in
 # binary data via .incbin (see drivers/wifi/cyw43/firmware.S).
 $(BUILD_DIR)/%.o: %.S
 	@mkdir -p $(dir $@)
-	$(CC) $(CFLAGS) -c -o $@ $<
+	$(CC) $(CFLAGS) -MMD -MP -c -o $@ $<
 
 $(BUILD_DIR)/%.o: %.s
 	@mkdir -p $(dir $@)
@@ -2069,7 +2145,7 @@ $(TIKU_BASIC_EMBEDDED_C): $(BASIC_PROGRAM) tools/bas_to_c.py
 
 $(TIKU_BASIC_EMBEDDED_O): $(TIKU_BASIC_EMBEDDED_C)
 	@mkdir -p $(dir $@)
-	$(CC) $(CFLAGS) -c -o $@ $<
+	$(CC) $(CFLAGS) -MMD -MP -c -o $@ $<
 endif
 
 size: $(TARGET)

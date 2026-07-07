@@ -90,6 +90,64 @@
 typedef uint8_t tiku_event_t;
 typedef void *tiku_event_data_t;
 
+/*---------------------------------------------------------------------------*/
+/* TYPED EVENT PAYLOADS                                                       */
+/*---------------------------------------------------------------------------*/
+/*
+ * The event data is a bare void* on the wire, but every event id carries a
+ * FIXED payload type -- EXITED a process, VFS a node, TIMER a timer, GPIO a
+ * packed pin, INIT/USER an opaque app pointer.  That contract used to live
+ * only in comments, and every consumer reconstructed the type with a blind
+ * void*->T* conversion (e.g. `struct tiku_process *p = data;`).  A mis-tagged
+ * event silently misread the payload.
+ *
+ * The id already sits in the queue slot, so it IS the type tag.  We make the
+ * id->payload contract explicit in one place (tiku_event_payload_kind) and
+ * route reads through CHECKED accessors that return the payload only when the
+ * id matches -- so a wrong id yields NULL/0, not a misinterpreted object.  The
+ * wire format is unchanged (no queue growth: matters on 2-8 KB MSP430 parts).
+ *
+ * Payloads owned by higher layers are forward-declared here and never
+ * dereferenced in the process layer -- only cast through -- so the layering
+ * (vfs/timer depend on process, not the reverse) is preserved.
+ */
+struct tiku_vfs_node;
+struct tiku_timer;
+
+/** @brief Payload type an event id carries. */
+typedef enum {
+    TIKU_EVENT_PAYLOAD_NONE = 0,  /**< EXIT/CONTINUE/POLL/FORCE_EXIT: no data */
+    TIKU_EVENT_PAYLOAD_PROC,      /**< struct tiku_process*   (EXITED)        */
+    TIKU_EVENT_PAYLOAD_NODE,      /**< const tiku_vfs_node_t* (VFS)           */
+    TIKU_EVENT_PAYLOAD_TIMER,     /**< struct tiku_timer*     (TIMER)         */
+    TIKU_EVENT_PAYLOAD_U32,       /**< packed small integer   (GPIO)          */
+    TIKU_EVENT_PAYLOAD_PTR        /**< opaque app pointer     (INIT, USER)    */
+} tiku_event_payload_kind_t;
+
+/** @brief The contract: what payload does event @p ev carry? */
+tiku_event_payload_kind_t tiku_event_payload_kind(tiku_event_t ev);
+
+/*
+ * Checked payload accessors.  Each returns the payload ONLY if @p ev actually
+ * carries that kind, else a safe default (NULL / 0).  These replace the blind
+ * void*->T* conversions at every consumer.
+ */
+struct tiku_process        *tiku_event_proc (tiku_event_t ev, tiku_event_data_t data);
+const struct tiku_vfs_node *tiku_event_node (tiku_event_t ev, tiku_event_data_t data);
+struct tiku_timer          *tiku_event_timer(tiku_event_t ev, tiku_event_data_t data);
+uint32_t                    tiku_event_u32  (tiku_event_t ev, tiku_event_data_t data);
+void                       *tiku_event_ptr  (tiku_event_t ev, tiku_event_data_t data);
+
+/*
+ * Typed post helpers: pack the payload in ONE place (the inverse of the
+ * accessors), so the id<->payload contract is enforced on the way in too.
+ * The generic tiku_process_post() still serves NONE / PTR / user events.
+ */
+uint8_t tiku_process_post_proc(struct tiku_process *dest, tiku_event_t ev,
+                               struct tiku_process *arg);
+uint8_t tiku_process_post_node(struct tiku_process *dest, tiku_event_t ev,
+                               const struct tiku_vfs_node *node);
+
 /**
  * @brief Process state for observability
  */
@@ -100,6 +158,32 @@ typedef enum {
     TIKU_PROCESS_STATE_SLEEPING = 3,
     TIKU_PROCESS_STATE_STOPPED  = 4
 } tiku_process_state_t;
+
+/**
+ * @brief Per-process restart policy (supervision).
+ *
+ * When a process exits, the supervisor (tiku_process_exit) consults this
+ * to decide whether to bring it straight back -- a fresh instance, same
+ * pid -- instead of the recovery being manual (or a whole-board reboot).
+ * NEVER is the default, so unset processes behave exactly as before.
+ */
+typedef enum {
+    TIKU_RESTART_NEVER      = 0,  /**< one-shot; never auto-restarted (default) */
+    TIKU_RESTART_ON_FAILURE = 1,  /**< restarted only if it FAILED, not on clean end */
+    TIKU_RESTART_ALWAYS     = 2   /**< restarted on any exit (a service) */
+} tiku_restart_policy_t;
+
+/**
+ * @brief How a process ended -- the signal ON_FAILURE supervision keys on.
+ *
+ * A clean protothread end (PROCESS_END / return) is DONE; a process marks
+ * itself FAILED via tiku_process_fail() before it ends.  NONE while running.
+ */
+typedef enum {
+    TIKU_EXIT_NONE   = 0,  /**< running / never exited */
+    TIKU_EXIT_DONE   = 1,  /**< finished cleanly */
+    TIKU_EXIT_FAILED = 2   /**< failed (tiku_process_fail) */
+} tiku_exit_reason_t;
 
 /*---------------------------------------------------------------------------*/
 /* PROCESS STRUCTURE                                                         */
@@ -139,6 +223,13 @@ typedef struct tiku_process {
                                          which report measured + declared.  A
                                          bump allocator cannot misreport, so
                                          attached beats advertised. */
+    /* --- Supervision (per-process restart policy) --- */
+    uint8_t  restart;               /**< tiku_restart_policy_t; 0 = NEVER      */
+    uint8_t  exit_reason;           /**< tiku_exit_reason_t; set at exit        */
+    uint8_t  restart_burst;         /**< restarts inside the current backoff window */
+    uint16_t restart_total;         /**< lifetime restarts (observability)      */
+    tiku_clock_time_t restart_at;   /**< tick of the last restart (window base) */
+    tiku_event_data_t init_data;    /**< INIT payload, replayed on restart      */
 } tiku_process_t;
 
 /*---------------------------------------------------------------------------*/
@@ -372,6 +463,42 @@ void tiku_process_start(struct tiku_process *p,
  */
 void tiku_process_exit(struct tiku_process *p);
 
+/*---------------------------------------------------------------------------*/
+/* SUPERVISION (per-process restart policy)                                  */
+/*---------------------------------------------------------------------------*/
+
+/**
+ * @brief Set a process's restart policy.
+ *
+ * With NEVER (the default) a process that exits stays stopped -- recovery
+ * is manual, exactly as before.  ON_FAILURE brings it back only if it
+ * FAILED; ALWAYS brings it back on any exit.  A restart is a FRESH instance
+ * (protothread re-initialised, INIT replayed) reusing the same pid, and
+ * only the exited process is touched -- the rest of the system runs on.
+ * A restart storm (too many restarts too fast) trips a cap: the policy
+ * falls back to NEVER and the process is left stopped rather than looping.
+ */
+void tiku_process_set_restart(struct tiku_process *p,
+                              tiku_restart_policy_t policy);
+
+/**
+ * @brief Mark @p p as FAILED so ON_FAILURE / ALWAYS supervision restarts it.
+ *
+ * Call from inside the process (typically `tiku_process_fail(TIKU_THIS())`)
+ * on an unrecoverable error, then end the protothread (PROCESS_END / return).
+ * Without this a normal end counts as a clean exit (ON_FAILURE won't restart).
+ */
+void tiku_process_fail(struct tiku_process *p);
+
+/** @brief Current restart policy of @p p. */
+tiku_restart_policy_t tiku_process_get_restart(const struct tiku_process *p);
+
+/** @brief How @p p last exited (NONE while running). */
+tiku_exit_reason_t tiku_process_exit_reason(const struct tiku_process *p);
+
+/** @brief Lifetime count of supervisor restarts of @p p. */
+uint16_t tiku_process_restarts(const struct tiku_process *p);
+
 /**
  * @brief Post an event to a process
  *
@@ -395,6 +522,19 @@ uint8_t tiku_process_post(struct tiku_process *p, tiku_event_t ev,
  * @return 1 if an event was processed, 0 if idle
  */
 uint8_t tiku_process_run(void);
+
+/**
+ * @brief Run the scheduler, but never re-enter @p skip.
+ *
+ * Like tiku_process_run() but events for @p skip are consumed without
+ * dispatch — for a long synchronous op running inside @p skip's own dispatch
+ * that wants to keep the rest of the kernel live without recursing into its
+ * own protothread.  @p skip == NULL behaves like tiku_process_run().
+ *
+ * @param skip Process not to dispatch (typically TIKU_THIS())
+ * @return 1 if an event was dequeued, 0 if idle
+ */
+uint8_t tiku_process_run_except(const struct tiku_process *skip);
 
 /**
  * @brief Request a process to be polled

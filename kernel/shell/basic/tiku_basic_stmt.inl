@@ -1106,9 +1106,36 @@ exec_vfswrite(const char **p)
         SHELL_PRINTF(SH_RED "? value render failed\n" SH_RST);
         return;
     }
-    if (tiku_vfs_write(path, render, (size_t)n) < 0) {
+    n = tiku_vfs_write(path, render, (size_t)n);
+    if (n < 0) {
         basic_error = 1;
-        SHELL_PRINTF(SH_RED "? VFS write failed: %s\n" SH_RST, path);
+        SHELL_PRINTF(SH_RED "? VFS write failed: %s (%s)\n" SH_RST,
+                     path, tiku_vfs_strerror(n));
+    }
+}
+
+/* VFSWRITE$ "path", str$ -- write a STRING value to a VFS node.  Pairs with
+ * VFSREAD$ for text nodes (/sys/device/name, /data files, ...); unlike
+ * VFSWRITE (which renders an integer) the string is written verbatim. */
+static void
+exec_vfswrite_str(const char **p)
+{
+    char path[48];
+    char val[TIKU_BASIC_STR_BUF_CAP];
+    int  rc;
+
+    if (parse_path_literal(p, path, sizeof(path)) != 0) return;
+    skip_ws(p);
+    if (**p != ',') {
+        basic_error = 1; SHELL_PRINTF(SH_RED "? ',' expected\n" SH_RST); return;
+    }
+    (*p)++;
+    if (parse_strexpr(p, val, sizeof(val)) != 0) return;
+    rc = tiku_vfs_write(path, val, strlen(val));
+    if (rc < 0) {
+        basic_error = 1;
+        SHELL_PRINTF(SH_RED "? VFS write failed: %s (%s)\n" SH_RST,
+                     path, tiku_vfs_strerror(rc));
     }
 }
 
@@ -1127,7 +1154,8 @@ basic_vfsread(const char *path)
     n = tiku_vfs_read(path, buf, sizeof(buf) - 1);
     if (n < 0) {
         basic_error = 1;
-        SHELL_PRINTF(SH_RED "? VFS read failed: %s\n" SH_RST, path);
+        SHELL_PRINTF(SH_RED "? VFS read failed: %s (%s)\n" SH_RST,
+                     path, tiku_vfs_strerror(n));
         return 0;
     }
     if (n >= (int)sizeof(buf)) n = (int)sizeof(buf) - 1;
