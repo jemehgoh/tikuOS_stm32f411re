@@ -159,7 +159,9 @@ gpio_pin_read(uint8_t port, uint8_t pin, char *buf, size_t max)
 static int
 gpio_pin_write(uint8_t port, uint8_t pin, const char *buf, size_t len)
 {
-    (void)len;
+    if (len == 0) {
+        return TIKU_VFS_EINVAL;
+    }
     if (buf[0] == '1') {
         tiku_gpio_write(port, pin, 1);
     } else if (buf[0] == '0') {
@@ -168,6 +170,10 @@ gpio_pin_write(uint8_t port, uint8_t pin, const char *buf, size_t len)
         tiku_gpio_toggle(port, pin);
     } else if (buf[0] == 'i') {
         tiku_gpio_dir_in(port, pin);
+    } else {
+        /* Was a silent no-op success; reject so an agent's bad write is
+         * legible.  Accepts 0 / 1 / t(oggle) / i(nput). */
+        return TIKU_VFS_EINVAL;
     }
     return 0;
 }
@@ -218,7 +224,8 @@ GPIO_PIN(4,4) GPIO_PIN(4,5) GPIO_PIN(4,6) GPIO_PIN(4,7)
  * @brief Build one pin-file node entry for a port table.
  */
 #define GPIO_NODE(p, b) \
-    { pn##b, TIKU_VFS_FILE, gpio_r_##p##_##b, gpio_w_##p##_##b, NULL, 0 }
+    { pn##b, TIKU_VFS_FILE, gpio_r_##p##_##b, gpio_w_##p##_##b, NULL, 0,        \
+      NULL, NULL, TIKU_VFS_CAP_HW }   /* actuating a pin needs CAP_HW */
 
 /** Per-port pin tables: /dev/gpio/<port>/0../7 (eight files each) */
 #if TIKU_DEVICE_HAS_PORT1

@@ -97,8 +97,15 @@
  * Default to Apollo510 ONLY when no device was selected: the device-select
  * router checks APOLLO510 first, so an unconditional default here would mask an
  * explicit -DTIKU_DEVICE_APOLLO4L and silently build the wrong device.
+ *
+ * The exclusion list must name every explicitly-selectable device, or the
+ * fallback fires alongside it and defines APOLLO510 too.  That is benign for
+ * Apollo510B (same M55 silicon -- it WANTS the APOLLO510 code paths) but wrong
+ * for the M4F Apollo4 Plus: it would pull Cortex-M55-only code (e.g. the
+ * ARMv8-M MPU diag) into an M4F build and fail to link.
  */
-#if !defined(TIKU_DEVICE_APOLLO510) && !defined(TIKU_DEVICE_APOLLO4L)
+#if !defined(TIKU_DEVICE_APOLLO510) && !defined(TIKU_DEVICE_APOLLO4L) && \
+    !defined(TIKU_DEVICE_APOLLO4P)
 #define TIKU_DEVICE_APOLLO510 1
 #endif
 
@@ -269,11 +276,11 @@
 /* APP CONFIGURATION                                                        */
 /*---------------------------------------------------------------------------*/
 
-#if defined(HAS_APPS)
-#include <apps/tiku_app_config.h>
-#else
+/* The application firmware layer (formerly the in-tree apps/ dir with its
+ * tiku_app_config.h) now lives out-of-tree in the TikuBench harness.  The old
+ * config header only ever defined this master switch off, so core defines it
+ * directly — no app selection is compiled into the kernel itself. */
 #define TIKU_APPS_ENABLE 0
-#endif
 
 /*---------------------------------------------------------------------------*/
 /* MUTUAL EXCLUSION: only one of tests, examples, apps may be active         */
