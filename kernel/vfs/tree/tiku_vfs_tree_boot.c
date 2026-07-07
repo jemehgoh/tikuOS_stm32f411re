@@ -54,6 +54,8 @@
 #include <kernel/cpu/tiku_common.h>
 #include <kernel/timers/tiku_clock.h>
 #include <kernel/memory/tiku_mem.h>
+#include <kernel/cpu/tiku_common.h>   /* tiku_common_reset_reason() — per-arch */
+#include <kernel/cpu/tiku_hang.h>     /* check-in watchdog culprit (this boot) */
 #include <boot/tiku_boot.h>
 #if defined(PLATFORM_STM32F411)
 #include <stm32f411xe.h>
@@ -65,15 +67,17 @@
 /*---------------------------------------------------------------------------*/
 
 /**
- * Reset-cause snapshot taken once in tiku_vfs_tree_boot_init().
+ * Reset-cause snapshot taken once in tiku_vfs_tree_boot_init() via the
+ * per-arch tiku_common_reset_reason() HAL (an MSP430-SYSRSTIV-compatible
+ * code on every platform).
  *
- * On MSP430, reading SYSRSTIV pops the highest pending interrupt
- * vector value (hardware walks toward 0 on each read), so the
- * cause must be latched exactly once at boot and served from this
- * copy ever after. On STM32F411, the raw RCC_CSR reset flags are
- * sampled here before any later code might clear them. Zero on
- * platforms without a richer reset-cause source (RP2350), which
- * decodes as "none"/"power".
+ * On MSP430 reading the live SYSRSTIV register pops the highest pending
+ * vector (hardware walks toward 0 on each read), so the cause must be
+ * latched exactly once at boot and served from this copy ever after; the
+ * HAL does that latching.  RP2350 maps WD_REASON; Ambiq is 0 ("none")
+ * until its RSTGEN->STAT decode is implemented in the arch layer. 
+ * On STM32F411, the raw RCC_CSR reset flags are
+ * sampled here before any later code might clear them.
  */
 static uint16_t boot_reset_cause;
 
@@ -565,11 +569,28 @@ static const tiku_vfs_node_t boot_mpu_children[] = {
  * (asserted below).  "count" reuses the exported boot-counter
  * read handler that also backs the top-level /sys/boot_count.
  */
+/*
+ * /sys/boot/hang — the process the check-in watchdog caught wedging the
+ * cooperative scheduler before the last reset, or "none".  Names the culprit
+ * so a hang reboot is a diagnosable, quarantinable event instead of an
+ * anonymous board reset.
+ */
+static int boot_hang_read(char *buf, size_t max)
+{
+    int8_t pid = tiku_hang_last_pid();
+
+    if (pid < 0) {
+        return snprintf(buf, max, "none\n");
+    }
+    return snprintf(buf, max, "%d %s\n", (int)pid, tiku_hang_last_name());
+}
+
 const tiku_vfs_node_t tiku_vfs_tree_boot_children[] = {
     { "reason", TIKU_VFS_FILE, boot_reason_read,              NULL, NULL, 0 },
     { "count",  TIKU_VFS_FILE, tiku_vfs_tree_boot_count_read, NULL, NULL, 0 },
     { "stage",  TIKU_VFS_FILE, boot_stage_read,               NULL, NULL, 0 },
     { "rstiv",  TIKU_VFS_FILE, boot_rstiv_read,               NULL, NULL, 0 },
+    { "hang",   TIKU_VFS_FILE, boot_hang_read,                NULL, NULL, 0 },
     { "clock",  TIKU_VFS_DIR,  NULL, NULL, boot_clock_children, 4 },
     { "mpu",    TIKU_VFS_DIR,  NULL, NULL, boot_mpu_children,
       sizeof(boot_mpu_children) / sizeof(boot_mpu_children[0]) },
@@ -606,12 +627,19 @@ _Static_assert(sizeof(tiku_vfs_tree_boot_children) /
 void
 tiku_vfs_tree_boot_init(void)
 {
-    /* Capture reset cause before anything else clears it */
-#if defined(PLATFORM_MSP430)
-    boot_reset_cause = SYSRSTIV;
-#elif defined(PLATFORM_STM32F411)
+    /* Capture the reset cause before anything else clears it, via the
+     * per-arch HAL rather than a raw MSP430 register: it returns an
+     * MSP430-SYSRSTIV-compatible code on every platform (MSP430 latches
+     * SYSRSTIV, RP2350 maps WD_REASON, Ambiq is 0 until its RSTGEN decode
+     * lands).  So /sys/boot/{rstiv,reason,last} are meaningful cross-platform
+     * instead of the VFS layer reading a chip-specific register directly. */
     boot_reset_cause = tiku_common_reset_reason();
-#endif
+
+    /* Capture the check-in watchdog's culprit (if the last reset was a
+     * detected hang) into this boot's view and clear the cross-reset record.
+     * One-shot: the culprit is quarantined for the recovery boot only, and
+     * /sys/boot/hang reports it for the life of this boot. */
+    tiku_hang_boot_init();
 
     /* Validate/prime the cells, then bump the boot counter. The
      * SRAM mirror is what the VFS read returns so the read path

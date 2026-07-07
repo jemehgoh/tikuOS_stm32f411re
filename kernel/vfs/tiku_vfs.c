@@ -203,7 +203,7 @@ static const tiku_vfs_node_t *vfs_parent_of(const char *path,
                                             const char **name_out)
 {
     const char *p, *end;
-    char pbuf[80];
+    char pbuf[TIKU_VFS_PATHBUF];
     size_t plen;
     const tiku_vfs_node_t *par;
 
@@ -350,8 +350,11 @@ int tiku_vfs_unlink(const char *path)
  */
 int tiku_vfs_read_node(const tiku_vfs_node_t *node, char *buf, size_t max)
 {
-    if (node == NULL || node->type != TIKU_VFS_FILE || node->read == NULL) {
-        return -1;
+    if (node == NULL) {
+        return TIKU_VFS_ENOENT;
+    }
+    if (node->type != TIKU_VFS_FILE || node->read == NULL) {
+        return TIKU_VFS_EACCES;   /* exists, but not a readable file */
     }
 
 #if TIKU_VFS_CACHE_ENABLE
@@ -380,10 +383,12 @@ int tiku_vfs_read_node(const tiku_vfs_node_t *node, char *buf, size_t max)
 int tiku_vfs_read(const char *path, char *buf, size_t max)
 {
     const tiku_vfs_node_t *node = tiku_vfs_resolve(path);
+    int rc;
     if (node != NULL) {
-        return tiku_vfs_read_node(node, buf, max);   /* static node (unchanged) */
+        return tiku_vfs_read_node(node, buf, max);   /* static node */
     }
-    return vfs_dyn_read(path, buf, max);             /* dynamic /data/<file> */
+    rc = vfs_dyn_read(path, buf, max);               /* dynamic /data/<file> */
+    return (rc < 0) ? TIKU_VFS_ENOENT : rc;          /* neither static nor dynamic → not found */
 }
 
 /*---------------------------------------------------------------------------*/
@@ -538,15 +543,21 @@ int tiku_vfs_read_val_node(const tiku_vfs_node_t *node, tiku_vfs_val_t *out)
     int n;
 
     if (out == NULL) {
-        return -1;
+        return TIKU_VFS_EINVAL;
     }
     out->vtype = TIKU_VFS_T_NONE;
     out->unit = TIKU_VFS_U_NONE;
     out->scale = 0;
     out->as.u = 0;
 
-    if (node == NULL || node->type != TIKU_VFS_FILE || node->desc == NULL) {
-        return -1;
+    if (node == NULL) {
+        return TIKU_VFS_ENOENT;
+    }
+    if (node->type != TIKU_VFS_FILE) {
+        return TIKU_VFS_EACCES;
+    }
+    if (node->desc == NULL) {
+        return TIKU_VFS_ERR;         /* readable, but carries no typed view */
     }
     d = node->desc;
     out->unit = d->unit;
@@ -556,14 +567,14 @@ int tiku_vfs_read_val_node(const tiku_vfs_node_t *node, tiku_vfs_val_t *out)
         return d->read_val(out);
     }
     if (node->read == NULL) {
-        return -1;
+        return TIKU_VFS_EACCES;
     }
 
     /* Render via the by-node read path so a typed read shares the
      * freshness cache (and decodes the cached text on a hit). */
     n = tiku_vfs_read_node(node, tmp, sizeof(tmp));
     if (n <= 0) {
-        return -1;
+        return (n < 0) ? n : TIKU_VFS_ERR;   /* propagate a classified code; 0 → generic */
     }
     /* snprintf-style handlers return the would-be length; clamp so the
      * scratch buffer is always a valid, NUL-terminated C string. */
@@ -625,6 +636,23 @@ int tiku_vfs_desc_str(const tiku_vfs_node_t *node, char *buf, size_t max)
     return n;
 }
 
+/** @brief Short, stable name for a status code (see tiku_vfs.h). */
+const char *tiku_vfs_strerror(int status)
+{
+    switch (status) {
+    case TIKU_VFS_OK:     return "OK";
+    case TIKU_VFS_ERR:    return "ERR";
+    case TIKU_VFS_ENOENT: return "ENOENT";
+    case TIKU_VFS_EACCES: return "EACCES";
+    case TIKU_VFS_EINVAL: return "EINVAL";
+    case TIKU_VFS_ERANGE: return "ERANGE";
+    case TIKU_VFS_E2BIG:  return "E2BIG";
+    case TIKU_VFS_EIO:    return "EIO";
+    case TIKU_VFS_EPERM:  return "EPERM";
+    default:              return "E?";
+    }
+}
+
 /*---------------------------------------------------------------------------*/
 
 /**
@@ -638,6 +666,33 @@ int tiku_vfs_desc_str(const tiku_vfs_node_t *node, char *buf, size_t max)
  * writer knowing watchers exist.  Failed writes (handler returned
  * -1) do not notify: the node did not change.
  */
+/*---------------------------------------------------------------------------*/
+/* CALLER CAPABILITY                                                          */
+/*---------------------------------------------------------------------------*/
+
+/* Ambient trust of the channel currently driving the VFS.  ALL by default, so
+ * the trusted console / kernel / init path is unaffected; an untrusted channel
+ * lowers it via tiku_vfs_caller_cap_set(). */
+static tiku_vfs_cap_t vfs_caller_cap = TIKU_VFS_CAP_ALL;
+
+tiku_vfs_cap_t tiku_vfs_caller_cap_set(tiku_vfs_cap_t cap)
+{
+    tiku_vfs_cap_t prev = vfs_caller_cap;
+    vfs_caller_cap = cap;
+    return prev;
+}
+
+tiku_vfs_cap_t tiku_vfs_caller_cap_get(void)
+{
+    return vfs_caller_cap;
+}
+
+/* True iff the current caller holds every capability bit @p req demands. */
+static uint8_t vfs_cap_permitted(tiku_vfs_cap_t req)
+{
+    return (uint8_t)((req & (tiku_vfs_cap_t)~vfs_caller_cap) == 0u);
+}
+
 int tiku_vfs_write(const char *path, const char *data, size_t len)
 {
     const tiku_vfs_node_t *node;
@@ -645,10 +700,18 @@ int tiku_vfs_write(const char *path, const char *data, size_t len)
 
     node = tiku_vfs_resolve(path);
     if (node == NULL) {
-        return vfs_dyn_write(path, data, len);   /* dynamic child (create-on-write) */
+        /* Dynamic child (create-on-write): mutating the file store needs FS. */
+        if (!vfs_cap_permitted(TIKU_VFS_CAP_FS)) {
+            return TIKU_VFS_EPERM;
+        }
+        rc = vfs_dyn_write(path, data, len);
+        return (rc < 0) ? TIKU_VFS_ENOENT : rc;  /* no static node, no dynamic store here */
     }
     if (node->type != TIKU_VFS_FILE || node->write == NULL) {
-        return -1;
+        return TIKU_VFS_EACCES;                  /* exists, but not writable */
+    }
+    if (!vfs_cap_permitted(node->req_cap)) {
+        return TIKU_VFS_EPERM;                    /* mediated: caller lacks capability */
     }
 
     rc = node->write(data, len);
@@ -688,7 +751,7 @@ int tiku_vfs_list(const char *path, tiku_vfs_list_fn callback, void *ctx)
     const tiku_vfs_node_t *node;
     const tiku_vfs_node_t *mount;
     const char *sub = NULL;
-    char pbuf[80];
+    char pbuf[TIKU_VFS_PATHBUF];
     size_t sl;
     uint8_t i;
 
@@ -737,7 +800,7 @@ int tiku_vfs_is_dir(const char *path)
     const tiku_vfs_node_t *node = tiku_vfs_resolve(path);
     const tiku_vfs_node_t *mount;
     const char *sub = NULL;
-    char pbuf[80];
+    char pbuf[TIKU_VFS_PATHBUF];
     size_t sl;
     int found = 0;
 
@@ -931,8 +994,7 @@ void tiku_vfs_notify(const tiku_vfs_node_t *node)
 
     for (i = 0; i < TIKU_VFS_WATCH_MAX; i++) {
         if (watch_table[i].node == node) {
-            tiku_process_post(watch_table[i].proc, TIKU_EVENT_VFS,
-                              (tiku_event_data_t)(uintptr_t)node);
+            tiku_process_post_node(watch_table[i].proc, TIKU_EVENT_VFS, node);
         }
     }
 }
@@ -1126,4 +1188,138 @@ static uint8_t depth_rec(const tiku_vfs_node_t *n)
 uint8_t tiku_vfs_depth(void)
 {
     return (vfs_root != NULL) ? depth_rec(vfs_root) : 0;
+}
+
+/*---------------------------------------------------------------------------*/
+/* MANIFEST — one-read, machine-readable dump of the static namespace        */
+/*---------------------------------------------------------------------------*/
+/*
+ * Render every static node as one tab-separated line so an external agent can
+ * learn the device's capabilities in a single read instead of walking it with
+ * ls/cat.  Five tab-separated columns:  path  type  perms  meta  cap
+ * (type = d|f; perms = rw|r-|-w|--; meta is "-" for an untyped node, else the
+ * packed descriptor "vtype,unit,fresh,cost[,lo..hi]"; cap is the capability a
+ * writer must hold -- "-" (open), "hw", "sys", "fs", "net" -- so the whole
+ * write-access policy is enumerable in one read).  Dynamic directories
+ * (/data) are
+ * listed but their runtime children are NOT walked -- those are data, not
+ * capability metadata (use `ls` for them).  Only node metadata is touched, so
+ * a manifest read costs nothing and never samples a live sensor.
+ */
+typedef struct {
+    char  *out;
+    size_t max;
+    size_t off;   /* running length; may exceed max (snprintf-style truncation) */
+} vfs_manifest_sink_t;
+
+/* Short token for a node's required write capability (the manifest's 5th
+ * column), so the whole access-control policy is enumerable from the same
+ * namespace it governs: `cat /sys/vfs/manifest` shows who may write what. */
+static const char *vfs_cap_name(tiku_vfs_cap_t c)
+{
+    switch (c) {
+    case TIKU_VFS_CAP_NONE: return "-";
+    case TIKU_VFS_CAP_HW:   return "hw";
+    case TIKU_VFS_CAP_SYS:  return "sys";
+    case TIKU_VFS_CAP_FS:   return "fs";
+    case TIKU_VFS_CAP_NET:  return "net";
+    default:                return "cap";   /* combined / other mask */
+    }
+}
+
+static void manifest_line(vfs_manifest_sink_t *s, const char *path,
+                          const tiku_vfs_node_t *n)
+{
+    const tiku_vfs_desc_t *d = n->desc;
+    const char *perm = (n->read && n->write) ? "rw"
+                     : n->read               ? "r-"
+                     : n->write              ? "-w"
+                     :                         "--";
+    char   meta[48];   /* packed descriptor: "vtype,unit,fresh,cost[,lo..hi]" */
+    size_t room = (s->off < s->max) ? (s->max - s->off) : 0u;
+    char  *dst  = s->out + ((s->off < s->max) ? s->off : s->max);
+    int    m;
+
+    /* Pack the descriptor into one field so untyped nodes (the majority) cost
+     * a single "-" instead of five columns -- keeps the whole manifest inside a
+     * typical read buffer. */
+    if (d == NULL) {
+        meta[0] = '-';
+        meta[1] = '\0';
+    } else if (d->flags & TIKU_VFS_DF_RANGE) {
+        (void)snprintf(meta, sizeof meta, "%s,%s,%s,%s,%ld..%ld",
+                       VFS_NAME_OF(vfs_vtype_names, d->vtype),
+                       VFS_NAME_OF(vfs_unit_names,  d->unit),
+                       VFS_NAME_OF(vfs_fresh_names, d->fresh),
+                       VFS_NAME_OF(vfs_ecost_names, d->ecost),
+                       (long)d->vmin, (long)d->vmax);
+    } else {
+        (void)snprintf(meta, sizeof meta, "%s,%s,%s,%s",
+                       VFS_NAME_OF(vfs_vtype_names, d->vtype),
+                       VFS_NAME_OF(vfs_unit_names,  d->unit),
+                       VFS_NAME_OF(vfs_fresh_names, d->fresh),
+                       VFS_NAME_OF(vfs_ecost_names, d->ecost));
+    }
+
+    m = snprintf(dst, room, "%s\t%c\t%s\t%s\t%s\n",
+                 path, (n->type == TIKU_VFS_DIR) ? 'd' : 'f', perm, meta,
+                 vfs_cap_name(n->req_cap));
+    if (m > 0) {
+        s->off += (size_t)m;
+    }
+}
+
+static void manifest_rec(vfs_manifest_sink_t *s, const tiku_vfs_node_t *node,
+                         char *path, size_t pathcap, size_t pathlen)
+{
+    uint8_t i;
+
+    if (node->children == NULL) {
+        return;   /* leaf, or a dynamic dir: nothing static to descend */
+    }
+    for (i = 0; i < node->child_count; i++) {
+        const tiku_vfs_node_t *c = &node->children[i];
+        size_t nlen = strlen(c->name);
+        size_t clen = pathlen;
+
+        if (pathlen + 1u + nlen < pathcap) {           /* append "/name" */
+            path[pathlen] = '/';
+            memcpy(path + pathlen + 1u, c->name, nlen);
+            clen = pathlen + 1u + nlen;
+            path[clen] = '\0';
+        }
+        manifest_line(s, path, c);
+        if (c->type == TIKU_VFS_DIR && c->children != NULL) {
+            manifest_rec(s, c, path, pathcap, clen);
+        }
+        path[pathlen] = '\0';                          /* pop back */
+    }
+}
+
+int tiku_vfs_manifest(char *buf, size_t max)
+{
+    vfs_manifest_sink_t s;
+    char path[TIKU_VFS_PATH_MAX];
+    int  m;
+
+    s.out = buf;
+    s.max = max;
+    s.off = 0;
+    if (buf != NULL && max > 0u) {
+        buf[0] = '\0';
+    }
+    if (vfs_root == NULL) {
+        return 0;
+    }
+
+    /* Self-describing header row. */
+    m = snprintf(buf, max,
+                 "# path\ttype\tperms\tmeta(vtype,unit,fresh,cost[,lo..hi])\n");
+    if (m > 0) {
+        s.off += (size_t)m;
+    }
+
+    path[0] = '\0';
+    manifest_rec(&s, vfs_root, path, sizeof path, 0u);
+    return (int)s.off;
 }

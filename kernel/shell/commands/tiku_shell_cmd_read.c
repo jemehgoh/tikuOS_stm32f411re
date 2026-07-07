@@ -44,7 +44,9 @@
  * Override TIKU_SHELL_READ_MAX in the build to trade RAM for capacity. */
 #ifndef TIKU_SHELL_READ_MAX
 #  if defined(PLATFORM_AMBIQ) || defined(PLATFORM_RP2350)
-#    define TIKU_SHELL_READ_MAX 4096    /* = one carved-NVM file-store slot */
+#    define TIKU_SHELL_READ_MAX 8192    /* holds a whole file-store slot (4 KB)
+                                         * plus headroom for the /sys/vfs/manifest
+                                         * dump; these parts have RAM to spare  */
 #  else
 #    define TIKU_SHELL_READ_MAX 512     /* = one MSP430 FRAM slot            */
 #  endif
@@ -70,7 +72,10 @@ tiku_shell_cmd_read(uint8_t argc, const char *argv[])
 
     n = tiku_vfs_read(resolved, buf, sizeof(buf) - 1);
     if (n < 0) {
-        SHELL_PRINTF("read: cannot read '%s'\n", resolved);
+        /* Keep the "cannot read" phrasing (host tooling matches it) and append
+         * the machine-readable status so an agent can tell ENOENT from EACCES. */
+        SHELL_PRINTF("read: cannot read '%s' (%s)\n", resolved,
+                     tiku_vfs_strerror(n));
         return;
     }
 
