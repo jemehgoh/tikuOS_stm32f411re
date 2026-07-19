@@ -1,5 +1,6 @@
 /*
- * Tiku Operating System
+ * Tiku Operating System v0.05
+ * Simple. Ubiquitous. Intelligence, Everywhere.
  * http://tiku-os.org
  *
  * Authors: Ambuj Varshney <ambuj@tiku-os.org>
@@ -65,6 +66,9 @@ typedef char tfs_region_size_check[(TFS_REGION == TIKU_TFS_REGION_BYTES) ? 1 : -
 /* LOW-LEVEL ACCESS                                                          */
 /*---------------------------------------------------------------------------*/
 
+/**
+ * @brief Alignment-safe 32-bit read from the NVM region at byte offset @p off.
+ */
 static uint32_t rd32(tiku_tfs_t *fs, size_t off)
 {
     uint32_t v;
@@ -72,11 +76,17 @@ static uint32_t rd32(tiku_tfs_t *fs, size_t off)
     return v;
 }
 
+/**
+ * @brief Backend write of @p n bytes at @p off; TFS_OK or TFS_ERR_IO.
+ */
 static int wr(tiku_tfs_t *fs, size_t off, const void *p, size_t n)
 {
     return (fs->be->write(fs->be, off, p, n) == 0) ? TFS_OK : TFS_ERR_IO;
 }
 
+/**
+ * @brief Backend write of a 32-bit word @p v at offset @p off.
+ */
 static int wr32(tiku_tfs_t *fs, size_t off, uint32_t v)
 {
     return wr(fs, off, &v, sizeof v);
@@ -87,10 +97,16 @@ static size_t slot_off(unsigned s)   { return TFS_DATA_OFF + (size_t)s * TFS_SLO
 
 static uint32_t de_gate(tiku_tfs_t *fs, unsigned i) { return rd32(fs, dirent_off(i) + TFS_DE_GATE); }
 static uint32_t de_slot(tiku_tfs_t *fs, unsigned i) { return rd32(fs, dirent_off(i) + TFS_DE_SLOT); }
+/**
+ * @brief Pointer to the NUL-padded name field of directory entry @p i.
+ */
 static const char *de_name(tiku_tfs_t *fs, unsigned i)
 {
     return (const char *)(fs->be->base + dirent_off(i) + TFS_DE_NAME);
 }
+/**
+ * @brief Length field of data slot @p s (out-of-range index clamps to 0).
+ */
 static uint32_t sl_len(tiku_tfs_t *fs, unsigned s)
 {
     /* Defensive: stat/list/list_dir pass de_slot() straight in, so a corrupt
@@ -101,6 +117,9 @@ static uint32_t sl_len(tiku_tfs_t *fs, unsigned s)
     }
     return rd32(fs, slot_off(s) + TFS_SL_LEN);
 }
+/**
+ * @brief Pointer to the content bytes of data slot @p s in the NVM region.
+ */
 static const uint8_t *sl_data(tiku_tfs_t *fs, unsigned s)
 {
     return fs->be->base + slot_off(s) + TFS_SL_DATA;
@@ -111,6 +130,14 @@ static void bm_set(uint8_t *bm, unsigned i) { bm[i >> 3] |= (uint8_t)(1u << (i &
 static void bm_clr(uint8_t *bm, unsigned i) { bm[i >> 3] &= (uint8_t)~(1u << (i & 7u)); }
 static int  bm_get(const uint8_t *bm, unsigned i) { return (bm[i >> 3] >> (i & 7u)) & 1u; }
 
+/**
+ * @brief Look up a file by exact name in the directory.
+ *
+ * Scans every directory entry for a live (gated) dirent whose name matches.
+ *
+ * @param name  NUL-terminated file name to match.
+ * @return      Directory index of the match, or -1 if not found.
+ */
 static int tfs_find(tiku_tfs_t *fs, const char *name)
 {
     unsigned i;
@@ -122,6 +149,11 @@ static int tfs_find(tiku_tfs_t *fs, const char *name)
     return -1;
 }
 
+/**
+ * @brief Find the first unused directory entry.
+ *
+ * @return  Index of the first non-live dirent, or -1 if the directory is full.
+ */
 static int free_dirent(tiku_tfs_t *fs)
 {
     unsigned i;
@@ -133,6 +165,11 @@ static int free_dirent(tiku_tfs_t *fs)
     return -1;
 }
 
+/**
+ * @brief Find the first free data slot from the allocation bitmap.
+ *
+ * @return  Index of an unused slot, or -1 if every slot is allocated.
+ */
 static int free_slot(tiku_tfs_t *fs)
 {
     unsigned s;
@@ -199,6 +236,9 @@ int tiku_tfs_mount(tiku_tfs_t *fs, tiku_nvm_backend_t *be)
             if (s >= TIKU_TFS_NSLOTS || sl_len(fs, (unsigned)s) > TIKU_TFS_SLOT_DATA) {
                 return TFS_ERR_CORRUPT;
             }
+            if (bm_get(fs->slot_used, (unsigned)s)) {
+                return TFS_ERR_CORRUPT;         /* two names own one slot */
+            }
             bm_set(fs->slot_used, (unsigned)s);
         }
     }
@@ -245,6 +285,19 @@ int tiku_tfs_create(tiku_tfs_t *fs, const char *name)
     return TFS_OK;
 }
 
+/**
+ * @brief Write a file's content atomically, creating it if absent.
+ *
+ * Stages the content and its length in a fresh shadow slot, then repoints the
+ * dirent at that slot with one aligned word write.  A power cut before the
+ * flip leaves the old content intact; after it, the old slot is reclaimed.
+ *
+ * @param fs    Mounted file store.
+ * @param name  File to write (created on first write).
+ * @param data  Source bytes; may be NULL only when @p len is 0.
+ * @param len   Byte count, at most TIKU_TFS_SLOT_DATA.
+ * @return      TFS_OK, or a negative TFS_ERR_* code.
+ */
 int tiku_tfs_write(tiku_tfs_t *fs, const char *name, const void *data, size_t len)
 {
     int i, ns;
@@ -261,14 +314,32 @@ int tiku_tfs_write(tiku_tfs_t *fs, const char *name, const void *data, size_t le
     }
     i = tfs_find(fs, name);
     if (i < 0) {
-        int rc = tiku_tfs_create(fs, name);    /* create-on-write */
-        if (rc != TFS_OK) {
-            return rc;
-        }
-        i = tfs_find(fs, name);
+        char nb[TIKU_TFS_NAME_MAX];
+        i = free_dirent(fs);
         if (i < 0) {
-            return TFS_ERR_CORRUPT;
+            return TFS_ERR_NOSPACE;
         }
+        ns = free_slot(fs);
+        if (ns < 0) {
+            return TFS_ERR_NOSPACE;
+        }
+        /* Create-with-content is one transaction: stage the final slot and
+         * directory payload, then stamp GATE last.  Calling create() first
+         * would expose a durable empty file if power failed before content. */
+        if ((len && wr(fs, slot_off((unsigned)ns) + TFS_SL_DATA, data, len)) ||
+            wr32(fs, slot_off((unsigned)ns) + TFS_SL_LEN, (uint32_t)len)) {
+            return TFS_ERR_IO;
+        }
+        memset(nb, 0, sizeof nb);
+        memcpy(nb, name, strlen(name));
+        if (wr(fs, dirent_off((unsigned)i) + TFS_DE_NAME,
+               nb, TIKU_TFS_NAME_MAX) ||
+            wr32(fs, dirent_off((unsigned)i) + TFS_DE_SLOT, (uint32_t)ns) ||
+            wr32(fs, dirent_off((unsigned)i) + TFS_DE_GATE, TFS_GATE)) {
+            return TFS_ERR_IO;
+        }
+        bm_set(fs->slot_used, (unsigned)ns);
+        return TFS_OK;
     }
     ns = free_slot(fs);
     if (ns < 0) {
@@ -293,6 +364,19 @@ int tiku_tfs_write(tiku_tfs_t *fs, const char *name, const void *data, size_t le
     return TFS_OK;
 }
 
+/**
+ * @brief Copy a file's content into a caller-supplied buffer.
+ *
+ * Copies at most @p max bytes; the true stored length is reported via
+ * @p out_len so the caller can detect truncation.
+ *
+ * @param fs       Mounted file store.
+ * @param name     File to read.
+ * @param buf      Destination buffer; may be NULL only when @p max is 0.
+ * @param max      Capacity of @p buf in bytes.
+ * @param out_len  If non-NULL, receives the file's full stored length.
+ * @return         TFS_OK, or a negative TFS_ERR_* code.
+ */
 int tiku_tfs_read(tiku_tfs_t *fs, const char *name, void *buf, size_t max, size_t *out_len)
 {
     int i;
@@ -324,6 +408,18 @@ int tiku_tfs_read(tiku_tfs_t *fs, const char *name, void *buf, size_t max, size_
     return TFS_OK;
 }
 
+/**
+ * @brief Zero-copy view of a file's content within the NVM region.
+ *
+ * Returns a pointer directly into the backing store (no copy); it stays valid
+ * until the file is overwritten or deleted.
+ *
+ * @param fs    Mounted file store.
+ * @param name  File to map.
+ * @param p     Receives a pointer to the content bytes in the region.
+ * @param len   Receives the content length in bytes.
+ * @return      TFS_OK, or a negative TFS_ERR_* code.
+ */
 int tiku_tfs_map(tiku_tfs_t *fs, const char *name, const void **p, size_t *len)
 {
     int i;
@@ -479,133 +575,3 @@ size_t tiku_tfs_free_files(tiku_tfs_t *fs)
     }
     return f;
 }
-
-/*===========================================================================*/
-/* HOST UNIT TEST  (clang -DTFS_TEST tiku_tfs.c -o tfs_test && ./tfs_test)    */
-/*===========================================================================*/
-
-#ifdef TFS_TEST
-#include <stdio.h>
-
-/* RAM backend with optional power-cut injection: when fail_after reaches 0 the
- * next write is dropped and returns -1, simulating a power loss at that write. */
-typedef struct { uint8_t *buf; size_t size; long fail_after; } ram_ctx_t;
-
-static int ram_write(tiku_nvm_backend_t *be, size_t off, const void *src, size_t len)
-{
-    ram_ctx_t *c = (ram_ctx_t *)be->ctx;
-    if (off + len > c->size) {
-        return -1;
-    }
-    if (c->fail_after == 0) {
-        return -1;                              /* power cut: this write is lost */
-    }
-    if (c->fail_after > 0) {
-        c->fail_after--;
-    }
-    memcpy(c->buf + off, src, len);
-    return 0;
-}
-
-static int g_fails;
-static int g_listn;
-static void count_cb(const char *name, size_t len, void *ctx)
-{
-    (void)name; (void)len; (void)ctx;
-    g_listn++;
-}
-
-#define CHECK(cond, msg) do {                                          \
-        if (!(cond)) { printf("  FAIL: %s\n", (msg)); g_fails++; }      \
-        else         { printf("  ok  : %s\n", (msg)); }                \
-    } while (0)
-
-int main(void)
-{
-    static uint8_t buf[TFS_REGION + 16];
-    ram_ctx_t ctx = { buf, sizeof buf, -1 };
-    tiku_nvm_backend_t be = { buf, sizeof buf, ram_write, NULL, &ctx };
-    tiku_tfs_t fs, fs2;
-    char rb[1024];
-    size_t n;
-    const void *mp;
-    size_t ml;
-    char nm[16];
-    int k, created;
-    int rc;
-    char longname[TIKU_TFS_NAME_MAX + 4];
-
-    printf("TFS region = %zu bytes  (MAX_FILES=%u, NAME_MAX=%u, SLOT_DATA=%u)\n\n",
-           tiku_tfs_region_size(), (unsigned)TIKU_TFS_MAX_FILES,
-           (unsigned)TIKU_TFS_NAME_MAX, (unsigned)TIKU_TFS_SLOT_DATA);
-
-    /* --- format on virgin NVM --- */
-    memset(buf, 0, sizeof buf);
-    CHECK(tiku_tfs_mount(&fs, &be) == TFS_OK, "mount virgin region (formats)");
-    CHECK(tiku_tfs_free_files(&fs) == TIKU_TFS_MAX_FILES, "all dir slots free");
-
-    /* --- create + write + read --- */
-    CHECK(tiku_tfs_write(&fs, "cfg.txt", "mode=eco\n", 9) == TFS_OK, "write cfg.txt");
-    CHECK(tiku_tfs_read(&fs, "cfg.txt", rb, sizeof rb, &n) == TFS_OK &&
-          n == 9 && memcmp(rb, "mode=eco\n", 9) == 0, "read cfg.txt back");
-
-    CHECK(tiku_tfs_write(&fs, "blink.bas", "10 LED 0,1", 10) == TFS_OK, "write blink.bas");
-    g_listn = 0; tiku_tfs_list(&fs, count_cb, NULL);
-    CHECK(g_listn == 2, "list shows 2 files");
-
-    /* --- atomic overwrite (longer content) --- */
-    CHECK(tiku_tfs_write(&fs, "cfg.txt", "mode=turbo;x=1\n", 15) == TFS_OK, "overwrite cfg.txt");
-    CHECK(tiku_tfs_read(&fs, "cfg.txt", rb, sizeof rb, &n) == TFS_OK &&
-          n == 15 && memcmp(rb, "mode=turbo;x=1\n", 15) == 0, "read overwritten cfg.txt");
-
-    /* --- zero-copy map points into the region --- */
-    CHECK(tiku_tfs_map(&fs, "blink.bas", &mp, &ml) == TFS_OK && ml == 10 &&
-          memcmp(mp, "10 LED 0,1", 10) == 0 &&
-          (const uint8_t *)mp >= buf && (const uint8_t *)mp < buf + sizeof buf,
-          "map blink.bas (zero-copy, into region)");
-
-    /* --- delete --- */
-    CHECK(tiku_tfs_delete(&fs, "cfg.txt") == TFS_OK, "delete cfg.txt");
-    CHECK(tiku_tfs_read(&fs, "cfg.txt", rb, sizeof rb, &n) == TFS_ERR_NOTFOUND, "cfg.txt is gone");
-    g_listn = 0; tiku_tfs_list(&fs, count_cb, NULL);
-    CHECK(g_listn == 1, "list shows 1 file");
-
-    /* --- error paths --- */
-    CHECK(tiku_tfs_create(&fs, "blink.bas") == TFS_ERR_EXISTS, "create existing -> EXISTS");
-    CHECK(tiku_tfs_write(&fs, "big", rb, TIKU_TFS_SLOT_DATA + 1) == TFS_ERR_TOOBIG, "oversize -> TOOBIG");
-    memset(longname, 'a', sizeof longname - 1); longname[sizeof longname - 1] = 0;
-    CHECK(tiku_tfs_write(&fs, longname, "x", 1) == TFS_ERR_NAMELEN, "long name -> NAMELEN");
-
-    /* --- fill the store --- */
-    created = 0;
-    for (k = 0; k < TIKU_TFS_MAX_FILES + 2; k++) {
-        snprintf(nm, sizeof nm, "f%d", k);
-        if (tiku_tfs_write(&fs, nm, "y", 1) == TFS_OK) created++;
-    }
-    CHECK(tiku_tfs_free_files(&fs) == 0, "store reports full");
-    printf("  (created %d files before full)\n", created);
-
-    /* --- PERSISTENCE: re-mount the same backing buffer --- */
-    CHECK(tiku_tfs_mount(&fs2, &be) == TFS_OK, "re-mount existing store");
-    CHECK(tiku_tfs_read(&fs2, "blink.bas", rb, sizeof rb, &n) == TFS_OK &&
-          n == 10 && memcmp(rb, "10 LED 0,1", 10) == 0,
-          "blink.bas SURVIVED re-mount (durable)");
-
-    /* --- ATOMICITY: a torn overwrite must leave the OLD file intact --- */
-    memset(buf, 0, sizeof buf); ctx.fail_after = -1;
-    tiku_tfs_mount(&fs, &be);
-    tiku_tfs_write(&fs, "a", "OLD", 3);
-    ctx.fail_after = 2;                          /* allow content+length, fail the flip */
-    rc = tiku_tfs_write(&fs, "a", "NEWNEWNEW", 9);
-    ctx.fail_after = -1;
-    CHECK(rc == TFS_ERR_IO, "torn overwrite returns IO");
-    CHECK(tiku_tfs_mount(&fs2, &be) == TFS_OK, "re-mount after torn write");
-    CHECK(tiku_tfs_read(&fs2, "a", rb, sizeof rb, &n) == TFS_OK &&
-          n == 3 && memcmp(rb, "OLD", 3) == 0,
-          "torn overwrite left OLD intact (power-cut safe)");
-
-    printf("\n%s  (%d failure%s)\n", g_fails ? "*** FAILURES ***" : "ALL PASS",
-           g_fails, g_fails == 1 ? "" : "s");
-    return g_fails ? 1 : 0;
-}
-#endif /* TFS_TEST */

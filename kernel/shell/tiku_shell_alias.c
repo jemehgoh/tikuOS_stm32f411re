@@ -30,18 +30,6 @@
  * not match at init, every slot is emptied and the magic is stamped so
  * the prime runs exactly once per FRAM lifetime.
  *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at:
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- *
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -84,8 +72,7 @@ typedef struct {
  * directly.  Mutated only under a tiku_mpu_unlock_nvm()/lock_nvm()
  * bracket; read directly without unlocking.
  */
-static alias_slot_t __attribute__((section(".persistent")))
-    alias_table[TIKU_SHELL_ALIAS_MAX];
+static TIKU_DURABLE alias_slot_t alias_table[TIKU_SHELL_ALIAS_MAX];
 
 /**
  * FRAM cell (.persistent): validity gate for alias_table.
@@ -94,8 +81,7 @@ static alias_slot_t __attribute__((section(".persistent")))
  * (including the all-ones / all-zeros of a fresh FRAM) triggers a
  * one-time re-init in tiku_shell_alias_init().
  */
-static uint32_t __attribute__((section(".persistent")))
-    alias_magic;
+static TIKU_DURABLE uint32_t alias_magic;
 
 /*---------------------------------------------------------------------------*/
 /* INTERNAL HELPERS                                                          */

@@ -1,5 +1,6 @@
 /*
- * Tiku Operating System
+ * Tiku Operating System v0.05
+ * Simple. Ubiquitous. Intelligence, Everywhere.
  * http://tiku-os.org
  *
  * Authors: Ambuj Varshney <ambuj@tiku-os.org>
@@ -15,18 +16,6 @@
  * DIGREAD, I2CREAD, PEEK, VFSREAD, ...) or to a user-defined
  * DEF FN.  The two helpers parse_call_1arg / parse_call_2arg
  * consume the `(`, the comma-separated arg list, and the `)`.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at:
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
- * implied.  See the License for the specific language governing
- * permissions and limitations under the License.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -44,14 +33,14 @@ parse_call_1arg(const char **p, long *a)
 {
     skip_ws(p);
     if (**p != '(') {
-        basic_error = 1; SHELL_PRINTF(SH_RED "? '(' expected\n" SH_RST); return 0;
+        basic_throw(TIKU_BASIC_ERR_SYNTAX, "'(' expected"); return 0;
     }
     (*p)++;
     *a = parse_expr(p);
     if (basic_error) return 0;
     skip_ws(p);
     if (**p != ')') {
-        basic_error = 1; SHELL_PRINTF(SH_RED "? ')' expected\n" SH_RST); return 0;
+        basic_throw(TIKU_BASIC_ERR_SYNTAX, "')' expected"); return 0;
     }
     (*p)++;
     return 1;
@@ -62,21 +51,21 @@ parse_call_2arg(const char **p, long *a, long *b)
 {
     skip_ws(p);
     if (**p != '(') {
-        basic_error = 1; SHELL_PRINTF(SH_RED "? '(' expected\n" SH_RST); return 0;
+        basic_throw(TIKU_BASIC_ERR_SYNTAX, "'(' expected"); return 0;
     }
     (*p)++;
     *a = parse_expr(p);
     if (basic_error) return 0;
     skip_ws(p);
     if (**p != ',') {
-        basic_error = 1; SHELL_PRINTF(SH_RED "? ',' expected\n" SH_RST); return 0;
+        basic_throw(TIKU_BASIC_ERR_SYNTAX, "',' expected"); return 0;
     }
     (*p)++;
     *b = parse_expr(p);
     if (basic_error) return 0;
     skip_ws(p);
     if (**p != ')') {
-        basic_error = 1; SHELL_PRINTF(SH_RED "? ')' expected\n" SH_RST); return 0;
+        basic_throw(TIKU_BASIC_ERR_SYNTAX, "')' expected"); return 0;
     }
     (*p)++;
     return 1;
@@ -90,12 +79,12 @@ parse_call_0arg(const char **p)
 {
     skip_ws(p);
     if (**p != '(') {
-        basic_error = 1; SHELL_PRINTF(SH_RED "? '(' expected\n" SH_RST); return 0;
+        basic_throw(TIKU_BASIC_ERR_SYNTAX, "'(' expected"); return 0;
     }
     (*p)++;
     skip_ws(p);
     if (**p != ')') {
-        basic_error = 1; SHELL_PRINTF(SH_RED "? ')' expected\n" SH_RST); return 0;
+        basic_throw(TIKU_BASIC_ERR_SYNTAX, "')' expected"); return 0;
     }
     (*p)++;
     return 1;
@@ -109,9 +98,39 @@ static int
 expr_call(const char **p, long *out_v)
 {
     const char *save = *p;
+    const char *call = *p;
     long a, b;
 
     skip_ws(p);
+    /* A builtin name may also be an already-declared named variable.  In
+     * that case, lack of call syntax means variable access (for example
+     * COUNT after `COUNT = 5`).  An undeclared builtin without parentheses
+     * still enters dispatch so it retains the useful "'(' expected" error. */
+    skip_ws(&call);
+    {
+        const char *ident = call;
+        const char *after;
+        int slot;
+        while (is_word_cont(*call)) call++;
+        after = call;
+        skip_ws(&after);
+        if (*after != '(' && call > ident) {
+            for (slot = 0; slot < TIKU_BASIC_NAMEDVAR_MAX; slot++) {
+                const char *name = basic_namedvar_names[slot];
+                const char *src = ident;
+                if (name[0] == '\0') continue;
+                while (src < call && *name != '\0' &&
+                       to_upper(*src) == *name) {
+                    src++;
+                    name++;
+                }
+                if (src == call && *name == '\0') {
+                    *p = save;
+                    return 0;
+                }
+            }
+        }
+    }
     if (match_kw(p, "RND")) {
         if (!parse_call_1arg(p, &a)) return 1;
         *out_v = basic_rnd(a);
@@ -147,9 +166,7 @@ expr_call(const char **p, long *out_v)
     if (match_kw(p, "MOD")) {
         if (!parse_call_2arg(p, &a, &b)) return 1;
         if (b == 0) {
-            basic_error = 1;
-            basic_errcat = TIKU_BASIC_ERR_DIVZERO;
-            SHELL_PRINTF(SH_RED "? MOD by zero\n" SH_RST);
+            basic_throw(TIKU_BASIC_ERR_DIVZERO, "MOD by zero");
             return 1;
         }
         *out_v = a % b;
@@ -182,8 +199,7 @@ expr_call(const char **p, long *out_v)
         if (!parse_call_2arg(p, &a, &b)) return 1;
         r = tiku_gpio_arch_read((uint8_t)a, (uint8_t)b);
         if (r < 0) {
-            basic_error = 1;
-            SHELL_PRINTF(SH_RED "? bad GPIO P%ld.%ld\n" SH_RST, a, b);
+            basic_throwf(TIKU_BASIC_ERR_SYNTAX, "bad GPIO P%ld.%ld", a, b);
             return 1;
         }
         *out_v = (long)r;
@@ -195,18 +211,15 @@ expr_call(const char **p, long *out_v)
         uint16_t v;
         if (!parse_call_1arg(p, &a)) return 1;
         if (a < 0 || a > 31) {
-            basic_error = 1;
-            SHELL_PRINTF(SH_RED "? ADC channel out of range\n" SH_RST);
+            basic_throw(TIKU_BASIC_ERR_RANGE, "ADC channel out of range");
             return 1;
         }
         if (basic_adc_ensure((uint8_t)a) != 0) {
-            basic_error = 1;
-            SHELL_PRINTF(SH_RED "? ADC init failed\n" SH_RST);
+            basic_throw(TIKU_BASIC_ERR_GENERAL, "ADC init failed");
             return 1;
         }
         if (tiku_adc_read((uint8_t)a, &v) != TIKU_ADC_OK) {
-            basic_error = 1;
-            SHELL_PRINTF(SH_RED "? ADC read failed\n" SH_RST);
+            basic_throw(TIKU_BASIC_ERR_IO, "ADC read failed");
             return 1;
         }
         *out_v = (long)v;
@@ -218,16 +231,14 @@ expr_call(const char **p, long *out_v)
         uint8_t reg, val;
         if (!parse_call_2arg(p, &a, &b)) return 1;
         if (basic_i2c_ensure() != 0) {
-            basic_error = 1;
-            SHELL_PRINTF(SH_RED "? I2C init failed\n" SH_RST);
+            basic_throw(TIKU_BASIC_ERR_GENERAL, "I2C init failed");
             return 1;
         }
         reg = (uint8_t)b;
         if (tiku_i2c_write((uint8_t)a, &reg, 1) != TIKU_I2C_OK ||
             tiku_i2c_read((uint8_t)a,  &val, 1) != TIKU_I2C_OK) {
-            basic_error = 1;
-            SHELL_PRINTF(SH_RED
-                "? I2C read failed (addr=0x%02x reg=0x%02x)" SH_RST "\n",
+            basic_throwf(TIKU_BASIC_ERR_IO,
+                "I2C read failed (addr=0x%02x reg=0x%02x)",
                 (unsigned)a, (unsigned)b);
             return 1;
         }
@@ -254,7 +265,15 @@ expr_call(const char **p, long *out_v)
         *out_v = (long)basic_erl;
         return 1;
     }
-#if TIKU_BASIC_BLE_ENABLE
+#if TIKU_BASIC_SUBS_ENABLE
+    /* Bare RESULT -- the value a SUB set via its `RESULT expr` statement,
+     * read by the caller after CALL.  No parens (reads like a pseudo-var). */
+    if (match_kw(p, "RESULT")) {
+        *out_v = basic_sub_result;
+        return 1;
+    }
+#endif
+#if TIKU_BASIC_BLE_ENABLE && TIKU_BLE_SERIAL_PRESENT
     /* BLEUP() -- 1 when a central is connected AND subscribed (ready to send),
      * else 0.  Empty-paren form.  Polls the BLE stack as a side effect, so a
      * `IF BLEUP()=0 THEN ...` wait loop keeps the link serviced. */
@@ -272,18 +291,39 @@ expr_call(const char **p, long *out_v)
         return 1;
     }
 #endif
+#if TIKU_BASIC_BLE_ENABLE && TIKU_BLE_ADV_PRESENT
+    /* BLESEEN() -- distinct advertisers in the observer table (live while
+     * BLEOBSERVE runs; the table persists after it stops).  Allocation-
+     * free, so a poll loop `IF BLESEEN() > 0 THEN ...` costs nothing --
+     * the agent-reacts-to-its-radio-environment predicate.
+     * '$' is NOT a word-boundary char (is_word_cont), so a bare keyword
+     * match would swallow the BLESEEN$ string function's prefix --
+     * restore and fall through when '$' follows. */
+    {
+        const char *save = *p;
+        if (match_kw(p, "BLESEEN")) {
+            if (**p == '$') {
+                *p = save;              /* BLESEEN$: the string parser's */
+            } else {
+                if (!parse_call_0arg(p)) return 1;
+                *out_v = (long)tiku_ble_adv_last_scan_count();
+                return 1;
+            }
+        }
+    }
+#endif
     /* Time builtins. Both take a () with no arg so the parser knows
      * they're functions (otherwise MILLIS would parse as a multi-char
      * identifier with nothing to do). */
     if (match_kw(p, "MILLIS")) {
         skip_ws(p);
         if (**p != '(') {
-            basic_error = 1; SHELL_PRINTF(SH_RED "? '(' expected\n" SH_RST); return 1;
+            basic_throw(TIKU_BASIC_ERR_SYNTAX, "'(' expected"); return 1;
         }
         (*p)++;
         skip_ws(p);
         if (**p != ')') {
-            basic_error = 1; SHELL_PRINTF(SH_RED "? ')' expected\n" SH_RST); return 1;
+            basic_throw(TIKU_BASIC_ERR_SYNTAX, "')' expected"); return 1;
         }
         (*p)++;
         /* tiku_clock_time() is uint16_t; (ticks*1000)/HZ keeps the
@@ -299,12 +339,12 @@ expr_call(const char **p, long *out_v)
     if (match_kw(p, "NOW")) {
         skip_ws(p);
         if (**p != '(') {
-            basic_error = 1; SHELL_PRINTF(SH_RED "? '(' expected\n" SH_RST); return 1;
+            basic_throw(TIKU_BASIC_ERR_SYNTAX, "'(' expected"); return 1;
         }
         (*p)++;
         skip_ws(p);
         if (**p != ')') {
-            basic_error = 1; SHELL_PRINTF(SH_RED "? ')' expected\n" SH_RST); return 1;
+            basic_throw(TIKU_BASIC_ERR_SYNTAX, "')' expected"); return 1;
         }
         (*p)++;
         *out_v = (long)tiku_rtc_get_seconds();
@@ -323,13 +363,30 @@ expr_call(const char **p, long *out_v)
     if (match_kw(p, "FDIV")) {
         if (!parse_call_2arg(p, &a, &b)) return 1;
         if (b == 0) {
-            basic_error = 1;
-            basic_errcat = TIKU_BASIC_ERR_DIVZERO;
-            SHELL_PRINTF(SH_RED "? FDIV by zero" SH_RST "\n");
+            basic_throw(TIKU_BASIC_ERR_DIVZERO, "FDIV by zero");
             return 1;
         }
         *out_v = (long)(((long long)a * (long long)TIKU_BASIC_FIXED_SCALE)
                         / (long long)b);
+        return 1;
+    }
+    if (match_kw(p, "FPOW")) {
+        /* Q.3 fixed-point power: base is Q.3, the exponent is a plain
+         * INTEGER count, and the result is Q.3.  This is the explicit
+         * fixed-point counterpart to the integer `^` operator -- since
+         * the engine cannot tell "2000" from "2.000", the caller states
+         * intent by choosing `^` (integer) or FPOW (Q.3).  A negative
+         * exponent yields 0.
+         *   FPOW(2.0, 2) = 4.000    FPOW(0.5, 2) = 0.250 */
+        long r, n;
+        if (!parse_call_2arg(p, &a, &b)) return 1;
+        if (b < 0) { *out_v = 0; return 1; }
+        r = (long)TIKU_BASIC_FIXED_SCALE;            /* 1.0 in Q.3 */
+        for (n = 0; n < b; n++) {
+            r = (long)(((long long)r * (long long)a) /
+                       (long long)TIKU_BASIC_FIXED_SCALE);
+        }
+        *out_v = r;
         return 1;
     }
     if (match_kw(p, "SIN")) {
@@ -348,8 +405,7 @@ expr_call(const char **p, long *out_v)
         s = basic_sin_q3(a);
         c = basic_cos_q3(a);
         if (c == 0) {
-            basic_error = 1;
-            SHELL_PRINTF(SH_RED "? TAN at singularity\n" SH_RST);
+            basic_throw(TIKU_BASIC_ERR_GENERAL, "TAN at singularity");
             return 1;
         }
         /* tan = s / c, both Q.3, so result = s * SCALE / c. */
@@ -415,7 +471,7 @@ expr_call(const char **p, long *out_v)
         if (**p == '(') {
             (*p)++; skip_ws(p);
             if (**p == ')') (*p)++;
-            else { basic_error = 1; SHELL_PRINTF(SH_RED "? ')' expected\n" SH_RST); return 1; }
+            else { basic_throw(TIKU_BASIC_ERR_SYNTAX, "')' expected"); return 1; }
         }
         *out_v = (tiku_kits_net_ipv4_get_link() != (const tiku_kits_net_link_t *)0)
                  ? 1L : 0L;
@@ -434,12 +490,12 @@ expr_call(const char **p, long *out_v)
     if (match_kw(p, "SECS")) {
         skip_ws(p);
         if (**p != '(') {
-            basic_error = 1; SHELL_PRINTF(SH_RED "? '(' expected\n" SH_RST); return 1;
+            basic_throw(TIKU_BASIC_ERR_SYNTAX, "'(' expected"); return 1;
         }
         (*p)++;
         skip_ws(p);
         if (**p != ')') {
-            basic_error = 1; SHELL_PRINTF(SH_RED "? ')' expected\n" SH_RST); return 1;
+            basic_throw(TIKU_BASIC_ERR_SYNTAX, "')' expected"); return 1;
         }
         (*p)++;
         *out_v = (long)tiku_clock_seconds();
@@ -451,14 +507,14 @@ expr_call(const char **p, long *out_v)
         const char *S; size_t SL;
         skip_ws(p);
         if (**p != '(') {
-            basic_error = 1; SHELL_PRINTF(SH_RED "? '(' expected\n" SH_RST); return 1;
+            basic_throw(TIKU_BASIC_ERR_SYNTAX, "'(' expected"); return 1;
         }
         (*p)++;
         if (parse_str_ref(p, &S, &SL, buf, sizeof(buf)) != 0) return 1;  /* LEN(#n) too */
         (void)S;
         skip_ws(p);
         if (**p != ')') {
-            basic_error = 1; SHELL_PRINTF(SH_RED "? ')' expected\n" SH_RST); return 1;
+            basic_throw(TIKU_BASIC_ERR_SYNTAX, "')' expected"); return 1;
         }
         (*p)++;
         *out_v = (long)SL;
@@ -468,13 +524,13 @@ expr_call(const char **p, long *out_v)
         char buf[TIKU_BASIC_STR_BUF_CAP];
         skip_ws(p);
         if (**p != '(') {
-            basic_error = 1; SHELL_PRINTF(SH_RED "? '(' expected\n" SH_RST); return 1;
+            basic_throw(TIKU_BASIC_ERR_SYNTAX, "'(' expected"); return 1;
         }
         (*p)++;
         if (parse_strexpr(p, buf, sizeof(buf)) != 0) return 1;
         skip_ws(p);
         if (**p != ')') {
-            basic_error = 1; SHELL_PRINTF(SH_RED "? ')' expected\n" SH_RST); return 1;
+            basic_throw(TIKU_BASIC_ERR_SYNTAX, "')' expected"); return 1;
         }
         (*p)++;
         *out_v = (long)(unsigned char)buf[0];
@@ -485,13 +541,13 @@ expr_call(const char **p, long *out_v)
         char *end;
         skip_ws(p);
         if (**p != '(') {
-            basic_error = 1; SHELL_PRINTF(SH_RED "? '(' expected\n" SH_RST); return 1;
+            basic_throw(TIKU_BASIC_ERR_SYNTAX, "'(' expected"); return 1;
         }
         (*p)++;
         if (parse_strexpr(p, buf, sizeof(buf)) != 0) return 1;
         skip_ws(p);
         if (**p != ')') {
-            basic_error = 1; SHELL_PRINTF(SH_RED "? ')' expected\n" SH_RST); return 1;
+            basic_throw(TIKU_BASIC_ERR_SYNTAX, "')' expected"); return 1;
         }
         (*p)++;
         *out_v = strtol(buf, &end, 0);     /* base 0 -> auto hex/dec */
@@ -507,7 +563,7 @@ expr_call(const char **p, long *out_v)
         const char *match;
         skip_ws(p);
         if (**p != '(') {
-            basic_error = 1; SHELL_PRINTF(SH_RED "? '(' expected\n" SH_RST); return 1;
+            basic_throw(TIKU_BASIC_ERR_SYNTAX, "'(' expected"); return 1;
         }
         (*p)++;
         skip_ws(p);
@@ -521,20 +577,20 @@ expr_call(const char **p, long *out_v)
             if (start < 1) start = 1;
             skip_ws(p);
             if (**p != ',') {
-                basic_error = 1; SHELL_PRINTF(SH_RED "? ',' expected\n" SH_RST); return 1;
+                basic_throw(TIKU_BASIC_ERR_SYNTAX, "',' expected"); return 1;
             }
             (*p)++;
             if (parse_strexpr(p, haystack, sizeof(haystack)) != 0) return 1;
         }
         skip_ws(p);
         if (**p != ',') {
-            basic_error = 1; SHELL_PRINTF(SH_RED "? ',' expected\n" SH_RST); return 1;
+            basic_throw(TIKU_BASIC_ERR_SYNTAX, "',' expected"); return 1;
         }
         (*p)++;
         if (parse_strexpr(p, needle, sizeof(needle)) != 0) return 1;
         skip_ws(p);
         if (**p != ')') {
-            basic_error = 1; SHELL_PRINTF(SH_RED "? ')' expected\n" SH_RST); return 1;
+            basic_throw(TIKU_BASIC_ERR_SYNTAX, "')' expected"); return 1;
         }
         (*p)++;
         if (needle[0] == '\0') {
@@ -560,19 +616,19 @@ expr_call(const char **p, long *out_v)
         size_t nl;
         skip_ws(p);
         if (**p != '(') {
-            basic_error = 1; SHELL_PRINTF(SH_RED "? '(' expected\n" SH_RST); return 1;
+            basic_throw(TIKU_BASIC_ERR_SYNTAX, "'(' expected"); return 1;
         }
         (*p)++;
         if (parse_strexpr(p, haystack, sizeof(haystack)) != 0) return 1;
         skip_ws(p);
         if (**p != ',') {
-            basic_error = 1; SHELL_PRINTF(SH_RED "? ',' expected\n" SH_RST); return 1;
+            basic_throw(TIKU_BASIC_ERR_SYNTAX, "',' expected"); return 1;
         }
         (*p)++;
         if (parse_strexpr(p, needle, sizeof(needle)) != 0) return 1;
         skip_ws(p);
         if (**p != ')') {
-            basic_error = 1; SHELL_PRINTF(SH_RED "? ')' expected\n" SH_RST); return 1;
+            basic_throw(TIKU_BASIC_ERR_SYNTAX, "')' expected"); return 1;
         }
         (*p)++;
         nl = strlen(needle);
@@ -594,13 +650,13 @@ expr_call(const char **p, long *out_v)
         char path[48];
         skip_ws(p);
         if (**p != '(') {
-            basic_error = 1; SHELL_PRINTF(SH_RED "? '(' expected\n" SH_RST); return 1;
+            basic_throw(TIKU_BASIC_ERR_SYNTAX, "'(' expected"); return 1;
         }
         (*p)++;
         if (parse_path_literal(p, path, sizeof(path)) != 0) return 1;
         skip_ws(p);
         if (**p != ')') {
-            basic_error = 1; SHELL_PRINTF(SH_RED "? ')' expected\n" SH_RST); return 1;
+            basic_throw(TIKU_BASIC_ERR_SYNTAX, "')' expected"); return 1;
         }
         (*p)++;
         *out_v = basic_vfsread(path);
@@ -639,8 +695,7 @@ expr_call(const char **p, long *out_v)
                         if (ai > 0) {
                             skip_ws(p);
                             if (**p != ',') {
-                                basic_error = 1;
-                                SHELL_PRINTF(SH_RED "? ',' expected\n" SH_RST);
+                                basic_throw(TIKU_BASIC_ERR_SYNTAX, "',' expected");
                                 return 1;
                             }
                             (*p)++;
@@ -650,8 +705,7 @@ expr_call(const char **p, long *out_v)
                     }
                     skip_ws(p);
                     if (**p != ')') {
-                        basic_error = 1;
-                        SHELL_PRINTF(SH_RED "? ')' expected\n" SH_RST); return 1;
+                        basic_throw(TIKU_BASIC_ERR_SYNTAX, "')' expected"); return 1;
                     }
                     (*p)++;
                     /* Bind arguments to their named variables, saving the
@@ -669,6 +723,43 @@ expr_call(const char **p, long *out_v)
                     *out_v = result;
                     return 1;
                 }
+            }
+        }
+    }
+#endif
+#if TIKU_BASIC_EXT_MAX > 0
+    /* Registered extension functions (tiku_basic_ext.h): tried after every
+     * builtin.  The interpreter parses `(a[, b])` per the registered arity
+     * and hands the values to the handler. */
+    {
+        uint8_t i;
+        for (i = 0; i < TIKU_BASIC_EXT_MAX; i++) {
+            if (basic_ext_tab[i].name[0] == '\0' ||
+                basic_ext_tab[i].kind != 1u ||
+                !match_kw(p, basic_ext_tab[i].name)) {
+                continue;
+            }
+            {
+                long args[2] = { 0, 0 };
+                long out     = 0;
+                switch (basic_ext_tab[i].arity) {
+                case 0u:
+                    if (!parse_call_0arg(p)) return 1;
+                    break;
+                case 1u:
+                    if (!parse_call_1arg(p, &args[0])) return 1;
+                    break;
+                default:
+                    if (!parse_call_2arg(p, &args[0], &args[1])) return 1;
+                    break;
+                }
+                if (basic_ext_tab[i].u.nfn(args,
+                                           (int)basic_ext_tab[i].arity,
+                                           &out) != 0) {
+                    return 1;              /* handler raised via ext_error */
+                }
+                *out_v = out;
+                return 1;
             }
         }
     }

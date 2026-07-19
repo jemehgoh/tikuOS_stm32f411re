@@ -25,7 +25,7 @@
 # ---------------------------------------------------------------------------
 MCU ?= $(mcu)
 ifeq ($(MCU),)
-MCU = msp430fr2433
+MCU = msp430fr5994          # a bare `make` builds a supported target (FR2433 no longer fits)
 endif
 MCU := $(shell echo $(MCU) | tr '[:upper:]' '[:lower:]')
 
@@ -46,6 +46,12 @@ else ifeq ($(MCU),apollo510b)
 # all via the apollo510 `else` branches below). The board just adds an EM9305
 # BLE radio (a later, SPI-gated effort); bring-up is identical to apollo510.
 TIKU_PLATFORM := ambiq
+else ifeq ($(MCU),nrf54l15)
+TIKU_PLATFORM := nordic
+else ifeq ($(MCU),nrf54lm20a)
+TIKU_PLATFORM := nordic
+else ifeq ($(MCU),nrf54lm20b)
+TIKU_PLATFORM := nordic
 else
 TIKU_PLATFORM := msp430
 endif
@@ -117,6 +123,17 @@ TIKU_BOARD_DEFINE := TIKU_BOARD_APOLLO4L_EVB
 endif
 endif
 
+ifeq ($(TIKU_PLATFORM),nordic)
+# One board per device: nrf54l15 -> nRF54L15-DK (PCA10156);
+# nrf54lm20a/nrf54lm20b -> nRF54LM20-DK (PCA10184; the DK ships LM20B silicon,
+# both images run on it).
+ifneq (,$(filter nrf54lm20a nrf54lm20b,$(MCU)))
+TIKU_BOARD_DEFINE := TIKU_BOARD_NRF54LM20_DK
+else
+TIKU_BOARD_DEFINE := TIKU_BOARD_NRF54L15_DK
+endif
+endif
+
 # ---------------------------------------------------------------------------
 # Apollo510 register headers are VENDORED in-tree at arch/ambiq/cmsis/ (CMSIS
 # device map + ARM CMSIS-Core). The build references no external AmbiqSuite
@@ -182,8 +199,9 @@ DEVICE_DEFINE = TIKU_DEVICE_$(DEVICE_UPPER)
 # msp430:  msp430-elf-gcc auto-detected from PATH (or $(HOME)/tigcc)
 # rp2350:  arm-none-eabi-gcc auto-detected from PATH
 # apollo510: arm-none-eabi-gcc auto-detected from PATH
+# nrf54l15:  arm-none-eabi-gcc auto-detected from PATH (Cortex-M33)
 # ---------------------------------------------------------------------------
-ifneq (,$(filter $(TIKU_PLATFORM),rp2350 ambiq))
+ifneq (,$(filter $(TIKU_PLATFORM),rp2350 ambiq nordic))
 
 # ARM Embedded toolchain (apt: gcc-arm-none-eabi).
 TOOLCHAIN_PREFIX ?= arm-none-eabi-
@@ -232,6 +250,13 @@ JLINK           ?= JLinkExe
 JLINK_GDB       ?= JLinkGDBServer
 JLINK_IF        ?= SWD
 JLINK_SPEED     ?= 4000
+# Select a specific J-Link probe by its serial number.  Every SEGGER J-Link
+# reports the same USB VID (0x1366), so on a rig with several Ambiq EVBs the
+# probe serial is the only thing that tells them apart -- pass
+# `make flash MCU=apollo4l JLINK_SN=001160001290` to flash exactly that board.
+# Empty (the default) lets JLinkExe pick the sole connected probe.
+JLINK_SN        ?=
+JLINK_SN_ARG    := $(if $(strip $(JLINK_SN)),-SelectEmuBySN $(strip $(JLINK_SN)),)
 # J-Link device + MRAM load address differ per Ambiq part.
 ifeq ($(MCU),apollo4l)
 JLINK_DEVICE    ?= AMAP42KL-KBR
@@ -269,6 +294,30 @@ endif
 # ---------------------------------------------------------------------------
 PROJ_DIR  = $(CURDIR)
 BUILD_DIR = build/$(MCU)
+
+# ---------------------------------------------------------------------------
+# Flag-change guard.  There is no header/flag dependency tracking, so changing
+# EXTRA_CFLAGS or a make var (e.g. TIKU_SHELL_BASIC_ENABLE, APP, TIKU_FLPR_
+# ENABLE) between builds of the same MCU would otherwise leave objects
+# compiled under the OLD flags -- the classic trap (a command silently
+# missing from the shell table, or `undefined reference to tiku_basic_*` when
+# a BASIC-on object meets a BASIC-off link).  Fingerprint the command-line
+# overrides; if they differ from the last build of this dir, drop its objects
+# so everything recompiles under the new flags.  Runs at parse time.
+# ---------------------------------------------------------------------------
+BUILD_FLAGS_STAMP := $(BUILD_DIR)/.buildflags
+_FLAG_GUARD := $(shell mkdir -p $(BUILD_DIR); \
+    printf '%s' "$(MAKEOVERRIDES)" > $(BUILD_DIR)/.buildflags.new; \
+    if ! cmp -s $(BUILD_DIR)/.buildflags.new $(BUILD_FLAGS_STAMP) 2>/dev/null; \
+    then \
+        find $(BUILD_DIR) -name '*.o' -delete 2>/dev/null; \
+        rm -f main.elf main.hex; \
+        mv $(BUILD_DIR)/.buildflags.new $(BUILD_FLAGS_STAMP); \
+        echo wiped; \
+    else rm -f $(BUILD_DIR)/.buildflags.new; fi)
+ifeq ($(_FLAG_GUARD),wiped)
+$(info [flags changed -> $(BUILD_DIR) objects wiped for a clean rebuild])
+endif
 
 # ---------------------------------------------------------------------------
 # App selection (mutually exclusive with tests and examples)
@@ -795,6 +844,50 @@ CFLAGS += -I$(PROJ_DIR)
 CFLAGS += -I$(PROJ_DIR)/arch/ambiq/cmsis
 CFLAGS += -ffunction-sections -fdata-sections -fno-common
 
+else ifeq ($(TIKU_PLATFORM),nordic)
+
+# Cortex-M33 (Nordic nRF54L15). Single-precision FPU is present but tikuOS
+# uses the softfp ABI (no float in the kernel), matching the rp2350 M33 config.
+CFLAGS  = -mcpu=cortex-m33 -mthumb
+CFLAGS += -mfloat-abi=softfp -mfpu=fpv5-sp-d16
+CFLAGS += -Os -Wall -Wextra
+CFLAGS += -D$(DEVICE_DEFINE)=1
+CFLAGS += -D$(TIKU_BOARD_DEFINE)=1
+CFLAGS += -DPLATFORM_NORDIC=1
+# newlib-nano (small integer printf) + nosys syscall stubs -- same self-
+# contained libc config as the rp2350 / ambiq ARM ports.
+CFLAGS += --specs=nano.specs --specs=nosys.specs
+CFLAGS += -I$(PROJ_DIR)
+CFLAGS += -ffunction-sections -fdata-sections -fno-common
+
+# BASIC needs a real SRAM (AUTO) tier for its program arena (~98 KB for the
+# 1024-line BIG tier); the tiku_mem.h default is 128 B, so `basic` OOMs at
+# entry without this.  The nRF54L15 has 256 KB SRAM, so a 160 KB tier fits the
+# arena with ample room for .bss + stack.  Gated on BASIC so non-BASIC builds
+# keep the lean default.  (Same fix the rp2350 block applies for its part.)
+# 32 KB, not rp2350's 160 KB: nordic runs the FRAM BASIC tier (96 lines,
+# 2 KB heap -- observed AUTO-tier demand ~10 KB), and the https build must
+# leave room for BOTH TLS clients' RFC-max record buffers in 256 KB SRAM.
+ifeq ($(TIKU_SHELL_BASIC_ENABLE),1)
+# Threaded HTTPS also carries the worker scheduler state in the same 240 KB
+# application SRAM window.  The Nordic FRAM-tier BASIC profile has measured
+# AUTO-tier demand of only ~10 KB, so keep 20 KB for threaded builds and
+# recover 12 KB of static headroom; non-threaded BASIC retains the original
+# 32 KB arena.  This lets the canonical TikuBench/TikuConsole HTTPS-offload
+# profile link while remaining comfortably above observed BASIC demand.
+ifneq (,$(filter nrf54lm20a nrf54lm20b,$(MCU)))
+# The LM20's tier arena lives in RAM2 (the upper 256 KB SRAM bank, linker
+# section .ram2) and does not compete with the primary bank's .bss/stack at
+# all -- so give BASIC a roomy arena regardless of threads.  192 KB of the
+# 255 KB usable bank (top 1 KB of RAM2 is unbacked on this silicon).
+CFLAGS += -DTIKU_TIER_SRAM_SIZE=196608    # 192 KB tier arena in RAM2
+else ifeq ($(TIKU_THREADS_ENABLE),1)
+CFLAGS += -DTIKU_TIER_SRAM_SIZE=20480     # 20 KB: BASIC + thread headroom
+else
+CFLAGS += -DTIKU_TIER_SRAM_SIZE=32768     # 32 KB: FRAM-tier BASIC arena
+endif
+endif
+
 else
 
 CFLAGS  = -mmcu=$(MCU) -Os -Wall -Wextra
@@ -856,12 +949,13 @@ ifeq ($(TIKU_PLATFORM),msp430)
 $(error TIKU_THREADS_ENABLE=1 requires a Cortex-M part; MSP430 \
 stays cooperative -- 2 KB of SRAM has no room for per-thread stacks)
 endif
-ifeq ($(filter apollo510 apollo510b apollo4l apollo4p rp2350,$(MCU)),)
+ifeq ($(filter apollo510 apollo510b apollo4l apollo4p rp2350 nrf54l15 nrf54lm20a nrf54lm20b,$(MCU)),)
 $(error TIKU_THREADS_ENABLE=1 needs a supported Cortex-M part -- \
-apollo510/apollo510b (M55), apollo4l/apollo4p (M4F) or rp2350 (M33); \
-$(MCU) has no thread backend. The switcher is generic Cortex-M asm \
-(kernel/threads/tiku_thread_cortexm.inl); adding a part = a two-line shim \
-that names its PendSV vector symbol, plus proving the torture suite)
+apollo510/apollo510b (M55), apollo4l/apollo4p (M4F), rp2350 or \
+nrf54l15/nrf54lm20a (M33); $(MCU) has no thread backend. The switcher is generic \
+Cortex-M asm (kernel/threads/tiku_thread_cortexm.inl); adding a part = a \
+two-line shim that names its PendSV vector symbol (plus a custom cycle \
+source if the part's DWT freezes standalone), and proving the torture suite)
 endif
 CFLAGS += -DTIKU_THREADS_ENABLE=1
 endif
@@ -952,6 +1046,27 @@ LDLIBS  = -Wl,--start-group
 LDLIBS += -lm -lc -lgcc
 LDLIBS += -Wl,--end-group
 
+else ifeq ($(TIKU_PLATFORM),nordic)
+
+LDFLAGS  = -mcpu=cortex-m33 -mthumb -mfloat-abi=softfp -mfpu=fpv5-sp-d16
+LDFLAGS += --specs=nano.specs --specs=nosys.specs -nostartfiles
+ifneq (,$(filter nrf54lm20a nrf54lm20b,$(MCU)))
+# The LM20B's memory map is identical to the A's (diff-proven); one script.
+LDFLAGS += -Tarch/nordic/devices/nrf54lm20a.ld
+else
+LDFLAGS += -Tarch/nordic/devices/nrf54l15.ld
+endif
+LDFLAGS += -Wl,--gc-sections
+LDFLAGS += -Wl,-u,tiku_autostart_processes
+LDFLAGS += -Wl,-u,tiku_nordic_vectors
+LDFLAGS += -Wl,-Map=$(BUILD_DIR)/main.map
+LDLIBS  = -Wl,--start-group
+# Axon NPU driver core (empty unless TIKU_AXON_ENABLE=1 defines it below;
+# inside the group so its memcpy/memset resolve against libc).
+LDLIBS += $(LDLIBS_AXON)
+LDLIBS += -lm -lc -lgcc
+LDLIBS += -Wl,--end-group
+
 else
 
 LDFLAGS  = -mmcu=$(MCU)
@@ -1027,8 +1142,8 @@ endif # TIKU_PLATFORM == msp430
 MINIMAL ?= 0
 
 ifeq ($(MINIMAL),1)
-ifeq ($(filter $(TIKU_PLATFORM),rp2350 ambiq),)
-$(error MINIMAL=1 is only supported on MCU=rp2350 or MCU=apollo510)
+ifeq ($(filter $(TIKU_PLATFORM),rp2350 ambiq nordic),)
+$(error MINIMAL=1 is only supported on MCU=rp2350, MCU=apollo510, MCU=nrf54l15, or MCU=nrf54lm20a)
 endif
 
 # Use the minimal entry point and exactly the arch files it needs.
@@ -1050,6 +1165,12 @@ endif
 # No AmbiqSuite sources compiled in (de-SDK complete): system_apollo510.c,
 # am_util_delay.c, am_util_stdio.c and am_resources.c are all dropped -- tikuOS
 # uses its own printf and never references the HAL resource tables.
+else ifeq ($(TIKU_PLATFORM),nordic)
+SRCS += arch/nordic/tiku_crt_early.c
+SRCS += arch/nordic/tiku_cpu_freq_boot_arch.c
+SRCS += arch/nordic/tiku_cpu_common.c
+SRCS += arch/nordic/tiku_uart_arch.c
+SRCS += arch/nordic/tiku_gpio_arch.c
 else
 SRCS += arch/arm-rp2350/tiku_crt_early.c
 SRCS += arch/arm-rp2350/tiku_cpu_freq_boot_arch.c
@@ -1104,6 +1225,99 @@ CFLAGS += -DTIKU_CONSOLE_USB=1
 else ifeq ($(TIKU_CONSOLE),both)
 SRCS   += arch/arm-rp2350/tiku_usb_cdc_arch.c
 CFLAGS += -DTIKU_CONSOLE_USB=1 -DTIKU_CONSOLE_BOTH=1
+endif
+
+else ifeq ($(TIKU_PLATFORM),nordic)
+
+# Nordic nRF54L arch (Cortex-M33). Boot + tick + console are proven; the
+# remaining HAL files (crit/wake/mem/mpu/region/watchdog + driver stubs) are
+# added below as the kernel needs them.
+SRCS += arch/nordic/tiku_cpu_common.c
+SRCS += arch/nordic/tiku_crt_early.c
+SRCS += arch/nordic/tiku_cpu_freq_boot_arch.c
+SRCS += arch/nordic/tiku_timer_arch.c
+SRCS += arch/nordic/tiku_gpio_arch.c
+SRCS += arch/nordic/tiku_uart_arch.c
+SRCS += arch/nordic/tiku_crit_arch.c
+SRCS += arch/nordic/tiku_wake_arch.c
+SRCS += arch/nordic/tiku_mem_arch.c
+SRCS += arch/nordic/tiku_mpu_arch.c
+SRCS += arch/nordic/tiku_region_arch.c
+SRCS += arch/nordic/tiku_nvm_region_nordic.c
+SRCS += arch/nordic/tiku_cpu_watchdog_arch.c
+SRCS += arch/nordic/tiku_htimer_arch.c
+SRCS += arch/nordic/tiku_gpio_irq_arch.c
+SRCS += arch/nordic/tiku_adc_arch.c
+SRCS += arch/nordic/tiku_i2c_arch.c
+SRCS += arch/nordic/tiku_spi_arch.c
+SRCS += arch/nordic/tiku_onewire_arch.c
+SRCS += arch/nordic/tiku_trng_arch.c
+SRCS += arch/nordic/tiku_crypto_arch.c
+SRCS += arch/nordic/tiku_radio_arch.c
+SRCS += arch/nordic/tiku_fault_arch.c
+# On-die 2.4 GHz RADIO backs the GENERIC broadcast-BLE capability: the
+# tiku_ble_adv facade, the BASIC BLEBEACON/BLESCAN$ words and /sys/radio all
+# gate on TIKU_HAS_BLE_ADV, never on the chip (same pattern as TIKU_HAS_BLE).
+SRCS += interfaces/bluetooth/tiku_ble_adv.c
+CFLAGS += -DTIKU_HAS_BLE_ADV=1
+# Phase E: LE Secure Connections (SMP) pairing crypto + state machine.  Used by
+# BOTH roles -- the FLPR-backed peripheral host (responder) and the RADIO-driven
+# central test peer (initiator) -- so it lives with the BLE_ADV capability, not
+# the FLPR block.  AES-CMAC + f4/f5/f6 over the CRACEN AES-ECB, P-256 ECDH from
+# the crypto kit (self-contained); unused code is GC'd on non-pairing builds.
+SRCS += interfaces/bluetooth/tiku_ble_smp.c
+SRCS += interfaces/bluetooth/tiku_ble_smp_pair.c
+SRCS += $(wildcard tikukits/crypto/p256/*.c)
+# From-scratch IEEE 802.15.4 PHY on the same on-die RADIO (N-track).  Gated
+# on TIKU_HAS_154 (capability, never the chip); the radio154 shell command
+# and any future 15.4 facade key off it.
+SRCS += arch/nordic/tiku_ieee154_arch.c
+SRCS += interfaces/radio/tiku_154_frame.c
+SRCS += interfaces/radio/tiku_154.c
+CFLAGS += -DTIKU_HAS_154=1
+# FLPR (VPR RISC-V coprocessor) -- opt-in.  Builds the tiny RISC-V firmware
+# (arch/nordic/flpr/) with the xPack riscv-none-elf toolchain (unpacked under
+# gitignored temp/toolchains/ -- see kintsugi/flpr_plan.md F0), embeds the
+# flat binary into this image, and compiles the app-side loader + /sys/flpr.
+ifeq ($(TIKU_FLPR_ENABLE),1)
+# nRF54L15 and nRF54LM20A/B all carry the same VPR00 ("FLPR") RISC-V core at
+# the same base (0x5004C000), IRQ 76, MPC00 (0x50041000) and SPU10/SPU20 slots
+# -- diff-proven identical.  The FLPR carve is the top 16 KB of the LOWER SRAM
+# bank (0x2003C000..0x2003FFFF) on every nordic part, so tiku_flpr_ipc.h and
+# tiku_flpr.ld are shared verbatim; the LM20's RAM2 tier arena is untouched.
+# Only the app linker reserves the carve (per-device .ld, always-on for a
+# stable layout).
+SRCS += arch/nordic/tiku_flpr_arch.c
+CFLAGS += -DTIKU_FLPR_ENABLE=1
+# The FLPR is the on-die BLE controller (L6); the driver-agnostic serial
+# facade backs the BASIC BLE words over its mailbox.  Compile it here on
+# nordic (the EM9305 block adds it on apollo) -- guarded against a double
+# add if both were ever set.
+ifneq ($(TIKU_DRV_BLE_EM9305_ENABLE),1)
+SRCS += interfaces/bluetooth/tiku_ble_serial.c
+endif
+# Phase B: the M33-side ATT/GATT host for the FLPR controller (ATT moved off
+# the coprocessor; the FLPR forwards L2CAP frames over the mailbox).
+SRCS += interfaces/bluetooth/tiku_ble_host.c
+# (SMP pairing crypto + engine build with the BLE_ADV capability above, so the
+#  central test peer gets them too -- not gated on the FLPR coprocessor.)
+RISCV_PREFIX ?= temp/toolchains/xpack-riscv-none-elf-gcc-15.2.0-1/bin/riscv-none-elf-
+RISCV_CC      = $(RISCV_PREFIX)gcc
+FLPR_BUILD    = $(BUILD_DIR)/flpr
+# The FLPR is RV32E (16 GPRs) + M + C; Zicsr for the CLIC CSRs later.
+FLPR_CFLAGS   = -march=rv32emc_zicsr -mabi=ilp32e -Os -Wall -Wextra \
+                -ffreestanding -nostdlib -nostartfiles \
+                -ffunction-sections -fdata-sections -I$(PROJ_DIR) -MMD -MP
+FLPR_OBJS     = $(FLPR_BUILD)/tiku_flpr_crt0.o $(FLPR_BUILD)/tiku_flpr_main.o
+TIKU_FLPR_IMG_O = $(FLPR_BUILD)/tiku_flpr_img.o
+ifeq ($(wildcard $(RISCV_CC)),)
+$(error TIKU_FLPR_ENABLE=1 needs the RISC-V toolchain at $(RISCV_CC) -- \
+kintsugi/flpr_plan.md F0 documents the xPack download)
+endif
+endif
+ifeq ($(TIKU_THREADS_ENABLE),1)
+SRCS += kernel/threads/tiku_thread.c
+SRCS += arch/nordic/tiku_thread_arch.c
 endif
 
 else ifeq ($(TIKU_PLATFORM),ambiq)
@@ -1207,7 +1421,9 @@ SRCS += hal/tiku_cpu.c
 SRCS += kernel/cpu/tiku_common.c
 SRCS += kernel/cpu/tiku_watchdog.c
 SRCS += kernel/cpu/tiku_hang.c
+SRCS += kernel/cpu/tiku_stack.c
 SRCS += kernel/cpu/tiku_rtc.c
+SRCS += kernel/cpu/tiku_bench.c
 
 # Driver-registry layer. Always built so the kernel exposes
 # tiku_drv_init_all(); the descriptor table itself comes from
@@ -1441,6 +1657,70 @@ SRCS += kernel/shell/commands/tiku_shell_cmd_mem.c
 endif
 ifneq (,$(findstring TIKU_SHELL_CMD_NVMPROBE=1,$(EXTRA_CFLAGS)))
 SRCS += kernel/shell/commands/tiku_shell_cmd_nvmprobe.c
+endif
+ifneq (,$(findstring TIKU_SHELL_CMD_CRYPTOPROBE=1,$(EXTRA_CFLAGS)))
+SRCS += kernel/shell/commands/tiku_shell_cmd_cryptoprobe.c
+endif
+ifneq (,$(findstring TIKU_SHELL_CMD_AXONSPROBE=1,$(EXTRA_CFLAGS)))
+SRCS += kernel/shell/commands/tiku_shell_cmd_axonsprobe.c
+endif
+
+# Axon NPU (nRF54LM20B) -- opt-in.  Links Nordic's Axon driver core from the
+# LOCAL, GITIGNORED checkout of github.com/nordicsemi-neuton/
+# nrf54lm20b-axon-audio-models (LicenseRef-Nordic-5-Clause: linked at build
+# time, never vendored -- the CRACEN PK microcode policy).  The TikuOS-side
+# platform layer (arch/nordic/tiku_axon_platform.c) provides the ~11
+# nrf_axon_platform_* functions the blob expects.
+ifeq ($(TIKU_AXON_ENABLE),1)
+ifeq ($(filter nrf54lm20b,$(MCU)),)
+$(error TIKU_AXON_ENABLE=1 needs MCU=nrf54lm20b -- the Axon NPU exists only \
+on the nRF54LM20B (the LM20A lacks the block))
+endif
+AXON_SDK ?= temp/axon-models/lib/axon
+ifeq ($(wildcard $(AXON_SDK)/lib/axon/bin/arm/libnrf-axon-driver-internal.a),)
+$(error TIKU_AXON_ENABLE=1 needs the Axon checkout at $(AXON_SDK) -- \
+git clone https://github.com/nordicsemi-neuton/nrf54lm20b-axon-audio-models \
+temp/axon-models)
+endif
+SRCS   += arch/nordic/tiku_axon_platform.c
+CFLAGS += -DTIKU_AXON_ENABLE=1
+CFLAGS += -I$(AXON_SDK)/include
+LDLIBS_AXON = $(AXON_SDK)/lib/axon/bin/arm/libnrf-axon-driver-internal.a
+
+# Optional compiled-model inference KAT: TIKU_AXON_MODEL=tinyml_kws (or
+# tinyml_vww / tinyml_ic / tinyml_ad).  Compiles Nordic's public nn-infer
+# sources + their portable test app (base_inference_main, invoked via
+# `axonsprobe model`) against the model/test-vector headers shipped in the
+# checkout.  The interlayer working buffer lives in RAM2 (size per model;
+# 140000 covers the shipped tinyml set -- the model init verifies and
+# reports the exact need on mismatch).
+ifneq ($(strip $(TIKU_AXON_MODEL)),)
+SRCS += $(AXON_SDK)/drivers/axon/nrf_axon_nn_infer.c
+SRCS += $(AXON_SDK)/drivers/axon/nrf_axon_nn_infer_test.c
+SRCS += $(AXON_SDK)/drivers/axon/nrf_axon_nn_op_extensions.c
+SRCS += $(AXON_SDK)/lib/axon/platform/src/nrf_axon_logging.c
+# newlib-nano's inttypes.h omits the 64-bit PRI macros this toolchain-wide;
+# the vendor logging code uses PRId64/PRIx64 in failure-path vector dumps.
+# Defining them here is conflict-free (the header genuinely lacks them).
+CFLAGS += -DPRId64='"lld"' -DPRIx64='"llx"'
+SRCS += $(AXON_SDK)/lib/axon/platform/src/nrf_axon_vector_compare.c
+SRCS += $(AXON_SDK)/tests/axon/inference/src/nrf_axon_app_test_nn_inference.c
+CFLAGS += -DNRF_AXON_MODEL_NAME=$(TIKU_AXON_MODEL)
+CFLAGS += -DTIKU_AXON_MODEL_TEST=1
+CFLAGS += -I$(AXON_SDK)/tests/axon/compiled_models
+TIKU_AXON_ILB ?= 140000
+CFLAGS += -DNRF_AXON_INTERLAYER_BUFFER_SIZE=$(TIKU_AXON_ILB)
+CFLAGS += -DNRF_AXON_PSUM_BUFFER_SIZE=$(TIKU_AXON_PSUM)
+TIKU_AXON_PSUM ?= 0
+else
+CFLAGS += -DNRF_AXON_INTERLAYER_BUFFER_SIZE=0 -DNRF_AXON_PSUM_BUFFER_SIZE=0
+endif
+endif
+ifneq (,$(findstring TIKU_SHELL_CMD_BLEADV=1,$(EXTRA_CFLAGS)))
+SRCS += kernel/shell/commands/tiku_shell_cmd_bleadv.c
+endif
+ifneq (,$(findstring TIKU_SHELL_CMD_RADIO154=1,$(EXTRA_CFLAGS)))
+SRCS += kernel/shell/commands/tiku_shell_cmd_radio154.c
 endif
 endif
 # GPIO arch is always needed (VFS tree references GPIO read/write/dir).
@@ -1842,6 +2122,17 @@ ifeq ($(HAS_DEMOS),1)
 SRCS   += $(wildcard demos/$(DEMO)/*.c)
 endif
 
+# CRACEN hardware public-key offload (nRF54L15 only, opt-in).  Enables the
+# BA414EP ECDSA-verify path (481x over software) behind the runtime mode knob,
+# but the engine is microcoded and TikuOS ships NO microcode (Nordic-
+# proprietary): a build must ALSO drop its own licensed cracen_pk_microcode.h
+# next to arch/nordic/tiku_crypto_arch.c.  Without it, every hardware verify
+# fails safe to software.  Default off; the SHA/AES-GCM CryptoMaster offload
+# needs none of this and is always on for nordic.
+ifeq ($(TIKU_CRACEN_PK_ENABLE),1)
+CFLAGS += -DTIKU_CRACEN_PK_ENABLE=1
+endif
+
 ifeq ($(TIKU_KIT_CRYPTO_ENABLE),1)
 CFLAGS += -DTIKU_KIT_CRYPTO_ENABLE=1
 SRCS   += $(wildcard tikukits/crypto/sha256/*.c)
@@ -1856,6 +2147,11 @@ SRCS   += $(wildcard tikukits/crypto/x25519/*.c)
 SRCS   += $(wildcard tikukits/crypto/p256/*.c)
 SRCS   += $(wildcard tikukits/crypto/p384/*.c)
 SRCS   += $(wildcard tikukits/crypto/rsa/*.c)
+# MSP430 has no hardware TRNG: its SHA-256-conditioned software entropy
+# source lives in the arch layer and is only linkable with the crypto kit.
+ifeq ($(TIKU_PLATFORM),msp430)
+SRCS   += arch/msp430/tiku_trng_arch.c
+endif
 SRCS   += $(wildcard tikukits/net/tls/x509/*.c)
 # TLS pulls in additional code; gated separately on HAS_TLS=1
 # because tiku_kits_crypto_tls requires the platform to provide
@@ -1864,6 +2160,13 @@ ifeq ($(HAS_TLS),1)
 SRCS   += $(wildcard tikukits/net/tls/psk/*.c)
 SRCS   += $(wildcard tikukits/net/tls/tls13/*.c)
 SRCS   += $(wildcard tikukits/net/tls/tls12/*.c)
+# The cert clients are now linked, so let the http kit route http_get()/
+# http_post() over them (TIKU_KITS_NET_HTTP_CERT trust model) as well as the
+# PSK client.  Off when HAS_TLS is unset -> the kit stays PSK-only and doesn't
+# reference tls13/tls12.
+ifeq ($(TIKU_KITS_NET_HTTP_ENABLE),1)
+CFLAGS += -DTIKU_KITS_NET_HTTP_CERT_ENABLE=1
+endif
 endif
 endif
 
@@ -1973,6 +2276,11 @@ ifneq ($(BASIC_PROGRAM),)
 OBJS += $(TIKU_BASIC_EMBEDDED_O)
 endif
 
+ifeq ($(TIKU_FLPR_ENABLE),1)
+# Embedded FLPR coprocessor image (recipes below `all:`, same reason).
+OBJS += $(TIKU_FLPR_IMG_O)
+endif
+
 # Header-dependency tracking.  Each compile emits a .d next to its .o (via
 # -MMD -MP in the rules above) listing every header it pulled in; pull those
 # back in so editing a header rebuilds exactly the objects that include it --
@@ -1990,7 +2298,12 @@ TARGET = main.elf
 # Targets
 # ---------------------------------------------------------------------------
 .SUFFIXES:
-.PHONY: all clean flash run debug erase size monitor deploy docs docs-clean uf2
+.PHONY: all clean flash run debug erase size monitor deploy docs docs-clean uf2 lint
+
+# Static placement lint: raw section(".persistent") outside the grade macros
+# is the audit's silent-volatile bug class (kintsugi/memoryfix.md Phase A).
+lint:
+	@./tools/check_durable_placement.sh
 
 # UF2 is the RP2350 deliverable; ELF is enough on MSP430.
 ifeq ($(TIKU_PLATFORM),rp2350)
@@ -2000,6 +2313,9 @@ all: $(TARGET) $(TARGET_BIN) $(TARGET_UF2) size
 else ifeq ($(TIKU_PLATFORM),ambiq)
 TARGET_BIN = main.bin
 all: $(TARGET) $(TARGET_BIN) size
+else ifeq ($(TIKU_PLATFORM),nordic)
+TARGET_HEX = main.hex
+all: $(TARGET) $(TARGET_HEX) size
 else
 all: $(TARGET) size
 endif
@@ -2051,6 +2367,15 @@ $(TARGET_BIN): $(TARGET)
 	$(OBJCOPY) -O binary $< $@
 endif
 
+# nRF54L15: Intel HEX for nrfutil to program into RRAM.
+ifeq ($(TIKU_PLATFORM),nordic)
+$(TARGET_HEX): $(TARGET)
+	$(OBJCOPY) -O ihex $< $@
+	@echo "  [hex]   $(TARGET) -> $(TARGET_HEX)"
+
+hex: $(TARGET_HEX)
+endif
+
 # Embedded BASIC: the generated .c lives inside $(BUILD_DIR), so the
 # pattern rule above can't reach it (it would loop on the prefix).
 # Use explicit rules for both generation and compilation. These are
@@ -2065,6 +2390,39 @@ $(TIKU_BASIC_EMBEDDED_C): $(BASIC_PROGRAM) tools/bas_to_c.py
 $(TIKU_BASIC_EMBEDDED_O): $(TIKU_BASIC_EMBEDDED_C)
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -MMD -MP -c -o $@ $<
+endif
+
+# ---------------------------------------------------------------------------
+# FLPR (VPR RISC-V) coprocessor sub-build: compile with the RISC-V
+# toolchain, link against the carve-resident script, flatten to a binary,
+# then wrap that binary as an ARM object (blob in .rodata, RRAM) whose
+# _binary_tiku_flpr_bin_* symbols the app-side loader memcpys from.  The
+# wrap runs objcopy FROM INSIDE the build dir so the symbol names derive
+# from the bare file name, not the build path.
+# ---------------------------------------------------------------------------
+ifeq ($(TIKU_FLPR_ENABLE),1)
+$(FLPR_BUILD)/%.o: arch/nordic/flpr/%.S
+	@mkdir -p $(dir $@)
+	$(RISCV_CC) $(FLPR_CFLAGS) -c -o $@ $<
+
+$(FLPR_BUILD)/%.o: arch/nordic/flpr/%.c
+	@mkdir -p $(dir $@)
+	$(RISCV_CC) $(FLPR_CFLAGS) -c -o $@ $<
+
+$(FLPR_BUILD)/tiku_flpr.elf: $(FLPR_OBJS) arch/nordic/flpr/tiku_flpr.ld
+	$(RISCV_CC) $(FLPR_CFLAGS) -T arch/nordic/flpr/tiku_flpr.ld \
+	    -Wl,--gc-sections -o $@ $(FLPR_OBJS)
+
+$(FLPR_BUILD)/tiku_flpr.bin: $(FLPR_BUILD)/tiku_flpr.elf
+	$(RISCV_PREFIX)objcopy -O binary $< $@
+	@echo "  [flpr]  $$(stat -c%s $@) bytes"
+
+$(TIKU_FLPR_IMG_O): $(FLPR_BUILD)/tiku_flpr.bin
+	cd $(FLPR_BUILD) && $(OBJCOPY) -I binary -O elf32-littlearm -B arm \
+	    --rename-section .data=.rodata,alloc,load,readonly,data,contents \
+	    tiku_flpr.bin tiku_flpr_img.o
+
+-include $(FLPR_OBJS:.o=.d)
 endif
 
 size: $(TARGET)
@@ -2096,6 +2454,24 @@ endif
 # ---------------------------------------------------------------------------
 # Flash / Debug / Erase
 # ---------------------------------------------------------------------------
+
+# nRF54L15-DK flashing tool (Nordic's nrfutil): prefer a PATH `nrfutil`, else
+# the vendored ./temp/nrfutil.  NRF_SN selects one J-Link probe by serial on a
+# multi-DK rig (TikuBench passes it per board via NRF_SN=<serial>).
+#
+# nrfutil resolves its `device` subcommand from $NRFUTIL_HOME (default
+# $HOME/.nrfutil) -- under sudo HOME=/root has no plugins and the flash dies
+# with "Subcommand nrfutil-device not found".  When make itself runs AS ROOT
+# with SUDO_USER set, point NRFUTIL_HOME back at the invoking user's plugin
+# dir.  The euid gate matters: TikuBench's root runs demote make to the user
+# via `sudo -u <user>`, and that inner sudo RE-SETS SUDO_USER=root -- an
+# unconditional prefix would then aim at /root/.nrfutil, unreadable by the
+# user (EACCES).  Demoted make has the right HOME already; leave it alone.
+NRFUTIL ?= $(shell command -v nrfutil 2>/dev/null || echo $(CURDIR)/temp/nrfutil)
+NRFUTIL_ENV = $(if $(and $(SUDO_USER),$(filter 0,$(shell id -u))),NRFUTIL_HOME=$(shell getent passwd $(SUDO_USER) | cut -d: -f6)/.nrfutil,)
+NRF_SN  ?=
+NRF_SN_ARG = $(if $(strip $(NRF_SN)),--serial-number $(strip $(NRF_SN)),)
+
 ifeq ($(TIKU_PLATFORM),rp2350)
 
 # Pi Pico 2 W has two reasonable flash paths:
@@ -2149,7 +2525,7 @@ flash: all
 	@mkdir -p $(BUILD_DIR)
 	@printf 'device %s\nif %s\nspeed %s\nconnect\nloadbin %s %s\n$(JLINK_RUN_SEQ)\n' "$(JLINK_DEVICE)" "$(JLINK_IF)" "$(JLINK_SPEED)" "$(TARGET_BIN)" "$(AMBIQ_LOAD_ADDR)" > $(JLINK_FLASH_SCRIPT)
 	@echo "Flashing $(TARGET_BIN) -> MRAM $(AMBIQ_LOAD_ADDR) via $(JLINK) ($(JLINK_DEVICE))..."
-	$(JLINK) -CommanderScript $(JLINK_FLASH_SCRIPT)
+	$(JLINK) $(JLINK_SN_ARG) -CommanderScript $(JLINK_FLASH_SCRIPT)
 
 run: flash
 
@@ -2163,7 +2539,70 @@ erase:
 	@mkdir -p $(BUILD_DIR)
 	@printf 'device %s\nif %s\nspeed %s\nconnect\nerase\nr\nq\n' "$(JLINK_DEVICE)" "$(JLINK_IF)" "$(JLINK_SPEED)" > $(JLINK_ERASE_SCRIPT)
 	@echo "Erasing MRAM via $(JLINK) ($(JLINK_DEVICE))..."
-	$(JLINK) -CommanderScript $(JLINK_ERASE_SCRIPT)
+	$(JLINK) $(JLINK_SN_ARG) -CommanderScript $(JLINK_ERASE_SCRIPT)
+
+else ifeq ($(TIKU_PLATFORM),nordic)
+
+# nRF54L15-DK flash: two backends, both driving the on-board SEGGER J-Link.
+#   NRF_FLASH=jlink    JLinkExe `loadfile main.hex` into RRAM -- universal
+#                      (any J-Link; needs J-Link SW >= 8.10f), no extra tooling,
+#                      the same recipe the Ambiq EVBs use.
+#   NRF_FLASH=nrfutil  Nordic's nrfutil -- adds the Nordic-only extras
+#                      (APPROTECT --recover, UICR/FICR, DFU/MCUboot packaging).
+#   NRF_FLASH=auto     [default] nrfutil when it is installed, else J-Link, so
+#                      `make flash MCU=nrf54l15` just works on any host.
+# Probe serial: JLINK_SN or NRF_SN (either) picks one DK on a multi-probe rig.
+# J-Link device string is only consulted on the NRF_FLASH=jlink path; the
+# default auto/nrfutil path targets --core Application and needs no device name.
+ifeq ($(MCU),nrf54lm20a)
+JLINK_DEVICE_NORDIC ?= nRF54LM20A_M33
+else ifeq ($(MCU),nrf54lm20b)
+JLINK_DEVICE_NORDIC ?= nRF54LM20B_M33
+else
+JLINK_DEVICE_NORDIC ?= nRF54L15_M33
+endif
+JLINK_FLASH_SCRIPT   = $(BUILD_DIR)/flash.jlink
+JLINK_ERASE_SCRIPT   = $(BUILD_DIR)/erase.jlink
+_NRF_SN          := $(strip $(if $(strip $(JLINK_SN)),$(JLINK_SN),$(NRF_SN)))
+NRF_JLINK_SN_ARG := $(if $(_NRF_SN),-SelectEmuBySN $(_NRF_SN),)
+NRF_FLASH ?= auto
+ifeq ($(NRF_FLASH),auto)
+NRF_HAVE_NRFUTIL   := $(shell { command -v nrfutil >/dev/null 2>&1 || [ -x "$(CURDIR)/temp/nrfutil" ]; } && echo 1)
+NRF_FLASH_RESOLVED := $(if $(NRF_HAVE_NRFUTIL),nrfutil,jlink)
+else
+NRF_FLASH_RESOLVED := $(NRF_FLASH)
+endif
+
+flash: all
+	@echo "nRF54L15 flash backend: $(NRF_FLASH_RESOLVED)  (override with NRF_FLASH=jlink|nrfutil)"
+ifeq ($(NRF_FLASH_RESOLVED),jlink)
+	@mkdir -p $(BUILD_DIR)
+	@printf 'device %s\nif %s\nspeed %s\nconnect\nloadfile %s\nr\ng\nqc\n' "$(JLINK_DEVICE_NORDIC)" "$(JLINK_IF)" "$(JLINK_SPEED)" "$(TARGET_HEX)" > $(JLINK_FLASH_SCRIPT)
+	@echo "Flashing $(TARGET_HEX) -> RRAM via $(JLINK) ($(JLINK_DEVICE_NORDIC))..."
+	$(JLINK) $(NRF_JLINK_SN_ARG) -CommanderScript $(JLINK_FLASH_SCRIPT)
+else
+	@echo "Flashing $(TARGET_HEX) via nrfutil ($(NRFUTIL))..."
+	$(NRFUTIL_ENV) $(NRFUTIL) device program --firmware $(TARGET_HEX) --core Application \
+		--options chip_erase_mode=ERASE_ALL,reset=RESET_SYSTEM $(NRF_SN_ARG)
+endif
+
+run: flash
+
+debug: all
+	@echo "nRF54L15 debug -- pick a backend:"
+	@echo "  [J-Link]  $(JLINK_GDB) -device $(JLINK_DEVICE_NORDIC) -if $(JLINK_IF) -speed $(JLINK_SPEED)"
+	@echo "            $(GDB) main.elf -ex 'target remote :2331' -ex load -ex 'monitor reset' -ex continue"
+	@echo "  [nrfutil] $(NRFUTIL) device cpu-register-read --register PC $(NRF_SN_ARG)"
+
+erase:
+ifeq ($(NRF_FLASH_RESOLVED),jlink)
+	@mkdir -p $(BUILD_DIR)
+	@printf 'device %s\nif %s\nspeed %s\nconnect\nerase\nr\nqc\n' "$(JLINK_DEVICE_NORDIC)" "$(JLINK_IF)" "$(JLINK_SPEED)" > $(JLINK_ERASE_SCRIPT)
+	@echo "Erasing RRAM via $(JLINK) ($(JLINK_DEVICE_NORDIC))..."
+	$(JLINK) $(NRF_JLINK_SN_ARG) -CommanderScript $(JLINK_ERASE_SCRIPT)
+else
+	$(NRFUTIL_ENV) $(NRFUTIL) device erase --core Application $(NRF_SN_ARG)
+endif
 
 else
 

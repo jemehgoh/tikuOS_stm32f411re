@@ -53,18 +53,6 @@
  * live kernel/driver state and never touch FRAM, so the hot path
  * stays MPU-free.
  *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at:
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- *
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -106,6 +94,17 @@
 #define PROC_BT_ENABLED 0
 #endif
 
+/*
+ * The /proc/threads summary is present only when worker threads are compiled
+ * in; it renders one line per worker slot (state, cycles, switches).
+ */
+#if defined(TIKU_THREADS_ENABLE) && TIKU_THREADS_ENABLE
+#define PROC_THREADS_ENABLED 1
+#include <kernel/threads/tiku_thread.h>
+#else
+#define PROC_THREADS_ENABLED 0
+#endif
+
 /*---------------------------------------------------------------------------*/
 /* CONSTANTS                                                                 */
 /*---------------------------------------------------------------------------*/
@@ -115,9 +114,9 @@
  *
  * Must equal the count of entries written by build_pid_files()
  * (name, state, pid, sram_used, fram_used, uptime, wake_count,
- * events) and the width of the pid_files[][] array below.
+ * events, restarts) and the width of the pid_files[][] array below.
  */
-#define PROC_FILES_PER_PID  8
+#define PROC_FILES_PER_PID  9
 
 /**
  * Maximum catalog entries that get their own VFS directory.
@@ -137,9 +136,16 @@
  * Static storage for the /proc VFS tree.  Every array here is
  * rebuilt from scratch by tiku_proc_vfs_get() on each call so the
  * tree reflects the current registry state.  Because the contents
- * change at runtime, the tables cannot be const; they live in the
- * .persistent (FRAM) section and are written only inside the
- * MPU-unlock window of tiku_proc_vfs_get().
+ * change at runtime, the tables cannot be const; they carry the
+ * TIKU_PERSIST_WARM grade and are written only inside the MPU-unlock
+ * window of tiku_proc_vfs_get().
+ *
+ * WARM, not durable `.persistent`: these tables are REBUILT on every
+ * tiku_proc_vfs_get() call, so power-cycle durability buys nothing.
+ * On MSP430 WARM is FRAM anyway (big tables stay off the tiny SRAM,
+ * and the FRAM writes still need the MPU unlock).  On RP2350/Ambiq
+ * WARM sits outside the NVM mirror — ~3.6 KB of rebuilt scratch was
+ * overflowing RP2350's 4 KB flash backup sector as durable state.
  *
  * Layout (a fully populated example):
  *   proc_root ("proc", DIR)
@@ -154,10 +160,10 @@
  *
  * pid_files[pid][0..PROC_FILES_PER_PID-1] holds the name/state/pid/
  * ... file nodes for process slot pid; build_pid_files() fills one
- * row.  In the .persistent (FRAM) section, so writes require the MPU
- * unlock held during the rebuild.
+ * row.  WARM grade (see the section comment above), so writes require
+ * the MPU unlock held during the rebuild on MSP430 only.
  */
-static tiku_vfs_node_t __attribute__((section(".persistent")))
+static TIKU_PERSIST_WARM tiku_vfs_node_t
     pid_files[TIKU_PROCESS_MAX][PROC_FILES_PER_PID];
 
 /**
@@ -172,21 +178,19 @@ static tiku_vfs_node_t __attribute__((section(".persistent")))
  * dedicated fixed slot, which is safe because bt and the pid dirs
  * never collectively exceed the array bound.
  */
-#if PROC_WIFI_ENABLED
-#  define PROC_FIXED_KIDS 4   /* count + queue + catalog + wifi */
-#else
-#  define PROC_FIXED_KIDS 3   /* count + queue + catalog */
-#endif
+/* count + queue + catalog, plus one slot per compiled-in optional subtree. */
+#define PROC_FIXED_KIDS \
+    (3 + PROC_WIFI_ENABLED + PROC_BT_ENABLED + PROC_THREADS_ENABLED)
 
 /**
  * Child-node table for the top-level /proc directory.
  *
  * Holds the fixed entries (count, queue, catalog, optional wifi/bt)
  * followed by up to one directory per registered process.  Sized for
- * the worst case (all pid slots used plus every fixed entry).  FRAM
- * (.persistent); rewritten on each tiku_proc_vfs_get() call.
+ * the worst case (all pid slots used plus every fixed entry).  WARM
+ * grade; rewritten on each tiku_proc_vfs_get() call.
  */
-static tiku_vfs_node_t __attribute__((section(".persistent")))
+static TIKU_PERSIST_WARM tiku_vfs_node_t
     proc_children[TIKU_PROCESS_MAX + PROC_FIXED_KIDS];
 
 /**
@@ -205,9 +209,9 @@ static const char * const pid_names[] = {
  *
  * Stamped at the end of tiku_proc_vfs_get() to point at
  * proc_children[] with the freshly computed child count; its address
- * is what the caller receives.  FRAM (.persistent).
+ * is what the caller receives.  WARM grade.
  */
-static tiku_vfs_node_t __attribute__((section(".persistent")))
+static TIKU_PERSIST_WARM tiku_vfs_node_t
     proc_root;
 
 /*---------------------------------------------------------------------------*/
@@ -369,12 +373,25 @@ static tiku_vfs_node_t __attribute__((section(".persistent")))
         return snprintf(buf, max, "%u\n", cnt);                             \
     }
 
+/*
+ * Generate proc_read_restart_<idx>(): backs /proc/<idx>/restarts -- how many
+ * times supervision has restarted this process (tiku_process_restarts).  "0"
+ * when the slot is empty or the process is unsupervised.
+ */
+#define PROC_READ_RESTART(idx)                                              \
+    static int proc_read_restart_##idx(char *buf, size_t max)               \
+    {                                                                       \
+        struct tiku_process *p = tiku_process_get(idx);                     \
+        if (p == NULL) { return snprintf(buf, max, "0\n"); }               \
+        return snprintf(buf, max, "%u\n", tiku_process_restarts(p));        \
+    }
+
 /**
- * Emit the full set of eight per-pid read handlers for slot idx.
+ * Emit the full set of nine per-pid read handlers for slot idx.
  *
- * Expanded once per pid (0..TIKU_PROCESS_MAX-1) below; each expansion
- * defines proc_read_{name,state,pid,sram,fram,uptime,wake,events}_idx
- * via the generators above.
+ * Expanded once per pid (0..TIKU_PROCESS_MAX-1) below; each expansion defines
+ * proc_read_{name,state,pid,sram,fram,uptime,wake,events,restart}_idx via the
+ * generators above.
  */
 #define PROC_READERS(idx)                                                   \
     PROC_READ_NAME(idx)                                                     \
@@ -384,7 +401,8 @@ static tiku_vfs_node_t __attribute__((section(".persistent")))
     PROC_READ_FRAM(idx)                                                     \
     PROC_READ_UPTIME(idx)                                                   \
     PROC_READ_WAKE(idx)                                                     \
-    PROC_READ_EVENTS(idx)
+    PROC_READ_EVENTS(idx)                                                   \
+    PROC_READ_RESTART(idx)
 
 /* Generate reader functions for all 8 pid slots (TIKU_PROCESS_MAX) */
 PROC_READERS(0)
@@ -413,6 +431,7 @@ typedef struct {
     tiku_vfs_read_fn uptime;
     tiku_vfs_read_fn wake;
     tiku_vfs_read_fn events;
+    tiku_vfs_read_fn restart;
 } proc_readers_t;
 
 /**
@@ -429,7 +448,8 @@ typedef struct {
     proc_read_fram_##idx,                                                   \
     proc_read_uptime_##idx,                                                 \
     proc_read_wake_##idx,                                                   \
-    proc_read_events_##idx                                                  \
+    proc_read_events_##idx,                                                 \
+    proc_read_restart_##idx                                                 \
 }
 
 /**
@@ -928,20 +948,20 @@ static const tiku_vfs_read_fn catalog_name_readers[PROC_CATALOG_VFS_MAX] = {
  *
  * catalog_entry_files[i][0] is the "name" node for catalog directory
  * i; the inner dimension is 1 because each catalog entry currently
- * exposes only its name.  FRAM (.persistent); written inside the
+ * exposes only its name.  WARM grade; written inside the
  * tiku_proc_vfs_get() unlock window.
  */
-static tiku_vfs_node_t __attribute__((section(".persistent")))
+static TIKU_PERSIST_WARM tiku_vfs_node_t
     catalog_entry_files[PROC_CATALOG_VFS_MAX][1];
 
 /**
  * Child-node table for the /proc/catalog directory.
  *
  * Slot 0 is the "count" file; the remaining slots hold one directory
- * per populated catalog entry.  FRAM (.persistent); rebuilt on each
+ * per populated catalog entry.  WARM grade; rebuilt on each
  * tiku_proc_vfs_get() call.
  */
-static tiku_vfs_node_t __attribute__((section(".persistent")))
+static TIKU_PERSIST_WARM tiku_vfs_node_t
     catalog_children[1 + PROC_CATALOG_VFS_MAX];
 
 /* Catalog entry directory names are reused from pid_names[] above. */
@@ -966,6 +986,37 @@ static tiku_vfs_node_t __attribute__((section(".persistent")))
  *
  * @param idx  Process slot index (0..TIKU_PROCESS_MAX-1)
  */
+#if PROC_THREADS_ENABLED
+/*
+ * /proc/threads -- one line per worker slot that has ever been used:
+ *   <slot> <state> <cycles> <switches>
+ * state = unused|ready|run|done.  Renders from the worker registry via the
+ * thread introspection API; "none" when no slot has run.
+ */
+static int proc_threads_read(char *buf, size_t max)
+{
+    static const char *const st[4] = { "unused", "ready", "run", "done" };
+    uint8_t i, cnt = tiku_thread_count();
+    int n = 0;
+
+    for (i = 0; i < cnt; i++) {
+        tiku_thread_t *t = tiku_thread_get(i);
+        size_t room = ((size_t)n < max) ? (max - (size_t)n) : 0u;
+        if (t == (tiku_thread_t *)0) {
+            continue;
+        }
+        n += snprintf(buf + n, room, "%u %s %llu %u\n", (unsigned)i,
+                      st[(unsigned)tiku_thread_state(t) & 3u],
+                      (unsigned long long)tiku_thread_cycles(t),
+                      (unsigned)tiku_thread_switches(t));
+    }
+    if (n == 0) {
+        n = snprintf(buf, max, "none\n");
+    }
+    return n;
+}
+#endif /* PROC_THREADS_ENABLED */
+
 static void build_pid_files(uint8_t idx)
 {
     tiku_vfs_node_t *f = pid_files[idx];
@@ -986,6 +1037,8 @@ static void build_pid_files(uint8_t idx)
         "wake_count", TIKU_VFS_FILE, readers[idx].wake,   NULL, NULL, 0};
     f[7] = (tiku_vfs_node_t){
         "events",     TIKU_VFS_FILE, readers[idx].events, NULL, NULL, 0};
+    f[8] = (tiku_vfs_node_t){
+        "restarts",   TIKU_VFS_FILE, readers[idx].restart, NULL, NULL, 0};
 }
 
 /*---------------------------------------------------------------------------*/
@@ -1091,6 +1144,13 @@ const tiku_vfs_node_t *tiku_proc_vfs_get(void)
     proc_children[child_idx++] = (tiku_vfs_node_t){
         "bt", TIKU_VFS_DIR, NULL, NULL, proc_bt_children,
         sizeof(proc_bt_children) / sizeof(proc_bt_children[0])
+    };
+#endif
+
+#if PROC_THREADS_ENABLED
+    /* /proc/threads -- worker-thread summary (state, cycles, switches). */
+    proc_children[child_idx++] = (tiku_vfs_node_t){
+        "threads", TIKU_VFS_FILE, proc_threads_read, NULL, NULL, 0
     };
 #endif
 

@@ -1,5 +1,6 @@
 /*
- * Tiku Operating System
+ * Tiku Operating System v0.05
+ * Simple. Ubiquitous. Intelligence, Everywhere.
  * http://tiku-os.org
  *
  * Authors: Ambuj Varshney <ambuj@tiku-os.org>
@@ -14,18 +15,6 @@
  * status flags (basic_running, basic_pc, basic_error, AUTO state,
  * ON ERROR handler, EVERY / ON CHANGE registries, TRACE, DATA
  * cursor).
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at:
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
- * implied.  See the License for the specific language governing
- * permissions and limitations under the License.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -81,6 +70,42 @@ static int           basic_arena_ready;
  * basic_alloc_state(); used by basic_clear_vars(). */
 static tiku_mem_arch_size_t basic_arena_mark;
 static basic_line_t *prog;
+
+/* A3: derived line-number index -- prog[] indices sorted ascending by line
+ * number, so prog_find_exact / prog_next_index binary-search instead of
+ * linear-scanning the whole table on every executed line.  prog[] itself is
+ * left UNSORTED (no change to prog_store / RENUM / the empty-slot invariant);
+ * the index is demand-rebuilt after any edit.  Behaviour is identical to the
+ * old linear scans -- purely a speedup. */
+static uint16_t     *basic_line_order;    /* [basic_line_count] valid entries  */
+static uint16_t      basic_line_count;    /* number of active lines            */
+static int           basic_line_index_ok; /* 1 = index reflects current prog[] */
+
+/* A3 #2: SUB / label registry.  prog[] indices + name offsets, built in one
+ * walk on first lookup and invalidated together with the line index on any
+ * edit (PROG_INDEX_INVALIDATE).  CALL and labelled GOTO/GOSUB then compare
+ * against a handful of registered entries instead of scanning the whole
+ * line table per reference.  On table overflow the lookups fall back to the
+ * original linear scans -- correct, just slow. */
+#ifndef BASIC_SYMREG_MAX
+#define BASIC_SYMREG_MAX 32
+#endif
+typedef struct { uint16_t idx; uint8_t off; } basic_symref_t;
+static basic_symref_t basic_label_reg[BASIC_SYMREG_MAX];
+static uint8_t        basic_label_reg_n;
+static uint8_t        basic_label_reg_ovf;
+#if TIKU_BASIC_SUBS_ENABLE
+static basic_symref_t basic_sub_reg[BASIC_SYMREG_MAX];
+static uint8_t        basic_sub_reg_n;
+static uint8_t        basic_sub_reg_ovf;
+#endif
+static int            basic_symreg_ok;
+
+/* A3 #3: most-recently-used named-variable slot per table (0 = numeric,
+ * 1 = string); -1 = none.  The common hot loop reuses one named variable,
+ * so this one-entry memo removes the linear rescan per reference. */
+static int8_t         basic_named_mru[2];
+
 static long         *basic_vars;
 static uint16_t     *gosub_stack;
 static uint8_t       gosub_sp;
@@ -123,6 +148,11 @@ static char (*basic_namedvar_names)[TIKU_BASIC_NAMEDVAR_LEN];
 static char (*basic_namedstrvar_names)[TIKU_BASIC_NAMEDVAR_LEN];
 #endif
 
+/* CONST NAME = expr (F4): 1 marks the numeric named-var slot (index = slot -
+ * 26) as read-only.  Reset each RUN by basic_clear_vars; serialized by the
+ * F1 checkpoint since v6, so RESUME restores enforcement. */
+static uint8_t basic_namedvar_const[TIKU_BASIC_NAMEDVAR_MAX];
+
 #if TIKU_BASIC_DEFN_ENABLE
 #ifndef TIKU_BASIC_DEFN_ARGS
 #define TIKU_BASIC_DEFN_ARGS 4
@@ -134,6 +164,58 @@ typedef struct {
     char    body[TIKU_BASIC_DEFN_BODY];
 } basic_defn_t;
 static basic_defn_t *basic_defns;
+#endif
+
+/* SUB call frames + the LOCAL restore stack.  Declared here -- ahead of
+ * tiku_basic_ckpt.inl -- so the F1 checkpoint can serialize them; the SUB/CALL
+ * logic that drives them lives in tiku_basic_subs.inl (included later). */
+#if TIKU_BASIC_SUBS_ENABLE
+#ifndef TIKU_BASIC_CALL_DEPTH
+#define TIKU_BASIC_CALL_DEPTH  8
+#endif
+#ifndef TIKU_BASIC_SCOPE_MAX
+#define TIKU_BASIC_SCOPE_MAX   32      /* total saved params+locals, all frames */
+#endif
+/* One saved variable slot for a SUB param / LOCAL.  is_str selects which
+ * array the slot belongs to: numeric slots restore `old` into basic_vars,
+ * string slots restore `old_str` into basic_strvars.  old_str points INTO
+ * basic_str_heap, so it is (a) an A4 compaction root -- a caller's shadowed
+ * string is reachable only through here -- and (b) serialized as a heap
+ * offset by the F1 checkpoint (a raw pointer would not survive a power cut). */
+typedef struct {
+    uint16_t idx;
+    uint8_t  is_str;
+    long     old;         /* numeric saved value   (is_str == 0) */
+    char    *old_str;     /* string saved pointer   (is_str == 1), else NULL */
+} basic_scope_t;
+typedef struct { uint16_t ret_line; uint8_t scope_base; } basic_frame_t;
+static basic_scope_t basic_scope[TIKU_BASIC_SCOPE_MAX];
+static uint8_t       basic_scope_sp;
+static basic_frame_t basic_frames[TIKU_BASIC_CALL_DEPTH];
+static uint8_t       basic_call_sp;
+
+/* SUB return value (F3): a SUB sets it with the `RESULT expr` statement; the
+ * caller reads it as the bare `RESULT` numeric function after CALL.  Gives a
+ * scoped return without leaking through a global.  Reset each RUN. */
+static long          basic_sub_result;
+#endif
+
+#if TIKU_BASIC_EXT_MAX > 0
+/* Native builtin registry (tiku_basic_ext.h, Tier 2 of loadable.md).
+ * Boot-registered, deliberately OUTSIDE the arena and the F1 checkpoint --
+ * it is firmware configuration, not program state.  Names are uppercase and
+ * never in the A2 token table, so stored (crunched) lines reach them through
+ * match_kw's raw-text path at the dispatch fallthroughs. */
+typedef struct {
+    char    name[TIKU_BASIC_EXT_NAME_MAX];   /* "" = free slot */
+    uint8_t kind;                            /* 0 = statement, 1 = numeric fn */
+    uint8_t arity;                           /* numeric fns: 0..2 */
+    union {
+        tiku_basic_ext_stmt_fn stmt;
+        tiku_basic_ext_nfn     nfn;
+    } u;
+} basic_ext_entry_t;
+static basic_ext_entry_t basic_ext_tab[TIKU_BASIC_EXT_MAX];
 #endif
 
 #if TIKU_BASIC_ARRAYS_ENABLE
@@ -163,14 +245,14 @@ static long parse_array_index(const char **p,
 /* FRAM-BACKED PERSISTENT STATE                                              */
 /*---------------------------------------------------------------------------*/
 
-/* FRAM-backed persistent state. The saved-program buffer + the
- * persist-store metadata both live in the .persistent section so
- * they survive power cycles. tiku_persist_init() validates entries
- * via the magic number on every boot. */
-/* Default-slot persist store (non-Ambiq). On Ambiq the saved program lives in
- * the carved NVM region instead (durable MRAM; see basic_prog_store/fetch in
- * tiku_basic_persist.inl), so these are not built there. */
-#if !defined(PLATFORM_AMBIQ)
+/* Durable saved-program state, buffer-backed variant.  The save buffer + the
+ * persist-store metadata carry BASIC_NVM_PERSISTENT (.persistent FRAM on
+ * MSP430 -- durable; plain .bss on Nordic/host -- session-only);
+ * tiku_persist_init() validates entries via the magic number on every boot.
+ * Not built on the region-backed parts (Ambiq MRAM, RP2350 flash): there the
+ * saved program lives at a fixed offset in the carved NVM region's reserved
+ * tail instead -- see basic_prog_store/fetch in tiku_basic_persist.inl. */
+#if !BASIC_NVM_ON_REGION
 static BASIC_NVM_PERSISTENT uint8_t basic_save_buf[TIKU_BASIC_SAVE_BUF_BYTES];
 static BASIC_NVM_PERSISTENT tiku_persist_store_t basic_store;
 static uint8_t       basic_persist_ready;
@@ -192,12 +274,59 @@ static int          basic_pc_set;      /* 1 if exec_stmt explicitly set PC */
 static int          basic_error;
 static int          basic_quit;        /* 1 when BYE is typed */
 
+/* Shell-mode state (tiku_basic_mode.inl).  BASIC is a non-blocking MODE of the
+ * shell process rather than a blocking takeover: basic_mode_on is 1 while the
+ * shell is in BASIC mode, basic_mode_interactive distinguishes the REPL
+ * (`basic`, shows a prompt) from a headless run (`basic run`, no prompt).
+ * Declared here (early) so process_line's RUN handler can test basic_mode_on;
+ * the mode functions themselves live in tiku_basic_mode.inl. */
+static uint8_t      basic_mode_on;
+static uint8_t      basic_mode_interactive;
+
+/* F1 checkpoint arming (tiku_basic_ckpt.inl).  1 while PERSIST is ON: the run
+ * loop checkpoints the reified execution state at each yield boundary so RUN
+ * RESUME can continue mid-loop across a reset / power cut.  Declared here (with
+ * the other run-scope flags) so the dispatcher, the run loop, and the mode
+ * driver can all see it; the checkpoint engine itself is in tiku_basic_ckpt.inl.
+ * A per-boot SRAM flag -- reset on power-up, then re-armed by RUN RESUME (which
+ * restores it from the checkpoint) or a fresh PERSIST ON. */
+static uint8_t      basic_ckpt_armed;
+
 /* AUTO line-numbering at the REPL: when active, the REPL prompt
  * prepends `next` and increments by `step` after each line. Disable
  * with `AUTO OFF` or by typing a blank line. */
 static uint16_t     basic_auto_next;
 static uint16_t     basic_auto_step;
 static int          basic_auto_active;
+
+/* Yielding wait (mode DELAY / SLEEP).  A blocking in-statement spin starves
+ * the entire shell event loop for its duration -- rules, watch, and BASIC's
+ * own event-armed ON CHANGE all stall (found in the LM20 F2 HITL).  In shell
+ * mode, exec_delay/exec_sleep instead record a deadline here and PARK the
+ * step machine: basic_run_step returns RUNNING without executing until the
+ * deadline passes, then resumes the interrupted line at basic_wait_off.
+ * Semantics match the blocking wait exactly (the line's remaining
+ * statements run after the pause; reactive polls stay suppressed during it)
+ * -- but the shell loop breathes, so queued events dispatch and pending
+ * ON CHANGE marks fire at the first post-wait statement boundary.
+ * basic_wait_sleep_s chunks long SLEEPs below the tick counter's wrap.
+ * Only the MAIN line walker yields (basic_stmt_depth == 1): DELAY inside an
+ * IF-THEN scratch or an EVERY body keeps the old blocking behaviour, since
+ * their transient buffers cannot be resumed across ticks. */
+/* 1 while the RUN loop is driven as a non-blocking shell mode
+ * (tiku_basic_mode_*), 0 for the synchronous exec_run path.  When set,
+ * basic_run_step() skips its inline Ctrl-C poll (the shell loop routes
+ * keystrokes) and DELAY/SLEEP park instead of spinning. */
+static uint8_t           basic_run_shell_mode;
+
+static uint8_t           basic_wait_pending;
+static tiku_clock_time_t basic_wait_start;
+static tiku_clock_time_t basic_wait_ticks;
+static uint16_t          basic_wait_line;    /* line to resume             */
+static uint16_t          basic_wait_off;     /* byte offset into its text  */
+static long              basic_wait_sleep_s; /* SLEEP: remaining seconds   */
+static uint8_t           basic_stmt_depth;   /* exec_stmts nesting         */
+static uint8_t           basic_in_reactive;  /* inside basic_poll_reactive */
 
 /* ON ERROR GOTO N: when an error fires during RUN, jump to N
  * instead of aborting. 0 = handler disabled (default behaviour).
@@ -216,6 +345,92 @@ static uint16_t     basic_err_pc;
 static int          basic_errcat;
 static int          basic_err;
 static uint16_t     basic_erl;
+
+/*---------------------------------------------------------------------------*/
+/* CENTRALIZED ERROR THROW (A5)                                              */
+/*                                                                           */
+/* Every interpreter error funnels through basic_throw() / basic_throwf():   */
+/* set basic_error + basic_errcat, then emit the message through a swappable  */
+/* sink.  The default sink is the shell console (red "? msg").  An embedder   */
+/* installs its own via tiku_basic_set_error_sink() to capture errors into a  */
+/* buffer and run BASIC completely HEADLESS -- no shell/UART required.  This  */
+/* is the single seam the agent/library direction needs; it also makes ERR /  */
+/* ERL categories consistent, since the category is now supplied at the one   */
+/* throw call instead of being set (or forgotten) ad hoc per site.           */
+/*---------------------------------------------------------------------------*/
+
+/* Sink (tiku_basic_error_sink_t, declared in tiku_basic.h) receives the
+ * category + the bare message (no color, no "? " prefix, no newline).
+ * NULL => the default console sink below. */
+static tiku_basic_error_sink_t basic_error_sink;
+
+void
+tiku_basic_set_error_sink(tiku_basic_error_sink_t sink)
+{
+    basic_error_sink = sink;
+}
+
+static void
+basic_emit_error(int cat, const char *msg)
+{
+    if (basic_error_sink != NULL) {
+        basic_error_sink(cat, msg);
+    } else {
+        SHELL_PRINTF(SH_RED "? %s\n" SH_RST, msg);
+    }
+    (void)cat;
+}
+
+/* Throw with a fixed message. */
+static void
+basic_throw(int cat, const char *msg)
+{
+    basic_error  = 1;
+    basic_errcat = cat;
+    basic_emit_error(cat, msg);
+}
+
+/* Throw with a printf-style message (for the handful of sites that splice in
+ * a name/path/number).  Formats into a transient buffer so the sink still
+ * sees fully-rendered text in headless mode. */
+#if defined(__GNUC__)
+__attribute__((format(printf, 2, 3)))
+#endif
+static void
+basic_throwf(int cat, const char *fmt, ...)
+{
+    char    buf[96];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(buf, sizeof(buf), fmt, ap);
+    va_end(ap);
+    basic_throw(cat, buf);
+}
+
+/* Emit a message through the same sink WITHOUT flagging a runtime error --
+ * for REPL / command-level notices (bad line number, save failed, "no
+ * program", ...) that are not interpreter throws but must still honor a
+ * headless sink so nothing writes red to the console behind its back.  The
+ * invariant this preserves: basic_emit_error is the ONLY console error writer. */
+static void
+basic_report(int cat, const char *msg)
+{
+    basic_emit_error(cat, msg);
+}
+
+#if defined(__GNUC__)
+__attribute__((format(printf, 2, 3)))
+#endif
+static void
+basic_reportf(int cat, const char *fmt, ...)
+{
+    char    buf[96];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(buf, sizeof(buf), fmt, ap);
+    va_end(ap);
+    basic_emit_error(cat, buf);
+}
 
 /* EVERY ms : stmt -- recurring scheduled statement. Polled by the
  * RUN loop between program lines. Up to TIKU_BASIC_EVERY_MAX active
@@ -241,12 +456,36 @@ static basic_every_t *basic_everys;
 #ifndef TIKU_BASIC_ONCHG_MAX
 #define TIKU_BASIC_ONCHG_MAX        4
 #endif
+
+/* F2: make ON CHANGE on WRITABLE nodes event-driven via tiku_vfs_watch instead
+ * of polling VFSREAD every tick -- exact (no missed fast transitions) and
+ * cheaper.  Needs the real kernel VFS watch API + the shell process's event
+ * queue, so it is ON for the real platforms and OFF on the host test harness
+ * (which has neither).  -D-overridable. */
+#ifndef TIKU_BASIC_ONCHG_EVENT
+#  if TIKU_BASIC_ONCHG_MAX > 0 && (defined(PLATFORM_MSP430) ||                 \
+       defined(PLATFORM_RP2350) || defined(PLATFORM_AMBIQ) ||                  \
+       defined(PLATFORM_NORDIC))
+#    define TIKU_BASIC_ONCHG_EVENT   1
+#  else
+#    define TIKU_BASIC_ONCHG_EVENT   0
+#  endif
+#endif
+
 typedef struct {
     char     path[40];
     long     last_value;
     uint16_t handler_line;
     uint8_t  is_gosub;
     uint8_t  active;
+#if TIKU_BASIC_ONCHG_EVENT
+    /* Cached resolved node.  Non-NULL with a write handler => event-armed
+     * (watched; the poll tick only re-checks it when an event marks it
+     * pending).  NULL / read-only => polled every tick as before. */
+    const tiku_vfs_node_t *node;
+    uint8_t                armed;      /* 1 = subscribed via tiku_vfs_watch  */
+    uint8_t                pending;    /* 1 = an event arrived, re-check due  */
+#endif
 } basic_onchg_t;
 static basic_onchg_t *basic_onchgs;
 

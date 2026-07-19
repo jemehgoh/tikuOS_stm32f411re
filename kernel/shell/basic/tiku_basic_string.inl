@@ -1,5 +1,6 @@
 /*
- * Tiku Operating System
+ * Tiku Operating System v0.05
+ * Simple. Ubiquitous. Intelligence, Everywhere.
  * http://tiku-os.org
  *
  * Authors: Ambuj Varshney <ambuj@tiku-os.org>
@@ -25,18 +26,6 @@
  * tiku_basic_expr.inl, VFSREAD glue in tiku_basic_stmt.inl) so we
  * can call them from string expressions without reordering the
  * whole include list.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at:
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
- * implied.  See the License for the specific language governing
- * permissions and limitations under the License.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -76,17 +65,129 @@ static int basic_net_mqtt_wait(const char *ipstr, const char *topic,
 
 #if TIKU_BASIC_STRVARS_ENABLE
 
-/* Bump-allocate a NUL-terminated copy of @src[0..len). Returns NULL
- * on overflow. The heap is reset at every RUN start, so a single
- * program run is bounded by TIKU_BASIC_STR_HEAP_BYTES of cumulative
- * allocation -- no GC, no reclamation of old assignments. */
+/*---------------------------------------------------------------------------*/
+/* STRING-HEAP MARK-COMPACT (A4)                                             */
+/*---------------------------------------------------------------------------*/
+/*
+ * The heap bump-allocates and never frees a string mid-RUN, so the reassigning
+ * idiom -- `10 A$ = STR$(N) : N = N+1 : GOTO 10` -- leaks the old copy on every
+ * pass and dies with `? out of string heap`.  That is exactly the always-on
+ * agent-loop workload F1 exists to keep running across a power cut, so it must
+ * not die on the string heap first.
+ *
+ * A mark-compact fixes it.  The live roots are FULLY ENUMERABLE -- the scalar
+ * string vars A$..Z$ + the named slots (basic_strvars[]) and every string-array
+ * element -- and strings are leaf data (no cycles), so this is the whole story:
+ * no tracing, no marks in the heap.  Assignment always allocates a fresh copy
+ * (RHS is evaluated into a stack buffer first) and SWAP only exchanges two root
+ * pointers, so each live heap string has EXACTLY ONE root -- no aliasing to
+ * dedup.  We slide the live strings down in address order, rewriting each root
+ * to its new home, and reclaim everything in between.
+ */
+
+/**
+ * @brief Lowest-addressed live-string root at or above @p from, or NULL.
+ *
+ * Scans the complete root set (scalar string vars + string-array elements).
+ * Repeated calls with @p from advanced past each moved string walk the live
+ * strings in ascending heap-address order without a temp array (compaction is
+ * a rare heap-full event, so the O(roots) per step is fine).
+ */
+static char **
+basic_str_lowest_root(char *from)
+{
+    char    *hi   = basic_str_heap + TIKU_BASIC_STR_HEAP_BYTES;
+    char   **best = NULL;
+    char    *best_addr = hi;
+    uint16_t i;
+
+    for (i = 0; i < BASIC_VAR_TABLE_LEN; i++) {
+        char *v = basic_strvars[i];
+        if (v != NULL && v >= from && v < best_addr) {
+            best = &basic_strvars[i];
+            best_addr = v;
+        }
+    }
+#if TIKU_BASIC_ARRAYS_ENABLE
+    for (i = 0; i < 26u; i++) {
+        basic_array_t *a = &basic_str_arrays[i];
+        char         **el;
+        size_t         n, k;
+        if (a->data == NULL) {
+            continue;
+        }
+        el = (char **)a->data;
+        n  = (size_t)a->dim1 * (size_t)(a->dim2 ? a->dim2 : 1u);
+        for (k = 0; k < n; k++) {
+            char *v = el[k];
+            if (v != NULL && v >= from && v < best_addr) {
+                best = &el[k];
+                best_addr = v;
+            }
+        }
+    }
+#endif
+#if TIKU_BASIC_SUBS_ENABLE
+    /* SUB param / LOCAL saved strings (F3): a caller's shadowed string is
+     * reachable only through the scope stack, so it is a live root the
+     * compactor must relocate too. */
+    for (i = 0; i < basic_scope_sp; i++) {
+        if (basic_scope[i].is_str) {
+            char *v = basic_scope[i].old_str;
+            if (v != NULL && v >= from && v < best_addr) {
+                best = &basic_scope[i].old_str;
+                best_addr = v;
+            }
+        }
+    }
+#endif
+    return best;
+}
+
+/**
+ * @brief Reclaim dead strings: slide every live string down to fill the gaps
+ *        left by reassigned/overwritten allocations, rewriting the roots.
+ *
+ * After this, basic_str_heap_pos is the compacted high-water and [0, pos) holds
+ * exactly the live strings, packed.  Strings move only DOWN and are processed
+ * in ascending address order, so a live string never overlaps a not-yet-moved
+ * one (memmove is used regardless).
+ */
+static void
+basic_str_compact(void)
+{
+    uint16_t write_pos = 0;
+    char   **root;
+
+    while ((root = basic_str_lowest_root(basic_str_heap + write_pos)) != NULL) {
+        char  *s   = *root;
+        size_t len = strlen(s) + 1u;             /* incl. NUL */
+        char  *dst = basic_str_heap + write_pos;
+        if (dst != s) {
+            memmove(dst, s, len);
+            *root = dst;
+        }
+        write_pos = (uint16_t)(write_pos + len);
+    }
+    basic_str_heap_pos = write_pos;
+}
+
+/* Bump-allocate a NUL-terminated copy of @src[0..len).  On a full heap it
+ * reclaims dead strings via a mark-compact and retries once; returns NULL only
+ * when the LIVE strings genuinely leave no room.  @src is always a caller stack
+ * buffer (the RHS is evaluated before allocation), never a heap pointer, so a
+ * compaction that relocates heap strings cannot invalidate it. */
 static char *
 basic_str_alloc(const char *src, size_t len)
 {
     char *dst;
     if ((size_t)basic_str_heap_pos + len + 1u >
         (size_t)TIKU_BASIC_STR_HEAP_BYTES) {
-        return NULL;
+        basic_str_compact();                     /* reclaim + retry once */
+        if ((size_t)basic_str_heap_pos + len + 1u >
+            (size_t)TIKU_BASIC_STR_HEAP_BYTES) {
+            return NULL;                          /* live strings fill the heap */
+        }
     }
     dst = basic_str_heap + basic_str_heap_pos;
     if (len > 0u) memcpy(dst, src, len);
@@ -104,6 +205,14 @@ peek_string_expr(const char *p)
 {
     while (*p == ' ' || *p == '\t') p++;
     if (*p == '"') return 1;
+    /* A2: a crunched string-function token (spelling ends in '$'). */
+    {
+        uint8_t b = (uint8_t)*p;
+        if (b >= BASIC_TOK_BASE && b < BASIC_TOK_BASE + BASIC_TOK_N) {
+            const char *s = basic_tok_tab[b - BASIC_TOK_BASE];
+            return s[strlen(s) - 1u] == '$';
+        }
+    }
     /* A$..Z$ -- single letter then `$`, then a non-word char. */
     if (is_alpha(*p) && *(p + 1) == '$' && !is_word_cont(*(p + 2))) {
         return 1;
@@ -142,8 +251,7 @@ parse_str_ref(const char **p, const char **op, size_t *olen,
         n = parse_expr(p);
         if (basic_error) return -1;
         if (n < 0 || n >= TIKU_BASIC_BIGBUF_COUNT || basic_bigbuf[n] == NULL) {
-            basic_error = 1;
-            SHELL_PRINTF(SH_RED "? bad #buffer\n" SH_RST);
+            basic_throw(TIKU_BASIC_ERR_SYNTAX, "bad #buffer");
             return -1;
         }
         *op = basic_bigbuf[n];
@@ -303,8 +411,7 @@ parse_strprim(const char **p, char *out, size_t cap)
                 (*p)++;
             }
             if (n + 1u >= cap) {
-                basic_error = 1;
-                SHELL_PRINTF(SH_RED "? string too long\n" SH_RST);
+                basic_throw(TIKU_BASIC_ERR_GENERAL, "string too long");
                 return -1;
             }
             out[n++] = ch;
@@ -330,8 +437,7 @@ parse_strprim(const char **p, char *out, size_t cap)
         v = ((char **)basic_str_arrays[idx].data)[off];
         if (v == NULL) v = "";
         if (strlen(v) + 1u > cap) {
-            basic_error = 1;
-            SHELL_PRINTF(SH_RED "? string too long\n" SH_RST);
+            basic_throw(TIKU_BASIC_ERR_GENERAL, "string too long");
             return -1;
         }
         strcpy(out, v);
@@ -352,7 +458,7 @@ parse_strprim(const char **p, char *out, size_t cap)
         (*p)++;
         if (parse_strexpr(p, src, sizeof(src)) != 0) return -1;
         skip_ws(p);
-        if (**p != ',') { basic_error = 1; SHELL_PRINTF(SH_RED "? ',' expected\n" SH_RST); return -1; }
+        if (**p != ',') { basic_throw(TIKU_BASIC_ERR_SYNTAX, "',' expected"); return -1; }
         (*p)++;
         n = parse_expr(p);
         if (basic_error) return -1;
@@ -364,8 +470,7 @@ parse_strprim(const char **p, char *out, size_t cap)
             size_t srclen = strlen(src);
             if ((size_t)n > srclen) n = (long)srclen;
             if ((size_t)n + 1u > cap) {
-                basic_error = 1;
-                SHELL_PRINTF(SH_RED "? string too long\n" SH_RST);
+                basic_throw(TIKU_BASIC_ERR_GENERAL, "string too long");
                 return -1;
             }
             memcpy(out, src, (size_t)n);
@@ -382,7 +487,7 @@ parse_strprim(const char **p, char *out, size_t cap)
         (*p)++;
         if (parse_strexpr(p, src, sizeof(src)) != 0) return -1;
         skip_ws(p);
-        if (**p != ',') { basic_error = 1; SHELL_PRINTF(SH_RED "? ',' expected\n" SH_RST); return -1; }
+        if (**p != ',') { basic_throw(TIKU_BASIC_ERR_SYNTAX, "',' expected"); return -1; }
         (*p)++;
         n = parse_expr(p);
         if (basic_error) return -1;
@@ -394,8 +499,7 @@ parse_strprim(const char **p, char *out, size_t cap)
         if ((size_t)n > srclen) n = (long)srclen;
         start = srclen - (size_t)n;
         if ((size_t)n + 1u > cap) {
-            basic_error = 1;
-            SHELL_PRINTF(SH_RED "? string too long\n" SH_RST);
+            basic_throw(TIKU_BASIC_ERR_GENERAL, "string too long");
             return -1;
         }
         memcpy(out, src + start, (size_t)n);
@@ -411,7 +515,7 @@ parse_strprim(const char **p, char *out, size_t cap)
         (*p)++;
         if (parse_strexpr(p, src, sizeof(src)) != 0) return -1;
         skip_ws(p);
-        if (**p != ',') { basic_error = 1; SHELL_PRINTF(SH_RED "? ',' expected\n" SH_RST); return -1; }
+        if (**p != ',') { basic_throw(TIKU_BASIC_ERR_SYNTAX, "',' expected"); return -1; }
         (*p)++;
         start_1 = parse_expr(p);
         if (basic_error) return -1;
@@ -430,8 +534,7 @@ parse_strprim(const char **p, char *out, size_t cap)
         if (s0 > srclen) s0 = srclen;
         if (take < 0 || (size_t)take > srclen - s0) take = (long)(srclen - s0);
         if ((size_t)take + 1u > cap) {
-            basic_error = 1;
-            SHELL_PRINTF(SH_RED "? string too long\n" SH_RST);
+            basic_throw(TIKU_BASIC_ERR_GENERAL, "string too long");
             return -1;
         }
         memcpy(out, src + s0, (size_t)take);
@@ -457,8 +560,7 @@ parse_strprim(const char **p, char *out, size_t cap)
             (*p)++;
             n = strlen(src);
             if (n + 1u > cap) {
-                basic_error = 1;
-                SHELL_PRINTF(SH_RED "? string too long\n" SH_RST);
+                basic_throw(TIKU_BASIC_ERR_GENERAL, "string too long");
                 return -1;
             }
             for (i = 0; i < n; i++) {
@@ -490,8 +592,7 @@ parse_strprim(const char **p, char *out, size_t cap)
         while (b > a && (src[b - 1] == ' ' || src[b - 1] == '\t' ||
                          src[b - 1] == '\r' || src[b - 1] == '\n')) b--;
         if ((b - a) + 1u > cap) {
-            basic_error = 1;
-            SHELL_PRINTF(SH_RED "? string too long\n" SH_RST);
+            basic_throw(TIKU_BASIC_ERR_GENERAL, "string too long");
             return -1;
         }
         memcpy(out, src + a, b - a);
@@ -514,7 +615,7 @@ parse_strprim(const char **p, char *out, size_t cap)
         (*p)++;
         if (parse_strexpr(p, src, sizeof(src)) != 0) return -1;
         skip_ws(p);
-        if (**p != ',') { basic_error = 1; SHELL_PRINTF(SH_RED "? ',' expected\n" SH_RST); return -1; }
+        if (**p != ',') { basic_throw(TIKU_BASIC_ERR_SYNTAX, "',' expected"); return -1; }
         (*p)++;
         idx = parse_expr(p);
         if (basic_error) return -1;
@@ -542,8 +643,7 @@ parse_strprim(const char **p, char *out, size_t cap)
         }
         if (found && idx >= 1) {
             if (tlen + 1u > cap) {
-                basic_error = 1;
-                SHELL_PRINTF(SH_RED "? string too long\n" SH_RST);
+                basic_throw(TIKU_BASIC_ERR_GENERAL, "string too long");
                 return -1;
             }
             memcpy(out, src + tstart, tlen);
@@ -564,11 +664,11 @@ parse_strprim(const char **p, char *out, size_t cap)
         (*p)++;
         if (parse_strexpr(p, src, sizeof(src)) != 0) return -1;
         skip_ws(p);
-        if (**p != ',') { basic_error = 1; SHELL_PRINTF(SH_RED "? ',' expected\n" SH_RST); return -1; }
+        if (**p != ',') { basic_throw(TIKU_BASIC_ERR_SYNTAX, "',' expected"); return -1; }
         (*p)++;
         if (parse_strexpr(p, from, sizeof(from)) != 0) return -1;
         skip_ws(p);
-        if (**p != ',') { basic_error = 1; SHELL_PRINTF(SH_RED "? ',' expected\n" SH_RST); return -1; }
+        if (**p != ',') { basic_throw(TIKU_BASIC_ERR_SYNTAX, "',' expected"); return -1; }
         (*p)++;
         if (parse_strexpr(p, to, sizeof(to)) != 0) return -1;
         skip_ws(p);
@@ -578,15 +678,13 @@ parse_strprim(const char **p, char *out, size_t cap)
         while (i < srclen) {
             if (fl > 0 && i + fl <= srclen && memcmp(src + i, from, fl) == 0) {
                 if (o + tl + 1u > cap) {
-                    basic_error = 1;
-                    SHELL_PRINTF(SH_RED "? string too long\n" SH_RST);
+                    basic_throw(TIKU_BASIC_ERR_GENERAL, "string too long");
                     return -1;
                 }
                 memcpy(out + o, to, tl); o += tl; i += fl;
             } else {
                 if (o + 2u > cap) {
-                    basic_error = 1;
-                    SHELL_PRINTF(SH_RED "? string too long\n" SH_RST);
+                    basic_throw(TIKU_BASIC_ERR_GENERAL, "string too long");
                     return -1;
                 }
                 out[o++] = src[i++];
@@ -610,7 +708,7 @@ parse_strprim(const char **p, char *out, size_t cap)
         if (parse_str_ref(p, &S, &SL, src, sizeof(src)) != 0) return -1;
         skip_ws(p);
         if (**p != ',') {
-            basic_error = 1; SHELL_PRINTF(SH_RED "? ',' expected\n" SH_RST); return -1;
+            basic_throw(TIKU_BASIC_ERR_SYNTAX, "',' expected"); return -1;
         }
         (*p)++;
         idx = parse_expr(p);
@@ -630,7 +728,7 @@ parse_strprim(const char **p, char *out, size_t cap)
         if (!found) { out[0] = '\0'; return 0; }
         if (llen > 0 && S[lstart + llen - 1] == '\r') llen--;
         if (llen + 1u > cap) {
-            basic_error = 1; SHELL_PRINTF(SH_RED "? string too long\n" SH_RST); return -1;
+            basic_throw(TIKU_BASIC_ERR_GENERAL, "string too long"); return -1;
         }
         memcpy(out, S + lstart, llen);
         out[llen] = '\0';
@@ -650,13 +748,13 @@ parse_strprim(const char **p, char *out, size_t cap)
         (void)SL;
         skip_ws(p);
         if (**p != ',') {
-            basic_error = 1; SHELL_PRINTF(SH_RED "? ',' expected\n" SH_RST); return -1;
+            basic_throw(TIKU_BASIC_ERR_SYNTAX, "',' expected"); return -1;
         }
         (*p)++;
         if (parse_strexpr(p, am, sizeof(am)) != 0) return -1;
         skip_ws(p);
         if (**p != ',') {
-            basic_error = 1; SHELL_PRINTF(SH_RED "? ',' expected\n" SH_RST); return -1;
+            basic_throw(TIKU_BASIC_ERR_SYNTAX, "',' expected"); return -1;
         }
         (*p)++;
         if (parse_strexpr(p, bm, sizeof(bm)) != 0) return -1;
@@ -679,7 +777,7 @@ parse_strprim(const char **p, char *out, size_t cap)
         }
         rlen = (size_t)(sb - sa);
         if (rlen + 1u > cap) {
-            basic_error = 1; SHELL_PRINTF(SH_RED "? string too long\n" SH_RST); return -1;
+            basic_throw(TIKU_BASIC_ERR_GENERAL, "string too long"); return -1;
         }
         memcpy(out, sa, rlen);
         out[rlen] = '\0';
@@ -697,7 +795,7 @@ parse_strprim(const char **p, char *out, size_t cap)
         (*p)++;
         if (parse_str_ref(p, &jsrc, &jslen, src, sizeof(src)) != 0) return -1;
         skip_ws(p);
-        if (**p != ',') { basic_error = 1; SHELL_PRINTF(SH_RED "? ',' expected\n" SH_RST); return -1; }
+        if (**p != ',') { basic_throw(TIKU_BASIC_ERR_SYNTAX, "',' expected"); return -1; }
         (*p)++;
         if (parse_strexpr(p, jpath, sizeof(jpath)) != 0) return -1;
         skip_ws(p);
@@ -732,12 +830,27 @@ parse_strprim(const char **p, char *out, size_t cap)
         if (**p != ')') goto fn_paren_err;
         (*p)++;
         if (cap < 2u) {
-            basic_error = 1;
-            SHELL_PRINTF(SH_RED "? string too long\n" SH_RST);
+            basic_throw(TIKU_BASIC_ERR_GENERAL, "string too long");
             return -1;
         }
         out[0] = (char)(v & 0xFF);
         out[1] = '\0';
+        return 0;
+    }
+    /* INKEY$ -- non-blocking single-key read (no parens).  Returns the
+     * pending input character as a 1-char string, or "" if none is waiting.
+     * The reactive complement to INPUT for event loops / games under A1. */
+    if (match_kw(p, "INKEY$")) {
+        if (cap < 2u) {
+            basic_throw(TIKU_BASIC_ERR_GENERAL, "string too long");
+            return -1;
+        }
+        if (tiku_shell_io_rx_ready()) {
+            out[0] = (char)tiku_shell_io_getc();
+            out[1] = '\0';
+        } else {
+            out[0] = '\0';
+        }
         return 0;
     }
     if (match_kw(p, "STR$")) {
@@ -753,8 +866,7 @@ parse_strprim(const char **p, char *out, size_t cap)
         (*p)++;
         n = snprintf(out, cap, "%ld", v);
         if (n < 0 || (size_t)n >= cap) {
-            basic_error = 1;
-            SHELL_PRINTF(SH_RED "? string too long\n" SH_RST);
+            basic_throw(TIKU_BASIC_ERR_GENERAL, "string too long");
             return -1;
         }
         return 0;
@@ -774,8 +886,7 @@ parse_strprim(const char **p, char *out, size_t cap)
         (*p)++;
         n = snprintf(out, cap, "%lX", (unsigned long)v & 0xFFFFFFFFu);
         if (n < 0 || (size_t)n >= cap) {
-            basic_error = 1;
-            SHELL_PRINTF(SH_RED "? string too long\n" SH_RST);
+            basic_throw(TIKU_BASIC_ERR_GENERAL, "string too long");
             return -1;
         }
         return 0;
@@ -797,8 +908,7 @@ parse_strprim(const char **p, char *out, size_t cap)
         n = snprintf(out, cap, "%04u-%02u-%02u",
                      (unsigned)tm.year, (unsigned)tm.month, (unsigned)tm.day);
         if (n < 0 || (size_t)n >= cap) {
-            basic_error = 1;
-            SHELL_PRINTF(SH_RED "? string too long\n" SH_RST);
+            basic_throw(TIKU_BASIC_ERR_GENERAL, "string too long");
             return -1;
         }
         return 0;
@@ -818,8 +928,7 @@ parse_strprim(const char **p, char *out, size_t cap)
         n = snprintf(out, cap, "%02u:%02u:%02u",
                      (unsigned)tm.hour, (unsigned)tm.minute, (unsigned)tm.second);
         if (n < 0 || (size_t)n >= cap) {
-            basic_error = 1;
-            SHELL_PRINTF(SH_RED "? string too long\n" SH_RST);
+            basic_throw(TIKU_BASIC_ERR_GENERAL, "string too long");
             return -1;
         }
         return 0;
@@ -850,8 +959,7 @@ parse_strprim(const char **p, char *out, size_t cap)
         while (buf[start] == '0' && buf[start + 1] != '\0') start++;
         need = (size_t)(32 - start) + 1u;
         if (need > cap) {
-            basic_error = 1;
-            SHELL_PRINTF(SH_RED "? string too long\n" SH_RST);
+            basic_throw(TIKU_BASIC_ERR_GENERAL, "string too long");
             return -1;
         }
         memcpy(out, buf + start, need);
@@ -878,8 +986,7 @@ parse_strprim(const char **p, char *out, size_t cap)
         n = snprintf(out, cap, "%s%ld.%03ld",
                      neg ? "-" : "", ipart, frac);
         if (n < 0 || (size_t)n >= cap) {
-            basic_error = 1;
-            SHELL_PRINTF(SH_RED "? string too long\n" SH_RST);
+            basic_throw(TIKU_BASIC_ERR_GENERAL, "string too long");
             return -1;
         }
         return 0;
@@ -903,9 +1010,7 @@ parse_strprim(const char **p, char *out, size_t cap)
         (*p)++;
         n = tiku_vfs_read(path, out, cap - 1u);
         if (n < 0) {
-            basic_error = 1;
-            SHELL_PRINTF(SH_RED "? VFS read failed: %s (%s)\n" SH_RST,
-                         path, tiku_vfs_strerror(n));
+            basic_throwf(TIKU_BASIC_ERR_IO, "VFS read failed: %s (%s)", path, tiku_vfs_strerror(n));
             return -1;
         }
         if ((size_t)n >= cap) n = (int)cap - 1;
@@ -941,7 +1046,7 @@ parse_strprim(const char **p, char *out, size_t cap)
         return 0;
     }
 #endif
-#if TIKU_BASIC_BLE_ENABLE
+#if TIKU_BASIC_BLE_ENABLE && TIKU_BLE_SERIAL_PRESENT
     /* BLEGET$() -- pop any bytes a connected central has written to us (up to
      * the string buffer), "" if none.  Polls the BLE stack, so a BLEGET$() poll
      * loop keeps the link serviced.  0-arg-with-parens. */
@@ -955,6 +1060,70 @@ parse_strprim(const char **p, char *out, size_t cap)
         n = tiku_ble_serial_recv((uint8_t *)out, (uint16_t)(cap - 1u));
         if (n < 0) n = 0;
         out[n] = '\0';
+        return 0;
+    }
+#endif
+#if TIKU_BASIC_BLE_ENABLE && TIKU_BLE_ADV_PRESENT
+    /* BLESEEN$(i) -- the observer table's i-th report (0-based) as
+     * "AA:BB:CC:DD:EE:FF,rssi,name"; "" past the end.  Non-blocking:
+     * reads the table BLEOBSERVE fills in the background (it persists
+     * after the observer stops).  Pair with BLESEEN() to iterate. */
+    if (match_kw(p, "BLESEEN$")) {
+        tiku_ble_adv_report_t r;
+        long idx;
+        skip_ws(p);
+        if (**p != '(') goto fn_paren_err;
+        (*p)++;
+        idx = parse_expr(p);
+        if (basic_error) return 1;
+        skip_ws(p);
+        if (**p != ')') goto fn_paren_err;
+        (*p)++;
+        if (idx < 0 || idx > 255 ||
+            !tiku_ble_adv_observe_get((uint8_t)idx, &r)) {
+            out[0] = '\0';
+            return 0;
+        }
+        (void)snprintf(out, cap, "%02X:%02X:%02X:%02X:%02X:%02X,%d,%s",
+                       r.addr[5], r.addr[4], r.addr[3],
+                       r.addr[2], r.addr[1], r.addr[0],
+                       (int)r.rssi, r.name);
+        return 0;
+    }
+    /* BLESCAN$(secs) -- passive scan of the BLE advertising channels for
+     * `secs` seconds (clamped 1..20); returns "AA:BB:CC:DD:EE:FF,rssi,name;"
+     * per distinct device heard, strongest first not guaranteed -- discovery
+     * order.  Blocking and watchdog-kicked like HTTPGET$ (the cooperative-
+     * blocking rule in tiku_basic_net.inl). */
+    if (match_kw(p, "BLESCAN$")) {
+        tiku_ble_adv_report_t reps[8];
+        long secs;
+        int n, i;
+        size_t o = 0u;
+        skip_ws(p);
+        if (**p != '(') goto fn_paren_err;
+        (*p)++;
+        secs = parse_expr(p);
+        if (basic_error) return 1;
+        skip_ws(p);
+        if (**p != ')') goto fn_paren_err;
+        (*p)++;
+        if (secs < 1) secs = 1;
+        if (secs > 20) secs = 20;
+        n = tiku_ble_adv_scan(reps, 8u, (uint16_t)(secs * 1000L));
+        for (i = 0; i < n; i++) {
+            int w = snprintf(&out[o], cap - o,
+                             "%02X:%02X:%02X:%02X:%02X:%02X,%d,%s;",
+                             reps[i].addr[5], reps[i].addr[4],
+                             reps[i].addr[3], reps[i].addr[2],
+                             reps[i].addr[1], reps[i].addr[0],
+                             (int)reps[i].rssi, reps[i].name);
+            if (w < 0 || (size_t)w >= cap - o) {
+                break;                        /* buffer full -> truncate     */
+            }
+            o += (size_t)w;
+        }
+        out[o] = '\0';
         return 0;
     }
 #endif
@@ -974,8 +1143,7 @@ parse_strprim(const char **p, char *out, size_t cap)
         n = snprintf(out, cap, "%u.%u.%u.%u",
                      (unsigned)a[0], (unsigned)a[1], (unsigned)a[2], (unsigned)a[3]);
         if (n < 0 || (size_t)n >= cap) {
-            basic_error = 1;
-            SHELL_PRINTF(SH_RED "? string too long\n" SH_RST);
+            basic_throw(TIKU_BASIC_ERR_GENERAL, "string too long");
             return -1;
         }
         return 0;
@@ -994,7 +1162,7 @@ parse_strprim(const char **p, char *out, size_t cap)
         if (parse_path_literal(p, host, sizeof(host)) != 0) return -1;
         skip_ws(p);
         if (**p != ',') {
-            basic_error = 1; SHELL_PRINTF(SH_RED "? ',' expected\n" SH_RST); return -1;
+            basic_throw(TIKU_BASIC_ERR_SYNTAX, "',' expected"); return -1;
         }
         (*p)++;
         if (parse_path_literal(p, path, sizeof(path)) != 0) return -1;
@@ -1019,13 +1187,13 @@ parse_strprim(const char **p, char *out, size_t cap)
         if (parse_path_literal(p, host, sizeof(host)) != 0) return -1;
         skip_ws(p);
         if (**p != ',') {
-            basic_error = 1; SHELL_PRINTF(SH_RED "? ',' expected\n" SH_RST); return -1;
+            basic_throw(TIKU_BASIC_ERR_SYNTAX, "',' expected"); return -1;
         }
         (*p)++;
         if (parse_path_literal(p, path, sizeof(path)) != 0) return -1;
         skip_ws(p);
         if (**p != ',') {
-            basic_error = 1; SHELL_PRINTF(SH_RED "? ',' expected\n" SH_RST); return -1;
+            basic_throw(TIKU_BASIC_ERR_SYNTAX, "',' expected"); return -1;
         }
         (*p)++;
         if (parse_strexpr(p, body, sizeof(body)) != 0) return -1;
@@ -1058,13 +1226,13 @@ parse_strprim(const char **p, char *out, size_t cap)
         if (parse_path_literal(p, host, sizeof(host)) != 0) return -1;
         skip_ws(p);
         if (**p != ',') {
-            basic_error = 1; SHELL_PRINTF(SH_RED "? ',' expected\n" SH_RST); return -1;
+            basic_throw(TIKU_BASIC_ERR_SYNTAX, "',' expected"); return -1;
         }
         (*p)++;
         if (parse_path_literal(p, topic, sizeof(topic)) != 0) return -1;
         skip_ws(p);
         if (**p != ',') {
-            basic_error = 1; SHELL_PRINTF(SH_RED "? ',' expected\n" SH_RST); return -1;
+            basic_throw(TIKU_BASIC_ERR_SYNTAX, "',' expected"); return -1;
         }
         (*p)++;
         secs = parse_expr(p);
@@ -1104,8 +1272,7 @@ parse_strprim(const char **p, char *out, size_t cap)
                 out[i] = c;
             }
             if ((size_t)i >= cap) {
-                basic_error = 1;
-                SHELL_PRINTF(SH_RED "? string too long\n" SH_RST);
+                basic_throw(TIKU_BASIC_ERR_GENERAL, "string too long");
                 return -1;
             }
             out[i] = '\0';
@@ -1136,8 +1303,7 @@ parse_strprim(const char **p, char *out, size_t cap)
                 while (tmp[s] == ' ' || tmp[s] == '\t' ||
                        tmp[s] == '\r' || tmp[s] == '\n') s++;
                 if ((size_t)(n - s) + 1u > cap) {
-                    basic_error = 1;
-                    SHELL_PRINTF(SH_RED "? string too long\n" SH_RST);
+                    basic_throw(TIKU_BASIC_ERR_GENERAL, "string too long");
                     return -1;
                 }
                 for (i = 0; i < n - s; i++) out[i] = tmp[s + i];
@@ -1150,8 +1316,7 @@ parse_strprim(const char **p, char *out, size_t cap)
                     e--;
                 }
                 if ((size_t)e + 1u > cap) {
-                    basic_error = 1;
-                    SHELL_PRINTF(SH_RED "? string too long\n" SH_RST);
+                    basic_throw(TIKU_BASIC_ERR_GENERAL, "string too long");
                     return -1;
                 }
                 for (i = 0; i < e; i++) out[i] = tmp[i];
@@ -1174,8 +1339,7 @@ parse_strprim(const char **p, char *out, size_t cap)
         (*p)++;
         if (n < 0) n = 0;
         if ((size_t)n + 1u > cap) {
-            basic_error = 1;
-            SHELL_PRINTF(SH_RED "? string too long\n" SH_RST);
+            basic_throw(TIKU_BASIC_ERR_GENERAL, "string too long");
             return -1;
         }
         for (i = 0; i < n; i++) out[i] = ' ';
@@ -1195,8 +1359,7 @@ parse_strprim(const char **p, char *out, size_t cap)
         if (basic_error) return -1;
         skip_ws(p);
         if (**p != ',') {
-            basic_error = 1;
-            SHELL_PRINTF(SH_RED "? ',' expected\n" SH_RST);
+            basic_throw(TIKU_BASIC_ERR_SYNTAX, "',' expected");
             return -1;
         }
         (*p)++;
@@ -1215,8 +1378,7 @@ parse_strprim(const char **p, char *out, size_t cap)
         (*p)++;
         if (n < 0) n = 0;
         if ((size_t)n + 1u > cap) {
-            basic_error = 1;
-            SHELL_PRINTF(SH_RED "? string too long\n" SH_RST);
+            basic_throw(TIKU_BASIC_ERR_GENERAL, "string too long");
             return -1;
         }
         for (i = 0; i < n; i++) out[i] = fill;
@@ -1240,8 +1402,7 @@ parse_strprim(const char **p, char *out, size_t cap)
         if (tiku_kits_crypto_base64_encode((const uint8_t *)src,
                 (uint16_t)strlen(src), out, (uint16_t)cap, NULL)
             != TIKU_KITS_CRYPTO_OK) {
-            basic_error = 1;
-            SHELL_PRINTF(SH_RED "? string too long\n" SH_RST);
+            basic_throw(TIKU_BASIC_ERR_GENERAL, "string too long");
             return -1;
         }
         return 0;
@@ -1258,8 +1419,7 @@ parse_strprim(const char **p, char *out, size_t cap)
         if (**p != ')') goto fn_paren_err;
         (*p)++;
         if (cap < 2u * sizeof(dig) + 1u) {
-            basic_error = 1;
-            SHELL_PRINTF(SH_RED "? string too long\n" SH_RST);
+            basic_throw(TIKU_BASIC_ERR_GENERAL, "string too long");
             return -1;
         }
         (void)tiku_kits_crypto_sha256_hash((const uint8_t *)src,
@@ -1279,7 +1439,7 @@ parse_strprim(const char **p, char *out, size_t cap)
         if (parse_strexpr(p, key, sizeof(key)) != 0) return -1;
         skip_ws(p);
         if (**p != ',') {
-            basic_error = 1; SHELL_PRINTF(SH_RED "? ',' expected\n" SH_RST); return -1;
+            basic_throw(TIKU_BASIC_ERR_SYNTAX, "',' expected"); return -1;
         }
         (*p)++;
         if (parse_strexpr(p, msg, sizeof(msg)) != 0) return -1;
@@ -1287,8 +1447,7 @@ parse_strprim(const char **p, char *out, size_t cap)
         if (**p != ')') goto fn_paren_err;
         (*p)++;
         if (cap < 2u * sizeof(mac) + 1u) {
-            basic_error = 1;
-            SHELL_PRINTF(SH_RED "? string too long\n" SH_RST);
+            basic_throw(TIKU_BASIC_ERR_GENERAL, "string too long");
             return -1;
         }
         (void)tiku_kits_crypto_hmac_sha256(
@@ -1315,8 +1474,7 @@ parse_strprim(const char **p, char *out, size_t cap)
             const char *v = basic_strvars[idx];
             if (v == NULL) v = "";
             if (strlen(v) + 1u > cap) {
-                basic_error = 1;
-                SHELL_PRINTF(SH_RED "? string too long\n" SH_RST);
+                basic_throw(TIKU_BASIC_ERR_GENERAL, "string too long");
                 return -1;
             }
             strcpy(out, v);
@@ -1325,13 +1483,11 @@ parse_strprim(const char **p, char *out, size_t cap)
         *p = save;
     }
 
-    basic_error = 1;
-    SHELL_PRINTF(SH_RED "? string expected\n" SH_RST);
+    basic_throw(TIKU_BASIC_ERR_TYPE, "string expected");
     return -1;
 
 fn_paren_err:
-    basic_error = 1;
-    SHELL_PRINTF(SH_RED "? '(' or ')' expected\n" SH_RST);
+    basic_throw(TIKU_BASIC_ERR_SYNTAX, "'(' or ')' expected");
     return -1;
 }
 
@@ -1350,8 +1506,7 @@ parse_strexpr(const char **p, char *out, size_t cap)
         cur = strlen(out);
         add = strlen(tmp);
         if (cur + add + 1u > cap) {
-            basic_error = 1;
-            SHELL_PRINTF(SH_RED "? string too long\n" SH_RST);
+            basic_throw(TIKU_BASIC_ERR_GENERAL, "string too long");
             return -1;
         }
         memcpy(out + cur, tmp, add + 1u);

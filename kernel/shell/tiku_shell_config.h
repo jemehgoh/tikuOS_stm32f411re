@@ -1,22 +1,11 @@
 /*
- * Tiku Operating System
+ * Tiku Operating System v0.05
+ * Simple. Ubiquitous. Intelligence, Everywhere.
  * http://tiku-os.org
  *
  * Authors: Ambuj Varshney <ambuj@tiku-os.org>
  *
  * tiku_shell_config.h - CLI command selection flags
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at:
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -134,6 +123,18 @@
 #endif
 #ifndef TIKU_SHELL_CMD_NVMPROBE
 #define TIKU_SHELL_CMD_NVMPROBE 0 /**< nvmprobe- Carved NVM region diagnostic (opt-in) */
+#endif
+#ifndef TIKU_SHELL_CMD_CRYPTOPROBE
+#define TIKU_SHELL_CMD_CRYPTOPROBE 0 /**< cryptoprobe- CRACEN bring-up probe (opt-in) */
+#endif
+#ifndef TIKU_SHELL_CMD_BLEADV
+#define TIKU_SHELL_CMD_BLEADV 0 /**< bleadv- nRF54L15 BLE beacon bring-up (opt-in) */
+#endif
+#ifndef TIKU_SHELL_CMD_RADIO154
+#define TIKU_SHELL_CMD_RADIO154 0 /**< radio154- 802.15.4 PHY bring-up (opt-in) */
+#endif
+#ifndef TIKU_SHELL_CMD_AXONSPROBE
+#define TIKU_SHELL_CMD_AXONSPROBE 0 /**< axonsprobe- Axon NPU bring-up probe (opt-in) */
 #endif
 #ifndef TIKU_SHELL_CMD_READ
 #define TIKU_SHELL_CMD_READ    1  /**< read    - Read value from VFS node */

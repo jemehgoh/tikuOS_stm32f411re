@@ -1,5 +1,6 @@
 /*
- * Tiku Operating System
+ * Tiku Operating System v0.05
+ * Simple. Ubiquitous. Intelligence, Everywhere.
  * http://tiku-os.org
  *
  * Authors: Ambuj Varshney <ambuj@tiku-os.org>
@@ -9,12 +10,6 @@
  * Thin parser layer over the GPIO IRQ HAL. Accepts a pin in
  * "P<port>.<pin>" form and one of the four edge keywords.
  *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at:
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -22,6 +17,9 @@
 #include <kernel/shell/tiku_shell.h>
 #include <interfaces/gpio/tiku_gpio.h>
 
+/**
+ * @brief Compare two NUL-terminated strings for equality.
+ */
 static uint8_t
 streq(const char *a, const char *b)
 {
@@ -36,10 +34,14 @@ streq(const char *a, const char *b)
 }
 
 /* Parse "P<port>.<pin>" -> port and pin. Returns 0 on success,
- * -1 on syntax error. Accepts uppercase or lowercase 'p'. */
+ * -1 on syntax error. Accepts uppercase or lowercase 'p'.  The pin field
+ * is one or two decimal digits (0..31) so wide ports such as the nRF54L's
+ * P1 (up to P1.15) are addressable, not just the 0..7 of narrow parts. */
 static int
 parse_pin_spec(const char *s, uint8_t *port, uint8_t *pin)
 {
+    unsigned v;
+
     if (s == NULL) {
         return -1;
     }
@@ -56,17 +58,26 @@ parse_pin_spec(const char *s, uint8_t *port, uint8_t *pin)
         return -1;
     }
     s++;
-    if (*s < '0' || *s > '7' || s[1] != '\0') {
+    if (*s < '0' || *s > '9') {
         return -1;
     }
-    *pin = (uint8_t)(*s - '0');
+    v = (unsigned)(*s - '0');
+    s++;
+    if (*s >= '0' && *s <= '9') {
+        v = (v * 10u) + (unsigned)(*s - '0');
+        s++;
+    }
+    if (*s != '\0' || v > 31u) {
+        return -1;
+    }
+    *pin = (uint8_t)v;
     return 0;
 }
 
 void
 tiku_shell_cmd_irq(uint8_t argc, const char *argv[])
 {
-    uint8_t port, pin;
+    uint8_t port, pin, vport;
     tiku_gpio_edge_t edge;
     int rc;
 
@@ -81,8 +92,18 @@ tiku_shell_cmd_irq(uint8_t argc, const char *argv[])
         return;
     }
 
+    /* The GPIO-IRQ arch API is 1-based virtual (1 = the device's first port).
+     * The user types the physical port NAME: nRF54L parts are named from P0,
+     * so P0/P1/P2 map to virtual 1/2/3 (matching tiku_gpio_arch.c); parts named
+     * from P1 (MSP430) already have name == virtual port. */
+#if defined(PLATFORM_NORDIC)
+    vport = (uint8_t)(port + 1u);
+#else
+    vport = port;
+#endif
+
     if (streq(argv[2], "off")) {
-        rc = tiku_gpio_irq_disable(port, pin);
+        rc = tiku_gpio_irq_disable(vport, pin);
         if (rc == TIKU_GPIO_IRQ_OK) {
             SHELL_PRINTF("Disabled: P%u.%u\n",
                          (unsigned)port, (unsigned)pin);
@@ -100,7 +121,7 @@ tiku_shell_cmd_irq(uint8_t argc, const char *argv[])
         return;
     }
 
-    rc = tiku_gpio_irq_enable(port, pin, edge);
+    rc = tiku_gpio_irq_enable(vport, pin, edge);
     if (rc == TIKU_GPIO_IRQ_OK) {
         SHELL_PRINTF("Enabled: P%u.%u %s edge -> event\n",
                      (unsigned)port, (unsigned)pin, argv[2]);

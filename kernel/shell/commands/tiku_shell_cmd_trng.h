@@ -1,12 +1,17 @@
 /*
- * Tiku Operating System  -  http://tiku-os.org
+ * Tiku Operating System v0.05
+ * Simple. Ubiquitous. Intelligence, Everywhere.
+ * http://tiku-os.org
+ *
  * Authors: Ambuj Varshney <ambuj@tiku-os.org>
  *
- * tiku_shell_cmd_trng.h - "trng" command: dump hardware-TRNG bytes (hex).
+ * tiku_shell_cmd_trng.h - "trng" command: dump entropy-source bytes (hex).
  *
- * A diagnostic for the on-die true random number generator that backs the
- * cert-TLS handshake (RP2350 datasheet TRNG, or the Apollo CryptoCell-312).
- * `trng [n]` prints n (default 16, max 64) random bytes as hex.
+ * A diagnostic for the random-number source that backs the cert-TLS
+ * handshake: a hardware TRNG where the die provides one (the RP2350
+ * ring-oscillator TRNG, the Apollo CryptoCell-312), or a SHA-256-conditioned
+ * software entropy source on parts without one (MSP430).  `trng [n]` prints
+ * n (default 16, max 64) random bytes as hex.
  *
  * SPDX-License-Identifier: Apache-2.0
  */

@@ -11,18 +11,6 @@
  * access is delegated to the HAL layer so this file contains only
  * platform-independent code.
  *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at:
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- *
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -32,6 +20,7 @@
 
 #include <tiku.h>
 #include "tiku_watchdog.h"
+#include "tiku_hang.h"   /* a kick is also a check-in (liveness assertion) */
 
 /*---------------------------------------------------------------------------*/
 /* PRIVATE VARIABLES                                                         */
@@ -71,8 +60,26 @@ static volatile uint32_t wdt_kick_count;
 void tiku_watchdog_init(void)
 {
     WDT_PRINTF("Init\n");
+#if TIKU_WATCHDOG_INTERVAL_SUPPORTED
+    tiku_watchdog_arch_config(wdt.mode, wdt.clk, wdt.interval,
+                              wdt.start_held, wdt.kick_on_start);
+    wdt_enabled = 1;
+#else
+    if (wdt.mode == TIKU_WDT_MODE_INTERVAL) {
+        /* Never silently turn an unsupported interval request into a reset
+         * watchdog.  The caller can query mode_supported() before selecting
+         * it; keeping the hardware off is the only safe fallback for the
+         * legacy void config API. */
+        tiku_watchdog_arch_off();
+        wdt_enabled = 0;
+        return;
+    }
     tiku_watchdog_arch_on(wdt.clk, wdt.interval);
     wdt_enabled = 1;
+    if (wdt.start_held) {
+        tiku_watchdog_arch_pause();
+    }
+#endif
 }
 
 /**
@@ -100,9 +107,6 @@ void tiku_watchdog_config(tiku_wdt_mode_t mode, tiku_wdt_clk_t clk,
 
     tiku_watchdog_init();
 
-    if (wdt.start_held) {
-        tiku_watchdog_arch_pause();
-    }
 }
 
 /**
@@ -112,6 +116,18 @@ void tiku_watchdog_kick(void)
 {
     tiku_watchdog_arch_kick();
     wdt_kick_count++;
+
+    /* A kick is a liveness assertion, so honour it in BOTH watchdog channels:
+     * feed the check-in hang detector's heartbeat too.  The long cooperative-
+     * blocking builtins (HTTPGET$'s TLS fetch over SLIP, the MQTT waits) hold
+     * the CPU inside one dispatch for tens of seconds while kicking from
+     * their net pumps; without this the hang detector -- which otherwise only
+     * hears scheduler dispatches -- declared them wedged at
+     * TIKU_HANG_THRESHOLD_TICKS (~2 s) and warm-reset mid-fetch.  A loop that
+     * kicks while truly wedged evades the hang detector exactly as it already
+     * evades the hardware watchdog -- no recoverability is lost; the common
+     * wedge (an accidental loop that kicks nothing) is still caught. */
+    tiku_hang_checkin();
 }
 
 /**
@@ -169,6 +185,25 @@ tiku_wdt_clk_t tiku_watchdog_get_clk(void)
 tiku_wdt_interval_t tiku_watchdog_get_interval(void)
 {
     return wdt.interval;
+}
+
+int tiku_watchdog_get_start_held(void)
+{
+    return wdt.start_held != 0;
+}
+
+int tiku_watchdog_get_kick_on_start(void)
+{
+    return wdt.kick_on_start != 0;
+}
+
+int tiku_watchdog_mode_supported(tiku_wdt_mode_t mode)
+{
+    if (mode == TIKU_WDT_MODE_WATCHDOG) {
+        return 1;
+    }
+    return mode == TIKU_WDT_MODE_INTERVAL &&
+           TIKU_WATCHDOG_INTERVAL_SUPPORTED;
 }
 
 /**

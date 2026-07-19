@@ -17,18 +17,6 @@
  * tiku_vfs_notify().  See the WATCH section in tiku_vfs.h for the
  * full semantics.
  *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at:
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- *
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -294,6 +282,17 @@ static int vfs_dyn_file_wr(const char *b, size_t l)  { (void)b; (void)l; return 
  * node (valid only during the callback).  A name ending in '/' is a virtual
  * sub-folder (path-as-name) and becomes a DIR node; anything else is a FILE. */
 typedef struct { tiku_vfs_list_fn cb; void *ctx; } vfs_dyn_list_adapter_t;
+/**
+ * @brief Adapt a dynamic-directory entry to the tiku_vfs_list_fn callback.
+ *
+ * Synthesises a transient node (valid only for the duration of the
+ * callback) for each entry: a name ending in '/' becomes a DIR (the
+ * trailing slash stripped, `ls` re-appends it), everything else a FILE
+ * flagged read+write so `ls` renders "rw".
+ *
+ * @param name  Entry name from the parent's dyn list op
+ * @param vad   The vfs_dyn_list_adapter_t carrying the real callback + ctx
+ */
 static void vfs_dyn_list_thunk(const char *name, void *vad)
 {
     vfs_dyn_list_adapter_t *ad = (vfs_dyn_list_adapter_t *)vad;

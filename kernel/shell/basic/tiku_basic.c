@@ -1,5 +1,6 @@
 /*
- * Tiku Operating System
+ * Tiku Operating System v0.05
+ * Simple. Ubiquitous. Intelligence, Everywhere.
  * http://tiku-os.org
  *
  * Authors: Ambuj Varshney <ambuj@tiku-os.org>
@@ -32,18 +33,6 @@
  * `basic` lives in kernel/shell/commands/tiku_shell_cmd_basic.{c,h}
  * as a thin dispatch stub over these entry points.
  *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at:
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
- * implied.  See the License for the specific language governing
- * permissions and limitations under the License.
- *
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -52,27 +41,32 @@
 /*---------------------------------------------------------------------------*/
 
 #include "tiku_basic.h"
+#include "tiku_basic_ext.h"           /* native builtin registry (Tier 2) */
 #include "tiku_basic_config.h"
 #include <kernel/shell/tiku_shell.h>
 #include <kernel/memory/tiku_mem.h>
 #include <kernel/timers/tiku_clock.h>
 #include <hal/tiku_cpu.h>                /* SLEEP -> real low-power idle */
 #include <stdio.h>
+#include <stdarg.h>
 #include <string.h>
 
 /* Hardware-bridge headers.  Each is pulled in only when the matching
  * BASIC bridge is enabled, so a slim BASIC build (e.g. no GPIO, no
  * I2C) doesn't drag in unused HAL code. */
-#if TIKU_BASIC_GPIO_ENABLE && defined(PLATFORM_MSP430)
-#include <arch/msp430/tiku_gpio_arch.h>
+/* The BASIC hardware-bridge code (tiku_basic_*.inl) is platform-agnostic, so
+ * these declarations must be visible on every arch, not just MSP430. The gpio
+ * interface header dispatches to the right per-MCU arch header internally. */
+#if TIKU_BASIC_GPIO_ENABLE
+#include <interfaces/gpio/tiku_gpio.h>
 #endif
-#if TIKU_BASIC_ADC_ENABLE && defined(PLATFORM_MSP430)
+#if TIKU_BASIC_ADC_ENABLE
 #include <interfaces/adc/tiku_adc.h>
 #endif
-#if TIKU_BASIC_I2C_ENABLE && defined(PLATFORM_MSP430)
+#if TIKU_BASIC_I2C_ENABLE
 #include <interfaces/bus/tiku_i2c_bus.h>
 #endif
-#if TIKU_BASIC_REBOOT_ENABLE && defined(PLATFORM_MSP430)
+#if TIKU_BASIC_REBOOT_ENABLE
 #include <kernel/cpu/tiku_watchdog.h>
 #endif
 #if TIKU_BASIC_LED_ENABLE
@@ -120,6 +114,7 @@
 #endif
 #if TIKU_BASIC_BLE_ENABLE
 #include <interfaces/bluetooth/tiku_ble_serial.h>  /* BLEADV/BLESEND/BLEUP/BLEGET$ */
+#include <interfaces/bluetooth/tiku_ble_adv.h>     /* BLEBEACON/BLESCAN$ (broadcast) */
 #endif
 
 /*---------------------------------------------------------------------------*/
@@ -127,8 +122,10 @@
 /*---------------------------------------------------------------------------*/
 
 #include "tiku_basic_state.inl"
+#include "tiku_basic_token.inl"       /* A2: keyword crunch (before all users) */
 #include "tiku_basic_arena.inl"
 #include "tiku_basic_persist.inl"
+#include "tiku_basic_ckpt.inl"        /* F1: PERSIST / RUN RESUME (needs arena + persist) */
 #include "tiku_basic_vfs_file.inl"
 #include "tiku_basic_peek_poke.inl"
 #include "tiku_basic_hw.inl"
@@ -142,6 +139,7 @@
 #include "tiku_basic_string.inl"
 #include "tiku_basic_call.inl"
 #include "tiku_basic_expr.inl"
+#include "tiku_basic_ext.inl"         /* registry impl (needs parse_expr) */
 #include "tiku_basic_program.inl"
 #include "tiku_basic_stmt.inl"
 #include "tiku_basic_net.inl"
@@ -150,8 +148,10 @@
 #include "tiku_basic_multi_if.inl"
 #include "tiku_basic_select.inl"
 #include "tiku_basic_renum.inl"
+#include "tiku_basic_import.inl"      /* IMPORT (needs renum + subs + persist) */
 #include "tiku_basic_named_slots.inl"
 #include "tiku_basic_dispatch.inl"
 #include "tiku_basic_run.inl"
 #include "tiku_basic_repl.inl"
 #include "tiku_basic_shell.inl"
+#include "tiku_basic_mode.inl"

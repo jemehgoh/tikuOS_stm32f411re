@@ -1,5 +1,6 @@
 /*
- * Tiku Operating System
+ * Tiku Operating System v0.05
+ * Simple. Ubiquitous. Intelligence, Everywhere.
  * http://tiku-os.org
  *
  * Authors: Ambuj Varshney <ambuj@tiku-os.org>
@@ -16,18 +17,6 @@
  * C-style 0x.. / 0b.., BASIC-style &H.. / &B.., and (when
  * fixed-point is enabled) decimal literals with a fractional part
  * scaled by TIKU_BASIC_FIXED_SCALE.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at:
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
- * implied.  See the License for the specific language governing
- * permissions and limitations under the License.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -96,11 +85,22 @@ print_escape(char esc)
 /* KEYWORDS / NUMBERS / VARIABLES                                            */
 /*---------------------------------------------------------------------------*/
 
-/* Case-insensitive keyword match with word-boundary check. */
+/* Case-insensitive keyword match with word-boundary check.  DUAL (A2): a
+ * crunched token byte matches its spelling in one compare, so stored program
+ * lines dispatch on bytes while immediate-mode raw text keeps the char path.
+ * @p kw is always an UPPERCASE literal (matches the table spellings). */
 static int
 match_kw(const char **p, const char *kw)
 {
     const char *q = *p;
+    uint8_t     b = (uint8_t)*q;
+    if (b >= BASIC_TOK_BASE) {
+        if (b >= BASIC_TOK_BASE + BASIC_TOK_N ||
+            strcmp(basic_tok_tab[b - BASIC_TOK_BASE], kw) != 0) return 0;
+        *p = q + 1;
+        skip_ws(p);
+        return 1;
+    }
     while (*kw) {
         if (to_upper(*q) != *kw) return 0;
         q++; kw++;
@@ -242,6 +242,7 @@ basic_named_lookup(const char *name, int is_string)
 {
     int n = (int)strlen(name);
     int i;
+    int t = 0;
     char (*tbl)[TIKU_BASIC_NAMEDVAR_LEN];
     (void)is_string;
     if (n == 0) return -1;
@@ -249,12 +250,20 @@ basic_named_lookup(const char *name, int is_string)
         return name[0] - 'A';                /* fast slot 0..25 */
     }
 #if TIKU_BASIC_STRVARS_ENABLE
+    t   = is_string ? 1 : 0;
     tbl = is_string ? basic_namedstrvar_names : basic_namedvar_names;
 #else
     tbl = basic_namedvar_names;
 #endif
+    /* A3 #3: the hot loop re-references one named variable per statement --
+     * check the most-recent hit before rescanning the table. */
+    i = basic_named_mru[t];
+    if (i >= 0 && tbl[i][0] != '\0' && strcmp(tbl[i], name) == 0) {
+        return 26 + i;
+    }
     for (i = 0; i < TIKU_BASIC_NAMEDVAR_MAX; i++) {
         if (tbl[i][0] != '\0' && strcmp(tbl[i], name) == 0) {
+            basic_named_mru[t] = (int8_t)i;
             return 26 + i;
         }
     }
@@ -262,6 +271,7 @@ basic_named_lookup(const char *name, int is_string)
         if (tbl[i][0] == '\0') {
             strncpy(tbl[i], name, TIKU_BASIC_NAMEDVAR_LEN - 1);
             tbl[i][TIKU_BASIC_NAMEDVAR_LEN - 1] = '\0';
+            basic_named_mru[t] = (int8_t)i;
             return 26 + i;
         }
     }
@@ -296,8 +306,7 @@ parse_var(const char **p, int *idx)
     {
         int slot = basic_named_lookup(buf, 0);
         if (slot < 0) {
-            basic_error = 1;
-            SHELL_PRINTF(SH_RED "? too many named vars\n" SH_RST);
+            basic_throw(TIKU_BASIC_ERR_NOMEM, "too many named vars");
             *p = save;
             return 0;
         }
@@ -337,8 +346,7 @@ parse_var_full(const char **p, int *out_idx, int *out_is_str)
     }
     slot = basic_named_lookup(buf, is_str);
     if (slot < 0) {
-        basic_error = 1;
-        SHELL_PRINTF(SH_RED "? too many named vars\n" SH_RST);
+        basic_throw(TIKU_BASIC_ERR_NOMEM, "too many named vars");
         *p = save;
         return 0;
     }

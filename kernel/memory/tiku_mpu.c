@@ -17,17 +17,17 @@
  * This prevents stray pointers and runaway code from corrupting NVM.
  * To write to NVM, code explicitly unlocks, writes, and relocks.
  *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at:
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
+ * FAULT-BEHAVIOR CONTRACT (what an UNBRACKETED durable store does):
+ *   MSP430   the FRAM MPU silently DROPS the write — no fault, no flag
+ *            (unless the violation NMI below is armed).  The quietest
+ *            and therefore most dangerous failure mode in the fleet.
+ *   nRF54L   precise BUS FAULT (RRAMC WEN closed) — the loud canary.
+ *   RP2350 / Ambiq   MemManage fault -> deliberate reset, with a
+ *            persistent .mpu_diag violation record.
+ * Same bug, three behaviors: never rely on "it didn't crash" as proof
+ * a durable write landed on MSP430.  Debug/bench builds should arm the
+ * violation NMI (TIKU_MPU_NMI_ON_VIOLATION below) so all platforms
+ * fail loudly.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -53,6 +53,13 @@ void tiku_mpu_init(void)
 {
     tiku_mpu_arch_init_segments();
     tiku_mpu_arch_set_default_protection();
+#if defined(TIKU_MPU_NMI_ON_VIOLATION) && TIKU_MPU_NMI_ON_VIOLATION
+    /* Debug/bench builds (EXTRA_CFLAGS="-DTIKU_MPU_NMI_ON_VIOLATION=1"):
+     * make MSP430's silently-dropped unbracketed durable writes fire the
+     * SYSNMI violation handler instead — parity with the loud failure
+     * modes on the ARM ports (see the contract in the header above). */
+    tiku_mpu_enable_violation_nmi();
+#endif
 }
 
 /**

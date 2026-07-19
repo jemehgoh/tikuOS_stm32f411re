@@ -1,5 +1,6 @@
 /*
- * Tiku Operating System
+ * Tiku Operating System v0.05
+ * Simple. Ubiquitous. Intelligence, Everywhere.
  * http://tiku-os.org
  *
  * Authors: Ambuj Varshney <ambuj@tiku-os.org>
@@ -30,18 +31,6 @@
  *   tiku_basic_vfs_read()   - read handler for /data/basic.
  *   tiku_basic_vfs_write()  - write handler for /data/basic.
  *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at:
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
- * implied.  See the License for the specific language governing
- * permissions and limitations under the License.
- *
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -54,14 +43,54 @@
 /* INTERPRETER ENTRY POINTS                                                  */
 /*---------------------------------------------------------------------------*/
 
-/**
- * @brief Enter the interactive Tiku BASIC REPL.
+/*
+ * BASIC as a non-blocking shell MODE.
  *
- * Reads input from the active shell I/O backend; prints output via
- * SHELL_PRINTF.  Returns when the user types BYE / EXIT / QUIT, or
- * sends Ctrl-C at the prompt.
+ * The interpreter is a mode of the shell process (like watch / ping /
+ * mqtt), not a blocking takeover: `basic` enters the mode and returns,
+ * and the shell poll loop drives it via these hooks.  The scheduler
+ * therefore stays live for the whole session -- a running program yields
+ * between batches of lines instead of freezing everything.
  */
-void tiku_basic_repl(void);
+
+/** @brief Enter the interactive REPL mode (the `basic` command). */
+void tiku_basic_mode_enter(void);
+
+/**
+ * @brief Run the saved program headlessly as a non-blocking mode
+ *        (the `basic run` command); returns 0 if a program started, else -1.
+ */
+int tiku_basic_mode_run_saved(void);
+
+/**
+ * @brief Resume (or first-boot start) the saved program headlessly as a
+ *        non-blocking mode -- F1's power-failure-transparent autostart
+ *        (the `basic run resume` command); returns 0 if running, else -1.
+ */
+int tiku_basic_mode_resume_saved(void);
+
+/** @brief 1 while the shell is in BASIC mode (shell poll-loop hook). */
+int tiku_basic_mode_active(void);
+
+/** @brief Feed one console byte to the mode's line editor (poll-loop hook). */
+void tiku_basic_mode_feed_char(int ch);
+
+/** @brief Advance a running program by up to one batch of steps (poll-loop hook). */
+void tiku_basic_mode_tick(void);
+
+/**
+ * @brief Notify BASIC that a watched VFS node changed (F2 event-driven
+ *        ON CHANGE).  Call from the shell's TIKU_EVENT_VFS dispatch with the
+ *        changed node pointer.  Safe to call always (no-op when the feature
+ *        is compiled out or no program is running).
+ */
+void tiku_basic_mode_on_vfs(const void *node);
+
+/**
+ * @brief Consume the "BASIC mode just exited" edge (shell poll-loop hook).
+ * @return 1 once after the mode leaves (so the shell reprints its prompt), else 0.
+ */
+int tiku_basic_mode_take_exit(void);
 
 /**
  * @brief Load the persisted BASIC program from FRAM and RUN it once.
@@ -121,5 +150,25 @@ int tiku_basic_vfs_read(char *buf, unsigned int max);
  * @return 0 on success, -1 on error.
  */
 int tiku_basic_vfs_write(const char *buf, unsigned int len);
+
+/**
+ * @brief Error sink callback: receives every interpreter error (A5).
+ *
+ * @param cat  Error category, one of TIKU_BASIC_ERR_* (tiku_basic_config.h).
+ * @param msg  Bare message text (no color codes, no "? " prefix, no newline).
+ */
+typedef void (*tiku_basic_error_sink_t)(int cat, const char *msg);
+
+/**
+ * @brief Install a custom error sink so BASIC can run headless.
+ *
+ * By default interpreter errors print to the shell console as a red
+ * "? message".  Installing a sink redirects them to a buffer/callback
+ * instead, so BASIC can run with no shell or UART attached (the
+ * agent/library direction).  Pass NULL to restore the console default.
+ *
+ * @param sink  Callback to receive errors, or NULL for the default.
+ */
+void tiku_basic_set_error_sink(tiku_basic_error_sink_t sink);
 
 #endif /* TIKU_BASIC_H_ */
