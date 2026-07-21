@@ -383,6 +383,10 @@ tiku_adc_arch_read(uint8_t channel, uint16_t *value)
     *value = (uint16_t)ADC1->DR;
     (void)adc_reference;
     (void)g_adc_cfg;
+
+    // Disable ADC upon read completion to save power
+    ADC1->CR2 &= ~ ADC_CR2_ADON;
+
     return TIKU_ADC_OK;
 }
 

@@ -25,6 +25,12 @@ static void stm32f411_rcc_enable_gpio(uint32_t rcc_bit)
     (void)RCC->AHB1ENR;
 }
 
+static void stm32f411_rcc_disable_gpio(uint32_t rcc_bit)
+{
+    RCC->AHB1ENR &= ~rcc_bit;
+    (void)RCC->AHB1ENR;
+}
+
 int
 tiku_stm32f411_pinmux_resolve(uint8_t port, uint8_t pin,
                               uint32_t *gpio_base, uint32_t *rcc_bit)
@@ -139,6 +145,9 @@ tiku_stm32f411_pinmux_set_af(uint8_t port, uint8_t pin, uint8_t af)
     afr &= ~(0xFUL << shift);
     afr |= ((uint32_t)af & 0xFUL) << shift;
     gpio->AFR[index] = afr;
+
+    // Disable GPIO peripheral clock - not needed in AF mode
+    stm32f411_rcc_disable_gpio(rcc_bit);
 
     return 0;
 }
