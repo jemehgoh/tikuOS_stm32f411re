@@ -18,18 +18,6 @@
  *   3. Map TIKU_PRINTF to the platform's printf function
  *   4. Handle any transport conflicts (SLIP, BLE, etc.)
  *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at:
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- *
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -99,6 +87,12 @@
 
 #elif defined(PLATFORM_AMBIQ)
 #include <arch/ambiq/tiku_uart_arch.h>
+#define TIKU_PRINTF(...) tiku_uart_printf(__VA_ARGS__)
+
+#elif defined(PLATFORM_NORDIC)
+/* nRF54L: console over UARTE (polled EasyDMA). No SLIP transport yet, so
+ * debug printf routes straight to the UARTE backend. */
+#include <arch/nordic/tiku_uart_arch.h>
 #define TIKU_PRINTF(...) tiku_uart_printf(__VA_ARGS__)
 
 /*---------------------------------------------------------------------------*/

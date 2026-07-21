@@ -31,18 +31,6 @@
  * means adding one initialiser to sys_children below (plus, for a
  * new subtree, including its header).
  *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at:
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- *
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -51,7 +39,20 @@
 /*---------------------------------------------------------------------------*/
 
 #include "tiku_vfs_tree_sys.h"
+#if defined(PLATFORM_NORDIC)
+#include <arch/nordic/tiku_crypto_arch.h>   /* /sys/crypto mode + counters */
+#endif
+#if (TIKU_HAS_BLE_ADV + 0)
+#include <interfaces/bluetooth/tiku_ble_adv.h>  /* /sys/radio beacon + scan */
+#include <arch/nordic/tiku_radio_arch.h>        /* /sys/radio/mode (live)   */
+#endif
+#if (TIKU_FLPR_ENABLE + 0)
+#include <arch/nordic/tiku_flpr_arch.h>         /* /sys/flpr coprocessor    */
+#include <arch/nordic/flpr/tiku_flpr_ipc.h>     /* TIKU_FLPR_MSG_CAP        */
+#include <arch/nordic/tiku_device_select.h>     /* NRF_VPR00_NS readbacks   */
+#endif
 #include "tiku_vfs_tree_boot.h"
+#include <kernel/cpu/tiku_stack.h>   /* stack high-water for /sys/mem/stack_free */
 #include "tiku_vfs_tree_timer.h"
 #include "tiku_vfs_tree_watchdog.h"
 #include "tiku_vfs_tree_power.h"
@@ -70,6 +71,10 @@
 #include <kernel/process/tiku_process.h>
 #include <kernel/scheduler/tiku_sched.h>
 #include <stdio.h>
+#if (TIKU_HAS_BLE_ADV + 0)
+#include <stdlib.h>                  /* strtoul: /sys/radio/beacon interval */
+#include <string.h>                  /* strchr/strcmp: beacon write parse   */
+#endif
 
 /*---------------------------------------------------------------------------*/
 /* /sys/uptime                                                               */
@@ -463,8 +468,7 @@ version_read(char *buf, size_t max)
 #define DEVICE_NAME_MAGIC  0x4E414D45UL /* 'NAME' */
 
 /** FRAM cell: NUL-terminated user-visible device name */
-static char __attribute__((section(".persistent")))
-    device_name_persist[DEVICE_NAME_MAX + 1];
+static TIKU_DURABLE char device_name_persist[DEVICE_NAME_MAX + 1];
 
 /** Gate + descriptor: primed to the default name "tiku" */
 TIKU_PERSIST_CELL(device_name_cell, device_name_persist,
@@ -634,6 +638,18 @@ static const tiku_vfs_desc_t desc_uptime =
     TIKU_VFS_DESC(TIKU_VFS_T_U32, TIKU_VFS_U_SECONDS,
                   TIKU_VFS_FRESH_CACHED, TIKU_VFS_E_FREE);
 
+/*
+ * /sys/mem/stack_free -- worst-case stack headroom since boot (bytes): the
+ * intact painted cushion above the MPU stack guard.  Unlike /sys/mem/free
+ * (the live gap at this instant) this is the closest the stack has EVER come
+ * to the guard -- the number to snapshot under load when sizing the stack.
+ * "0" on an arch that has not declared its stack bounds (feature dormant).
+ */
+static int stack_free_read(char *buf, size_t max)
+{
+    return snprintf(buf, max, "%lu\n", (unsigned long)tiku_stack_free());
+}
+
 /** /sys/mem directory table — sizes (sram, nvm) + live (free, used) */
 static const tiku_vfs_node_t sys_mem_children[] = {
     { "sram", TIKU_VFS_FILE, sram_read,      NULL, NULL, 0, &desc_mem_static },
@@ -643,6 +659,8 @@ static const tiku_vfs_node_t sys_mem_children[] = {
     { "nvmfree", TIKU_VFS_FILE, nvmfree_read, NULL, NULL, 0, &desc_mem_live },
     { "tiers",   TIKU_VFS_FILE, mem_tiers_read,  NULL, NULL, 0, &desc_mem_live },
     { "failed",  TIKU_VFS_FILE, mem_failed_read, NULL, NULL, 0, &desc_mem_live },
+    { "stack_free", TIKU_VFS_FILE, stack_free_read, NULL, NULL, 0,
+      &desc_mem_live },
 };
 
 /** /sys/cpu directory table */
@@ -657,7 +675,8 @@ static const tiku_vfs_node_t sys_sched_children[] = {
 
 /** /sys/device directory table — name is the only writable node */
 static const tiku_vfs_node_t sys_device_children[] = {
-    { "name",    TIKU_VFS_FILE, device_name_read,    device_name_write, NULL, 0 },
+    { "name",    TIKU_VFS_FILE, device_name_read,    device_name_write, NULL, 0,
+      NULL, NULL, TIKU_VFS_CAP_FS },   /* writes commit to the persistent store */
     { "id",      TIKU_VFS_FILE, device_id_read,      NULL,              NULL, 0 },
     { "mcu",     TIKU_VFS_FILE, device_mcu_read,     NULL,              NULL, 0 },
     { "version", TIKU_VFS_FILE, device_version_read, NULL,              NULL, 0 },
@@ -725,6 +744,16 @@ rules_list_read(char *buf, size_t max)
     return off;   /* 0 = no rules armed (empty read) */
 }
 
+/**
+ * @brief Read handler for /sys/jobs/count.
+ *
+ * Renders the number of currently occupied scheduler job slots by
+ * scanning the job table for armed (non-NULL) entries.
+ *
+ * @param buf  Output buffer
+ * @param max  Capacity of @p buf
+ * @return Bytes written (snprintf-style)
+ */
 static int
 jobs_count_read(char *buf, size_t max)
 {
@@ -773,6 +802,412 @@ static const tiku_vfs_node_t sys_jobs_children[] = {
 };
 #endif /* TIKU_SHELL_ENABLE */
 
+#if defined(PLATFORM_NORDIC)
+/*---------------------------------------------------------------------------*/
+/* /sys/crypto — CRACEN offload runtime switch + path counters               */
+/*---------------------------------------------------------------------------*/
+/*
+ * The hardware-crypto backend keeps the kit APIs unchanged; this is the
+ * runtime control surface: `mode` selects auto (hardware with software
+ * fallback) or sw (software only -- the A/B switch and field kill-switch),
+ * and `ops` reports which path actually served the calls, so a test can
+ * assert "hardware really ran" instead of trusting the knob.
+ */
+
+static int
+crypto_mode_read(char *buf, size_t max)
+{
+    return snprintf(buf, max, "%s\n",
+                    (tiku_crypto_hw_mode() == TIKU_CRYPTO_HW_MODE_SW)
+                        ? "sw" : "auto");
+}
+
+static int
+crypto_mode_write(const char *buf, size_t len)
+{
+    if (len >= 2u && buf[0] == 's' && buf[1] == 'w') {
+        tiku_crypto_hw_mode_set(TIKU_CRYPTO_HW_MODE_SW);
+        return 0;
+    }
+    if (len >= 4u && buf[0] == 'a' && buf[1] == 'u' &&
+        buf[2] == 't' && buf[3] == 'o') {
+        tiku_crypto_hw_mode_set(TIKU_CRYPTO_HW_MODE_AUTO);
+        return 0;
+    }
+    return TIKU_VFS_EINVAL;
+}
+
+static int
+crypto_ops_read(char *buf, size_t max)
+{
+    uint16_t hw, sw, errs;
+    tiku_crypto_hw_counters(&hw, &sw, &errs);
+    return snprintf(buf, max, "hw=%u sw=%u err=%u\n",
+                    (unsigned)hw, (unsigned)sw, (unsigned)errs);
+}
+
+static int
+crypto_pk_read(char *buf, size_t max)
+{
+#if defined(TIKU_CRACEN_PK_ENABLE)
+    uint16_t ops, errs;
+    tiku_crypto_arch_pk_counters(&ops, &errs);
+    return snprintf(buf, max, "hw-capable ops=%u errs=%u\n",
+                    (unsigned)ops, (unsigned)errs);
+#else
+    (void)buf; (void)max;
+    return snprintf(buf, max, "sw\n");
+#endif
+}
+
+static const tiku_vfs_node_t sys_crypto_children[] = {
+    { "mode", TIKU_VFS_FILE, crypto_mode_read, crypto_mode_write, NULL, 0 },
+    { "ops",  TIKU_VFS_FILE, crypto_ops_read,  NULL,              NULL, 0 },
+    { "pk",   TIKU_VFS_FILE, crypto_pk_read,   NULL,              NULL, 0 },
+};
+#endif /* PLATFORM_NORDIC */
+
+#if (TIKU_HAS_BLE_ADV + 0)
+/*---------------------------------------------------------------------------*/
+/* /sys/radio — BLE broadcaster/observer control + observability             */
+/*---------------------------------------------------------------------------*/
+/*
+ * Control surface over the tiku_ble_adv facade: `beacon` is the writable
+ * knob ("NAME[,interval_ms[,data]]" starts, "off"/"0" stops; data is a
+ * telemetry payload carried after the 'TK' manufacturer id) and `txpower`
+ * (signed dBm, discrete silicon steps only) is the power knob -- both
+ * rules-engine and `watch` reachable; the rest report state so a bench
+ * can assert "the radio really transmitted".
+ */
+
+static int
+radio_beacon_read(char *buf, size_t max)
+{
+    const uint8_t *d;
+    uint8_t dlen;
+
+    if (!tiku_ble_adv_active()) {
+        return snprintf(buf, max, "off\n");
+    }
+    dlen = tiku_ble_adv_data(&d);
+    if (dlen != 0u) {
+        return snprintf(buf, max, "%s,%u,%.*s\n", tiku_ble_adv_name(),
+                        (unsigned)tiku_ble_adv_interval_ms(), (int)dlen,
+                        (const char *)d);
+    }
+    return snprintf(buf, max, "%s,%u\n", tiku_ble_adv_name(),
+                    (unsigned)tiku_ble_adv_interval_ms());
+}
+
+static int
+radio_beacon_write(const char *buf, size_t len)
+{
+    char tmp[64];
+    char *comma;
+    const char *data = NULL;
+    uint8_t dlen = 0u;
+    unsigned long ms = 0ul;
+
+    if (len == 0u || len >= sizeof(tmp)) {
+        return TIKU_VFS_EINVAL;
+    }
+    memcpy(tmp, buf, len);
+    tmp[len] = '\0';
+    /* Trim a trailing newline from `write /sys/radio/beacon ...`. */
+    while (len > 0u && (tmp[len - 1u] == '\n' || tmp[len - 1u] == '\r')) {
+        tmp[--len] = '\0';
+    }
+    if (len == 0u) {
+        return TIKU_VFS_EINVAL;
+    }
+    if (strcmp(tmp, "off") == 0 || strcmp(tmp, "0") == 0) {
+        tiku_ble_adv_stop();
+        return 0;
+    }
+    comma = strchr(tmp, ',');
+    if (comma != NULL) {
+        char *comma2;
+        *comma = '\0';
+        ms = strtoul(comma + 1, NULL, 10);
+        /* Third field = telemetry payload (raw bytes after the 'TK' id);
+         * everything past the second comma, commas included. */
+        comma2 = strchr(comma + 1, ',');
+        if (comma2 != NULL) {
+            data = comma2 + 1;
+            dlen = (uint8_t)strlen(data);
+        }
+    }
+    return (tiku_ble_adv_beacon_data(tmp, (uint16_t)ms,
+                                     (const uint8_t *)data, dlen) == 0)
+               ? 0 : TIKU_VFS_EINVAL;
+}
+
+static int
+radio_bursts_read(char *buf, size_t max)
+{
+    return snprintf(buf, max, "%lu\n",
+                    (unsigned long)tiku_ble_adv_bursts());
+}
+
+static int
+radio_state_read(char *buf, size_t max)
+{
+    /* The arbiter's owner IS the radio state:
+     * idle / beacon / beacon-flpr / scan / observe. */
+    return snprintf(buf, max, "%s\n", tiku_ble_adv_owner_str());
+}
+
+/* R7: the background observer's new-data hook -> namespace event.  The
+ * facade calls this from timer-callback context (not ISR) whenever the
+ * observer delivered packets; every /sys/radio/scan watcher (the watch
+ * command, the rules engine's subscribers) rings. */
+static void
+radio_scan_notify_hook(void)
+{
+    static const tiku_vfs_node_t *scan_node;
+
+    if (scan_node == NULL) {
+        scan_node = tiku_vfs_resolve("/sys/radio/scan");
+    }
+    if (scan_node != NULL) {
+        tiku_vfs_notify(scan_node);
+    }
+}
+
+static int
+radio_scan_read(char *buf, size_t max)
+{
+    const tiku_ble_adv_report_t *b = tiku_ble_adv_last_scan_best();
+    if (b == NULL) {
+        return snprintf(buf, max, "devices=%u\n",
+                        (unsigned)tiku_ble_adv_last_scan_count());
+    }
+    return snprintf(buf, max,
+                    "devices=%u best=%02X:%02X:%02X:%02X:%02X:%02X "
+                    "rssi=%d name=%s\n",
+                    (unsigned)tiku_ble_adv_last_scan_count(),
+                    b->addr[5], b->addr[4], b->addr[3],
+                    b->addr[2], b->addr[1], b->addr[0],
+                    (int)b->rssi, b->name);
+}
+
+static int
+radio_txpower_read(char *buf, size_t max)
+{
+    return snprintf(buf, max, "%d\n", (int)tiku_ble_adv_txpower());
+}
+
+/* dBm, signed; only the silicon's discrete steps are accepted (the facade
+ * rejects everything else, never rounds).  Writable so the rules engine
+ * can turn power into a policy knob -- e.g. drop to -20 dBm when a
+ * voltage/energy node sags. */
+static int
+radio_txpower_write(const char *buf, size_t len)
+{
+    char tmp[16];
+    char *end;
+    long v;
+
+    if (len == 0u || len >= sizeof(tmp)) {
+        return TIKU_VFS_EINVAL;
+    }
+    memcpy(tmp, buf, len);
+    tmp[len] = '\0';
+    v = strtol(tmp, &end, 10);
+    if (end == tmp || v < -128 || v > 127) {
+        return TIKU_VFS_EINVAL;
+    }
+    return (tiku_ble_adv_set_txpower((int8_t)v) == 0) ? 0 : TIKU_VFS_EINVAL;
+}
+
+/* Which PHY the radio is in right now -- the live RADIO.MODE, so it reads
+ * "ieee802154" while the 15.4 PHY owns the radio and "ble-1m" at rest. */
+static int
+radio_mode_read(char *buf, size_t max)
+{
+    return snprintf(buf, max, "%s\n", tiku_radio_arch_mode_str());
+}
+
+/* L7 surface unification (#18): one /sys/radio surface over the two real
+ * nordic BLE implementations -- the M33 broadcast path and the FLPR
+ * connection controller.  `backend` names which is driving the radio right
+ * now; `caps` lists what this build's on-die radio can do (compiled from the
+ * capability flags, not speculation); `state` (above) is the arbiter owner. */
+static int
+radio_backend_read(char *buf, size_t max)
+{
+    tiku_ble_adv_owner_t o = tiku_ble_adv_owner();
+    const char *b = (o == TIKU_BLE_ADV_OWNER_BEACON_FLPR ||
+                     o == TIKU_BLE_ADV_OWNER_CONN)
+                    ? "nordic-flpr" : "nordic-m33";
+    return snprintf(buf, max, "%s\n", b);
+}
+
+static int
+radio_caps_read(char *buf, size_t max)
+{
+    return snprintf(buf, max, "adv scan observe 2m coded"
+#if (TIKU_FLPR_ENABLE + 0)
+                    " conn"
+#endif
+#if (TIKU_HAS_154 + 0)
+                    " ieee802154 aes-ccm"
+#endif
+                    "\n");
+}
+
+static const tiku_vfs_node_t sys_radio_children[] = {
+    { "beacon",  TIKU_VFS_FILE, radio_beacon_read, radio_beacon_write,
+      NULL, 0 },
+    { "bursts",  TIKU_VFS_FILE, radio_bursts_read,  NULL, NULL, 0 },
+    { "mode",    TIKU_VFS_FILE, radio_mode_read,    NULL, NULL, 0 },
+    { "state",   TIKU_VFS_FILE, radio_state_read,   NULL, NULL, 0 },
+    { "backend", TIKU_VFS_FILE, radio_backend_read, NULL, NULL, 0 },
+    { "caps",    TIKU_VFS_FILE, radio_caps_read,    NULL, NULL, 0 },
+    { "scan",    TIKU_VFS_FILE, radio_scan_read,    NULL, NULL, 0 },
+    { "txpower", TIKU_VFS_FILE, radio_txpower_read, radio_txpower_write,
+      NULL, 0 },
+};
+#endif /* TIKU_HAS_BLE_ADV */
+
+#if (TIKU_FLPR_ENABLE + 0)
+/*---------------------------------------------------------------------------*/
+/* /sys/flpr — the VPR RISC-V coprocessor                                    */
+/*---------------------------------------------------------------------------*/
+/*
+ * Control + liveness for the FLPR: `run` starts (loads the embedded image
+ * first) and stops the core; `state` distinguishes stopped / running-but-
+ * not-yet-in-main / alive; `heartbeat` is the firmware's forever-counter,
+ * the ground truth that RISC-V code is executing right now.
+ */
+
+static int
+flpr_state_read(char *buf, size_t max)
+{
+    const char *s = "stopped";
+    if (tiku_flpr_arch_running()) {
+        s = tiku_flpr_arch_alive() ? "alive" : "started";
+    }
+    return snprintf(buf, max, "%s\n", s);
+}
+
+static int
+flpr_heartbeat_read(char *buf, size_t max)
+{
+    return snprintf(buf, max, "%lu\n",
+                    (unsigned long)tiku_flpr_arch_heartbeat());
+}
+
+static int
+flpr_image_read(char *buf, size_t max)
+{
+    /* Bring-up: image size + live doorbell-plumbing readbacks. */
+    return snprintf(buf, max, "%lu inten=%lx trig16=%lu intpend=%lx\n",
+                    (unsigned long)tiku_flpr_arch_image_size(),
+                    (unsigned long)NRF_VPR00_NS->INTEN,
+                    (unsigned long)NRF_VPR00_NS->EVENTS_TRIGGERED[16],
+                    (unsigned long)NRF_VPR00_NS->INTPEND);
+}
+
+static int
+flpr_run_read(char *buf, size_t max)
+{
+    return snprintf(buf, max, "%d\n", tiku_flpr_arch_running());
+}
+
+static int
+flpr_run_write(const char *buf, size_t len)
+{
+    if (len >= 1u && buf[0] == '1') {
+        return (tiku_flpr_arch_start() == 0) ? 0 : TIKU_VFS_EINVAL;
+    }
+    if (len >= 1u && buf[0] == '0') {
+        tiku_flpr_arch_stop();
+        return 0;
+    }
+    return TIKU_VFS_EINVAL;
+}
+
+/* Echo surface over the mailbox IPC: writing sends the bytes to the FLPR
+ * (its echo service mirrors them back, doorbell -> ISR capture); reading
+ * returns "<reply_seq> <last reply>".  A seq that advances after a write
+ * proves the ENTIRE cross-core interrupt path, which is exactly what the
+ * TikuBench flpr suite asserts. */
+static int
+flpr_echo_read(char *buf, size_t max)
+{
+    char body[TIKU_FLPR_MSG_CAP + 1];
+    uint32_t n;
+    tiku_flpr_arch_poll();                      /* doorbell fallback: pull */
+    n = tiku_flpr_arch_reply(body, sizeof(body) - 1u);
+    body[n] = '\0';
+    return snprintf(buf, max, "%lu %s\n",
+                    (unsigned long)tiku_flpr_arch_reply_seq(), body);
+}
+
+static int
+flpr_echo_write(const char *buf, size_t len)
+{
+    return (tiku_flpr_arch_send(buf, (uint32_t)len) == 0)
+               ? 0 : TIKU_VFS_EINVAL;
+}
+
+/* Pulse-engine surface: write "period_us,edges" -> the coprocessor emits
+ * the waveform on P2.07 (LED3) while THIS core samples the pad; read
+ * returns "cmd=<edges> meas=<transitions> rc=<0|err>".  A |cmd-meas|
+ * within tolerance is the whole soft-peripheral story, verified. */
+static uint32_t flpr_pulse_cmd, flpr_pulse_meas, flpr_pulse_ms;
+static int      flpr_pulse_rc = -1;
+
+static int
+flpr_pulse_read(char *buf, size_t max)
+{
+    return snprintf(buf, max, "cmd=%lu meas=%lu ms=%lu rc=%d\n",
+                    (unsigned long)flpr_pulse_cmd,
+                    (unsigned long)flpr_pulse_meas,
+                    (unsigned long)flpr_pulse_ms, flpr_pulse_rc);
+}
+
+static int
+flpr_pulse_write(const char *buf, size_t len)
+{
+    char tmp[32];
+    char *comma;
+    unsigned long period_us, edges;
+
+    if (len == 0u || len >= sizeof(tmp)) {
+        return TIKU_VFS_EINVAL;
+    }
+    memcpy(tmp, buf, len);
+    tmp[len] = '\0';
+    comma = strchr(tmp, ',');
+    if (comma == NULL) {
+        return TIKU_VFS_EINVAL;
+    }
+    *comma = '\0';
+    period_us = strtoul(tmp, NULL, 10);
+    edges     = strtoul(comma + 1, NULL, 10);
+
+    flpr_pulse_cmd = (uint32_t)edges;
+    flpr_pulse_rc = tiku_flpr_arch_pulse((uint32_t)period_us,
+                                         (uint32_t)edges, &flpr_pulse_meas,
+                                         &flpr_pulse_ms);
+    return (flpr_pulse_rc == 0) ? 0 : TIKU_VFS_EINVAL;
+}
+
+static const tiku_vfs_node_t sys_flpr_children[] = {
+    { "run",       TIKU_VFS_FILE, flpr_run_read,       flpr_run_write,
+      NULL, 0 },
+    { "state",     TIKU_VFS_FILE, flpr_state_read,     NULL, NULL, 0 },
+    { "heartbeat", TIKU_VFS_FILE, flpr_heartbeat_read, NULL, NULL, 0 },
+    { "image",     TIKU_VFS_FILE, flpr_image_read,     NULL, NULL, 0 },
+    { "echo",      TIKU_VFS_FILE, flpr_echo_read,      flpr_echo_write,
+      NULL, 0 },
+    { "pulse",     TIKU_VFS_FILE, flpr_pulse_read,     flpr_pulse_write,
+      NULL, 0 },
+};
+#endif /* TIKU_FLPR_ENABLE */
+
 static const tiku_vfs_node_t sys_children[] = {
     { "version",    TIKU_VFS_FILE, version_read,    NULL, NULL, 0 },
     { "device",     TIKU_VFS_DIR,  NULL, NULL, sys_device_children, 4 },
@@ -786,7 +1221,7 @@ static const tiku_vfs_node_t sys_children[] = {
       tiku_vfs_tree_boot_last_reset_read, NULL, NULL, 0 },
     { "cold_boots", TIKU_VFS_FILE,
       tiku_vfs_tree_boot_cold_boots_read, NULL, NULL, 0 },
-    { "mem",      TIKU_VFS_DIR,  NULL, NULL, sys_mem_children, 7 },
+    { "mem",      TIKU_VFS_DIR,  NULL, NULL, sys_mem_children, 8 },
     { "cpu",      TIKU_VFS_DIR,  NULL, NULL, sys_cpu_children, 1 },
     { "power",    TIKU_VFS_DIR,  NULL, NULL,
       tiku_vfs_tree_power_children,    TIKU_VFS_TREE_POWER_NCHILD },
@@ -811,6 +1246,15 @@ static const tiku_vfs_node_t sys_children[] = {
     { "jobs",     TIKU_VFS_DIR,  NULL, NULL, sys_jobs_children,  2 },
 #endif
     { "sched",    TIKU_VFS_DIR,  NULL, NULL, sys_sched_children, 1 },
+#if defined(PLATFORM_NORDIC)
+    { "crypto",   TIKU_VFS_DIR,  NULL, NULL, sys_crypto_children, 3 },
+#endif
+#if (TIKU_HAS_BLE_ADV + 0)
+    { "radio",    TIKU_VFS_DIR,  NULL, NULL, sys_radio_children,  8 },
+#endif
+#if (TIKU_FLPR_ENABLE + 0)
+    { "flpr",     TIKU_VFS_DIR,  NULL, NULL, sys_flpr_children,   6 },
+#endif
 #if TIKU_INIT_ENABLE
     { "init",     TIKU_VFS_DIR,  NULL, NULL,
       tiku_vfs_tree_inittab_children,  TIKU_VFS_TREE_INITTAB_NCHILD },
@@ -866,4 +1310,10 @@ tiku_vfs_tree_sys_init(void)
     /* Validate/prime the device name ("tiku" until renamed via
      * /sys/device/name). */
     (void)tiku_persist_cell_init(&device_name_cell);
+
+#if (TIKU_HAS_BLE_ADV + 0)
+    /* R7: background-observer scan data -> /sys/radio/scan namespace
+     * events (watch / rules ride the bus from there). */
+    tiku_ble_adv_set_scan_notify(radio_scan_notify_hook);
+#endif
 }

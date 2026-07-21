@@ -1,5 +1,6 @@
 /*
- * Tiku Operating System
+ * Tiku Operating System v0.05
+ * Simple. Ubiquitous. Intelligence, Everywhere.
  * http://tiku-os.org
  *
  * Authors: Ambuj Varshney <ambuj@tiku-os.org>
@@ -16,18 +17,6 @@
  * Implementation is lazy: basic_persist_ensure() registers the save
  * buffer with the persist store on first use; subsequent SAVE / LOAD
  * calls just read / write through the bracketed MPU unlock.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at:
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
- * implied.  See the License for the specific language governing
- * permissions and limitations under the License.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -49,17 +38,21 @@ static void process_line(const char *raw);
 /*---------------------------------------------------------------------------*/
 /*
  * SAVE / LOAD and the /data/basic bridge all go through basic_prog_store() /
- * basic_prog_fetch() so they stay consistent. On Ambiq the program lives in the
- * carved NVM region's reserved tail ([magic][len][text], gate-last on the MRAM
- * backend); elsewhere it rides the tiku_persist FRAM store.
+ * basic_prog_fetch() so they stay consistent. On the region-backed parts
+ * (BASIC_NVM_ON_REGION: Ambiq MRAM, RP2350 flash) the program lives at the
+ * BASE of the carved NVM region's reserved tail ([magic][len][text], gate-last
+ * through the backend's program op); elsewhere it rides the tiku_persist store
+ * over the BASIC_NVM_PERSISTENT save buffer.  The F1 run-state checkpoint is
+ * the tail's second tenant, at the TOP -- see tiku_basic_ckpt.inl, which also
+ * asserts the two slots fit the tail together.
  */
 
-#if defined(PLATFORM_AMBIQ)
+#if BASIC_NVM_ON_REGION
 #define BASIC_REGION_MAGIC  0x42415350u   /* 'BASP' */
 _Static_assert(TIKU_BASIC_SAVE_BUF_BYTES + 8u <= TIKU_NVM_RESERVED_BYTES,
                "BASIC save buffer larger than the reserved NVM region tail");
 
-/* Base of the reserved NVM-region tail this slot owns, or NULL. */
+/* Base of the reserved NVM-region tail (program slot at offset 0), or NULL. */
 static uint8_t *
 basic_region_slot(void)
 {
@@ -104,7 +97,7 @@ basic_persist_ensure(void)
 static int
 basic_prog_store(const char *text, size_t len)
 {
-#if defined(PLATFORM_AMBIQ)
+#if BASIC_NVM_ON_REGION
     uint8_t *slot  = basic_region_slot();
     uint32_t magic = BASIC_REGION_MAGIC;
     uint32_t lenw  = (uint32_t)len;
@@ -149,7 +142,7 @@ basic_prog_store(const char *text, size_t len)
 static int
 basic_prog_fetch(char *buf, size_t max, size_t *out_len)
 {
-#if defined(PLATFORM_AMBIQ)
+#if BASIC_NVM_ON_REGION
     const uint8_t *slot = basic_region_slot();
     uint32_t magic, lenw;
 
@@ -185,6 +178,17 @@ basic_prog_fetch(char *buf, size_t max, size_t *out_len)
 /* SAVE / LOAD                                                               */
 /*---------------------------------------------------------------------------*/
 
+/* Shared SAVE/LOAD serialization scratch. SAVE serializes the program into
+ * it, LOAD deserializes out of it -- the two are single-threaded interpreter
+ * commands that never run concurrently, so one buffer serves both. Sized +1
+ * for LOAD's NUL terminator; SAVE uses the first TIKU_BASIC_SAVE_BUF_BYTES.
+ * Folding the two per-function statics into one matters on RP2350, where
+ * BASIC_SCRATCH is plain .bss (no .ssram section): each copy is
+ * PROGRAM_LINES*(LINE_MAX+8) = ~76 KB on the 1024-line BIG tier, and the
+ * second one tipped the all-features HTTPS+WiFi+BASIC build over the
+ * 520 KB SRAM. */
+static BASIC_SCRATCH char basic_persist_scratch[TIKU_BASIC_SAVE_BUF_BYTES + 1];
+
 /**
  * @brief Serialise the in-memory program in ascending order and
  *        commit it to FRAM under BASIC_PERSIST_KEY.
@@ -194,9 +198,11 @@ basic_prog_fetch(char *buf, size_t max, size_t *out_len)
 static int
 basic_save_to_persist(void)
 {
-    /* Serialize ascending-ordered program lines (the shape LIST prints) into a
-     * buffer, then commit it under the default slot via basic_prog_store(). */
-    static BASIC_SCRATCH char tmp[TIKU_BASIC_SAVE_BUF_BYTES];
+    /* Serialize ascending-ordered program lines (the shape LIST prints) into
+     * the shared scratch, then commit it under the default slot via
+     * basic_prog_store(). Capacity mirrors the old per-function buffer. */
+    char *const  tmp     = basic_persist_scratch;
+    const size_t tmp_cap = TIKU_BASIC_SAVE_BUF_BYTES;
     size_t      pos = 0;
     uint16_t    cur = 0;
 
@@ -206,14 +212,23 @@ basic_save_to_persist(void)
         if (idx < 0) {
             break;
         }
-        n = snprintf(tmp + pos, sizeof(tmp) - pos, "%u %s\n",
-                     (unsigned)prog[idx].number, prog[idx].text);
-        if (n < 0 || (size_t)n >= sizeof(tmp) - pos) {
-            SHELL_PRINTF(SH_RED
-                         "? save: program too large for buffer\n" SH_RST);
+        /* Number, then the DETOKENIZED body (A2): the on-media format stays
+         * plain text, so pre-A2 saves load unchanged and LOAD re-crunches. */
+        n = snprintf(tmp + pos, tmp_cap - pos, "%u ",
+                     (unsigned)prog[idx].number);
+        if (n < 0 || (size_t)n >= tmp_cap - pos) {
+            basic_report(TIKU_BASIC_ERR_IO, "save: program too large for buffer");
             return -1;
         }
         pos += (size_t)n;
+        n = basic_detok(tmp + pos, tmp_cap - pos, prog[idx].text);
+        if (n < 0 || (size_t)n + 2u > tmp_cap - pos) {
+            basic_report(TIKU_BASIC_ERR_IO, "save: program too large for buffer");
+            return -1;
+        }
+        pos += (size_t)n;
+        tmp[pos++] = '\n';
+        tmp[pos]   = '\0';
         if (prog[idx].number == 0xFFFFu) {
             break;
         }
@@ -221,7 +236,7 @@ basic_save_to_persist(void)
     }
 
     if (basic_prog_store(tmp, pos) != 0) {
-        SHELL_PRINTF(SH_RED "? save failed\n" SH_RST);
+        basic_report(TIKU_BASIC_ERR_IO, "save failed");
         return -1;
     }
     SHELL_PRINTF(SH_GREEN "saved %u bytes" SH_RST "\n", (unsigned)pos);
@@ -238,14 +253,17 @@ basic_save_to_persist(void)
 static int
 basic_load_from_persist(void)
 {
-    static BASIC_SCRATCH char tmp[TIKU_BASIC_SAVE_BUF_BYTES + 1];
+    /* Deserializes from the shared scratch (see basic_persist_scratch
+     * above); full capacity including the +1 for the NUL terminator. */
+    char *const  tmp     = basic_persist_scratch;
+    const size_t tmp_cap = TIKU_BASIC_SAVE_BUF_BYTES + 1u;
     size_t      n_read = 0;
     char       *line_start;
     char       *p;
 
-    if (basic_prog_fetch(tmp, sizeof(tmp) - 1u, &n_read) != 0 ||
+    if (basic_prog_fetch(tmp, tmp_cap - 1u, &n_read) != 0 ||
         n_read == 0u) {
-        SHELL_PRINTF(SH_RED "? load: no saved program\n" SH_RST);
+        basic_report(TIKU_BASIC_ERR_IO, "load: no saved program");
         return -1;
     }
     tmp[n_read] = '\0';

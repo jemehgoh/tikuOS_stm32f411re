@@ -1,5 +1,6 @@
 /*
- * Tiku Operating System
+ * Tiku Operating System v0.05
+ * Simple. Ubiquitous. Intelligence, Everywhere.
  * http://tiku-os.org
  *
  * Authors: Ambuj Varshney <ambuj@tiku-os.org>
@@ -28,47 +29,50 @@
 
 #if TIKU_BASIC_SUBS_ENABLE
 
-#ifndef TIKU_BASIC_CALL_DEPTH
-#define TIKU_BASIC_CALL_DEPTH  8
-#endif
-#ifndef TIKU_BASIC_SCOPE_MAX
-#define TIKU_BASIC_SCOPE_MAX   32      /* total saved params+locals, all frames */
-#endif
-
-typedef struct { uint16_t idx; long old; } basic_scope_t;
-typedef struct { uint16_t ret_line; uint8_t scope_base; } basic_frame_t;
-
-static basic_scope_t basic_scope[TIKU_BASIC_SCOPE_MAX];
-static uint8_t       basic_scope_sp;
-static basic_frame_t basic_frames[TIKU_BASIC_CALL_DEPTH];
-static uint8_t       basic_call_sp;
+/* TIKU_BASIC_CALL_DEPTH / TIKU_BASIC_SCOPE_MAX, the basic_frame_t / basic_scope_t
+ * types, and the basic_frames / basic_scope stacks are declared in
+ * tiku_basic_state.inl (ahead of the F1 checkpoint, which serializes them).
+ * This file owns the SUB / CALL / LOCAL logic that operates on them. */
 
 /* Does a (whitespace-stripped) line text start with keyword KW followed by a
- * word boundary? KW must be upper-case. */
+ * word boundary? KW must be upper-case.  Accepts crunched token bytes (A2). */
 static int
 subs_line_kw(const char *t, const char *kw)
 {
     while (*t == ' ' || *t == '\t') t++;
-    while (*kw) {
-        if (to_upper(*t) != *kw) return 0;
-        t++; kw++;
-    }
-    return !is_word_cont(*t);
+    return tok_kw_at(t, kw) != 0;
 }
 
-/* Find a `SUB <name>` definition line. Returns its prog index, or -1. */
+/* Find a `SUB <name>` definition line via the A3 registry (built once per
+ * edit-generation; overflow falls back to the full scan).  Returns the prog
+ * index, or -1. */
 static int
 prog_find_sub(const char *name, size_t nlen)
 {
-    int i;
+    int     i;
+    size_t  k;
+    uint8_t r;
+    if (!basic_symreg_ok) basic_symreg_build();
+    for (r = 0; r < basic_sub_reg_n; r++) {
+        const char *t = prog[basic_sub_reg[r].idx].text +
+                        basic_sub_reg[r].off;
+        for (k = 0; k < nlen; k++) {
+            if (to_upper(t[k]) != to_upper(name[k])) break;
+        }
+        if (k == nlen && !is_word_cont(t[nlen])) {
+            return (int)basic_sub_reg[r].idx;
+        }
+    }
+    if (!basic_sub_reg_ovf) return -1;
+    /* Registry overflowed: fall back to the full scan. */
     for (i = 0; i < TIKU_BASIC_PROGRAM_LINES; i++) {
         const char *t;
-        size_t k;
         if (prog[i].number == 0) continue;
-        if (!subs_line_kw(prog[i].text, "SUB")) continue;
         t = prog[i].text;
         while (*t == ' ' || *t == '\t') t++;
-        t += 3;                                   /* past "SUB" */
+        k = tok_kw_at(t, "SUB");              /* 1 byte crunched, 3 spelled */
+        if (k == 0) continue;
+        t += k;
         while (*t == ' ' || *t == '\t') t++;
         for (k = 0; k < nlen; k++) {
             if (to_upper(t[k]) != to_upper(name[k])) break;
@@ -76,6 +80,29 @@ prog_find_sub(const char *name, size_t nlen)
         if (k == nlen && !is_word_cont(t[nlen])) return i;
     }
     return -1;
+}
+
+/* Restore one saved scope slot to its caller value (numeric or string). */
+static void
+basic_scope_restore_one(const basic_scope_t *s)
+{
+#if TIKU_BASIC_STRVARS_ENABLE
+    if (s->is_str) {
+        basic_strvars[s->idx] = s->old_str;
+        return;
+    }
+#endif
+    basic_vars[s->idx] = s->old;
+}
+
+/* Unwind the scope stack back to `base`, restoring each slot. */
+static void
+basic_scope_unwind(uint8_t base)
+{
+    while (basic_scope_sp > base) {
+        basic_scope_sp--;
+        basic_scope_restore_one(&basic_scope[basic_scope_sp]);
+    }
 }
 
 /* SUB reached by fall-through: skip the body, resume after the matching
@@ -89,8 +116,7 @@ exec_sub(const char **p)
     for (;;) {
         int ni = prog_next_index((uint16_t)(ln + 1));
         if (ni < 0) {
-            basic_error = 1;
-            SHELL_PRINTF(SH_RED "? SUB without ENDSUB\n" SH_RST);
+            basic_throw(TIKU_BASIC_ERR_GENERAL, "SUB without ENDSUB");
             return;
         }
         ln = prog[ni].number;
@@ -121,26 +147,23 @@ exec_call(const char **p)
     skip_ws(p);
     n = parse_ident(p, name, sizeof(name));
     if (n == 0) {
-        basic_error = 1;
-        SHELL_PRINTF(SH_RED "? CALL needs a SUB name\n" SH_RST);
+        basic_throw(TIKU_BASIC_ERR_GENERAL, "CALL needs a SUB name");
         return;
     }
     si = prog_find_sub(name, (size_t)n);
     if (si < 0) {
-        basic_error = 1;
-        SHELL_PRINTF(SH_RED "? unknown SUB %s\n" SH_RST, name);
+        basic_throwf(TIKU_BASIC_ERR_GENERAL, "unknown SUB %s", name);
         return;
     }
     if (basic_call_sp >= TIKU_BASIC_CALL_DEPTH) {
-        basic_error = 1;
-        SHELL_PRINTF(SH_RED "? CALL too deep\n" SH_RST);
+        basic_throw(TIKU_BASIC_ERR_GENERAL, "CALL too deep");
         return;
     }
 
     /* Position sp at the SUB header's parameter list. */
     sp = prog[si].text;
     while (*sp == ' ' || *sp == '\t') sp++;
-    sp += 3;                                       /* past "SUB" */
+    sp += tok_kw_at(sp, "SUB");                    /* past SUB (token or text) */
     while (*sp == ' ' || *sp == '\t') sp++;
     while (is_word_cont(*sp)) sp++;                /* past the name */
     skip_ws(&sp);
@@ -150,37 +173,53 @@ exec_call(const char **p)
     basic_frames[basic_call_sp].scope_base = basic_scope_sp;
 
     /* Bind positionally. Each iteration: one param var from sp, one arg expr
-     * from the call site. Stop at the end of either list. */
+     * from the call site. Params may be numeric or string ($). Stop at the end
+     * of either list. */
     if (*sp == '(') sp++;
     if (**p == '(') (*p)++;
     for (;;) {
-        int  idx;
-        long arg;
+        int            idx, is_str = 0;
+        basic_scope_t *s;
         skip_ws(&sp);
         if (*sp == ')' || *sp == '\0') break;      /* no more params */
-        if (!parse_var(&sp, &idx)) { basic_error = 1; break; }
-        arg = parse_expr(p);                       /* matching arg */
-        if (basic_error) break;
+        if (!parse_var_full(&sp, &idx, &is_str)) { basic_error = 1; break; }
         if (basic_scope_sp >= TIKU_BASIC_SCOPE_MAX) {
-            basic_error = 1;
-            SHELL_PRINTF(SH_RED "? scope stack full\n" SH_RST);
+            basic_throw(TIKU_BASIC_ERR_NOMEM, "scope stack full");
             break;
         }
-        basic_scope[basic_scope_sp].idx = (uint16_t)idx;
-        basic_scope[basic_scope_sp].old = basic_vars[idx];
-        basic_scope_sp++;
-        basic_vars[idx] = arg;
+        s = &basic_scope[basic_scope_sp];
+        s->idx    = (uint16_t)idx;
+        s->is_str = (uint8_t)is_str;
+#if TIKU_BASIC_STRVARS_ENABLE
+        if (is_str) {
+            char buf[TIKU_BASIC_STR_BUF_CAP];
+            if (parse_strexpr(p, buf, sizeof(buf)) != 0) break;   /* err set */
+            /* Push the saved pointer BEFORE allocating: the alloc may trigger
+             * A4 compaction, which must see the shadowed string as a root. */
+            s->old_str = basic_strvars[idx];
+            s->old     = 0;
+            basic_scope_sp++;
+            basic_strvars[idx] = basic_str_alloc(buf, strlen(buf));
+            if (basic_strvars[idx] == NULL) {
+                basic_throw(TIKU_BASIC_ERR_NOMEM, "out of string heap");
+                break;
+            }
+        } else
+#endif
+        {
+            long arg = parse_expr(p);              /* matching numeric arg */
+            if (basic_error) break;
+            s->old     = basic_vars[idx];
+            s->old_str = NULL;
+            basic_scope_sp++;
+            basic_vars[idx] = arg;
+        }
         skip_ws(&sp); skip_ws(p);
         if (*sp == ',') sp++;
         if (**p == ',') (*p)++;
     }
     if (basic_error) {
-        /* unwind the partial bindings */
-        while (basic_scope_sp > basic_frames[basic_call_sp].scope_base) {
-            basic_scope_sp--;
-            basic_vars[basic_scope[basic_scope_sp].idx] =
-                basic_scope[basic_scope_sp].old;
-        }
+        basic_scope_unwind(basic_frames[basic_call_sp].scope_base);
         return;
     }
     basic_call_sp++;
@@ -194,27 +233,38 @@ static void
 exec_local(const char **p)
 {
     if (basic_call_sp == 0) {
-        basic_error = 1;
-        SHELL_PRINTF(SH_RED "? LOCAL outside a SUB\n" SH_RST);
+        basic_throw(TIKU_BASIC_ERR_GENERAL, "LOCAL outside a SUB");
         return;
     }
     for (;;) {
-        int idx;
+        int            idx, is_str = 0;
+        basic_scope_t *s;
         skip_ws(p);
-        if (!parse_var(p, &idx)) {
-            basic_error = 1;
-            SHELL_PRINTF(SH_RED "? LOCAL needs a variable\n" SH_RST);
+        if (!parse_var_full(p, &idx, &is_str)) {
+            basic_throw(TIKU_BASIC_ERR_GENERAL, "LOCAL needs a variable");
             return;
         }
         if (basic_scope_sp >= TIKU_BASIC_SCOPE_MAX) {
-            basic_error = 1;
-            SHELL_PRINTF(SH_RED "? scope stack full\n" SH_RST);
+            basic_throw(TIKU_BASIC_ERR_NOMEM, "scope stack full");
             return;
         }
-        basic_scope[basic_scope_sp].idx = (uint16_t)idx;
-        basic_scope[basic_scope_sp].old = basic_vars[idx];
-        basic_scope_sp++;
-        basic_vars[idx] = 0;
+        s = &basic_scope[basic_scope_sp];
+        s->idx    = (uint16_t)idx;
+        s->is_str = (uint8_t)is_str;
+#if TIKU_BASIC_STRVARS_ENABLE
+        if (is_str) {
+            s->old_str = basic_strvars[idx];
+            s->old     = 0;
+            basic_scope_sp++;
+            basic_strvars[idx] = NULL;      /* fresh, empty string local */
+        } else
+#endif
+        {
+            s->old     = basic_vars[idx];
+            s->old_str = NULL;
+            basic_scope_sp++;
+            basic_vars[idx] = 0;
+        }
         skip_ws(p);
         if (**p == ',') { (*p)++; continue; }
         break;
@@ -228,13 +278,19 @@ exec_endsub(void)
     basic_frame_t f;
     if (basic_call_sp == 0) return;                /* not in a CALL -- no-op */
     f = basic_frames[--basic_call_sp];
-    while (basic_scope_sp > f.scope_base) {
-        basic_scope_sp--;
-        basic_vars[basic_scope[basic_scope_sp].idx] =
-            basic_scope[basic_scope_sp].old;
-    }
+    basic_scope_unwind(f.scope_base);
     basic_pc = f.ret_line;
     basic_pc_set = 1;
+}
+
+/* RESULT expr -- set the SUB's return value.  The caller reads it back with
+ * the bare `RESULT` numeric function (expr_call) right after CALL. */
+static void
+exec_result(const char **p)
+{
+    long v = parse_expr(p);
+    if (basic_error) return;
+    basic_sub_result = v;
 }
 
 #endif /* TIKU_BASIC_SUBS_ENABLE */

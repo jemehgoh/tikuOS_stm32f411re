@@ -11,18 +11,6 @@
  * on the selected platform. This is the single point where the arch
  * watchdog header enters the include chain.
  *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at:
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- *
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -37,6 +25,8 @@
 #include "arch/st/stm32f411re/tiku_cpu_watchdog_arch.h"
 #elif defined(PLATFORM_AMBIQ)
 #include "arch/ambiq/tiku_cpu_watchdog_arch.h"
+#elif defined(PLATFORM_NORDIC)
+#include "arch/nordic/tiku_cpu_watchdog_arch.h"
 #endif
 
 /*---------------------------------------------------------------------------*/
@@ -96,6 +86,10 @@
 /*---------------------------------------------------------------------------*/
 
 #if defined(PLATFORM_MSP430)
+#define TIKU_WATCHDOG_INTERVAL_SUPPORTED 1
+#define tiku_watchdog_arch_config(mode, src, isel, held, kick) \
+    tiku_cpu_msp430_watchdog_config_arch((mode), (src), (isel), \
+                                         (held), (kick))
 #define tiku_watchdog_arch_on(src, isel) \
     tiku_cpu_msp430_watchdog_on_arch((src), (isel))
 #define tiku_watchdog_arch_off() \
@@ -107,6 +101,7 @@
 #define tiku_watchdog_arch_resume(kick) \
     tiku_cpu_msp430_watchdog_resume_arch(kick)
 #elif defined(PLATFORM_RP2350)
+#define TIKU_WATCHDOG_INTERVAL_SUPPORTED 0
 #define tiku_watchdog_arch_on(src, isel) \
     tiku_cpu_rp2350_watchdog_on_arch((src), (isel))
 #define tiku_watchdog_arch_off() \
@@ -118,6 +113,7 @@
 #define tiku_watchdog_arch_resume(kick) \
     tiku_cpu_rp2350_watchdog_resume_arch(kick)
 #elif defined(PLATFORM_STM32F411)
+#define TIKU_WATCHDOG_INTERVAL_SUPPORTED 0
 #define tiku_watchdog_arch_on(src, isel) \
     tiku_cpu_stm32f411_watchdog_on_arch((src), (isel))
 #define tiku_watchdog_arch_off() \
@@ -129,6 +125,7 @@
 #define tiku_watchdog_arch_resume(kick) \
     tiku_cpu_stm32f411_watchdog_resume_arch(kick)
 #elif defined(PLATFORM_AMBIQ)
+#define TIKU_WATCHDOG_INTERVAL_SUPPORTED 0
 #define tiku_watchdog_arch_on(src, isel) \
     tiku_cpu_ambiq_watchdog_on_arch((src), (isel))
 #define tiku_watchdog_arch_off() \
@@ -139,6 +136,18 @@
     tiku_cpu_ambiq_watchdog_pause_arch()
 #define tiku_watchdog_arch_resume(kick) \
     tiku_cpu_ambiq_watchdog_resume_arch(kick)
+#elif defined(PLATFORM_NORDIC)
+#define TIKU_WATCHDOG_INTERVAL_SUPPORTED 0
+#define tiku_watchdog_arch_on(src, isel) \
+    tiku_cpu_nordic_watchdog_on_arch((src), (isel))
+#define tiku_watchdog_arch_off() \
+    tiku_cpu_nordic_watchdog_off_arch()
+#define tiku_watchdog_arch_kick() \
+    tiku_cpu_nordic_watchdog_kick_arch()
+#define tiku_watchdog_arch_pause() \
+    tiku_cpu_nordic_watchdog_pause_arch()
+#define tiku_watchdog_arch_resume(kick) \
+    tiku_cpu_nordic_watchdog_resume_arch(kick)
 #endif
 
 #endif /* TIKU_WATCHDOG_HAL_H_ */

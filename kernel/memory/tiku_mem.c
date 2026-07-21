@@ -10,18 +10,6 @@
  * Implements the arena (bump-pointer) allocator for fragmentation-free
  * memory management on microcontrollers with small SRAM.
  *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at:
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- *
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -382,6 +370,11 @@ void tiku_mem_guard_note_violation(void)
     mem_guard_violations++;
 }
 
+/**
+ * @brief Number of worker-context allocator calls refused since boot.
+ *
+ * @return The running count of TIKU_MEM_KERNEL_ONLY guard violations.
+ */
 uint32_t tiku_mem_guard_violations(void)
 {
     return mem_guard_violations;
@@ -391,9 +384,11 @@ uint32_t tiku_mem_guard_violations(void)
 void tiku_mem_init(void)
 {
     tiku_mem_arch_size_t count;
+    const tiku_mem_region_t *table;
 
     /* Region registry must be available before any other subsystem */
-    tiku_region_init(tiku_region_arch_get_table(&count), count);
+    table = tiku_region_arch_get_table(&count);
+    tiku_region_init(table, count);
 
     /* arch_init runs FIRST so any port that mirrors .uninit out to
      * non-volatile storage (e.g. RP2350's flash backup sector) can

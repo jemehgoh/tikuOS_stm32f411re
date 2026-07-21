@@ -17,12 +17,6 @@
  * the arch driver directly; the indirection exists only so that
  * higher-level modules read as platform-agnostic.
  *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at:
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -38,6 +32,8 @@
 #include <arch/st/stm32f411re/tiku_gpio_arch.h>
 #elif defined(PLATFORM_AMBIQ)
 #include <arch/ambiq/tiku_gpio_arch.h>
+#elif defined(PLATFORM_NORDIC)
+#include <arch/nordic/tiku_gpio_arch.h>
 #else
 #include <arch/msp430/tiku_gpio_arch.h>
 #endif

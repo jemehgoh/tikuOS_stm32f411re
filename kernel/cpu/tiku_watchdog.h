@@ -10,18 +10,6 @@
  * Platform-independent watchdog timer API. All hardware access is
  * delegated to the HAL (tiku_watchdog_hal.h).
  *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at:
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- *
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -81,6 +69,15 @@ tiku_wdt_clk_t tiku_watchdog_get_clk(void);
 
 /** @brief Return the current interval divider */
 tiku_wdt_interval_t tiku_watchdog_get_interval(void);
+
+/** @brief Return whether the stored configuration starts held. */
+int tiku_watchdog_get_start_held(void);
+
+/** @brief Return whether the stored configuration kicks when initialized. */
+int tiku_watchdog_get_kick_on_start(void);
+
+/** @brief Return non-zero when @p mode has a real backend on this build. */
+int tiku_watchdog_mode_supported(tiku_wdt_mode_t mode);
 
 /** @brief Disable the watchdog timer entirely */
 void tiku_watchdog_off(void);

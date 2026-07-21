@@ -1,5 +1,6 @@
 /*
- * Tiku Operating System
+ * Tiku Operating System v0.05
+ * Simple. Ubiquitous. Intelligence, Everywhere.
  * http://tiku-os.org
  *
  * Authors: Ambuj Varshney <ambuj@tiku-os.org>
@@ -87,6 +88,11 @@ void tiku_hang_record(const struct tiku_process *p)
 {
     const char *n = (p != NULL && p->name != NULL) ? p->name : "?";
     uint8_t i;
+    /* .persistent.warm is warm-surviving SRAM on Cortex-M but MPU-write-
+     * protected FRAM on MSP430, so open the NVM window before storing the
+     * culprit -- otherwise the MPU silently drops the write and the recovery
+     * boot finds no record. */
+    uint16_t mpu_state = tiku_mpu_unlock_nvm();
 
     tiku_hang_warm.pid = (p != NULL) ? p->pid : (int8_t)-1;
     for (i = 0u; i < (TIKU_HANG_NAMELEN - 1u) && n[i] != '\0'; i++) {
@@ -94,6 +100,8 @@ void tiku_hang_record(const struct tiku_process *p)
     }
     tiku_hang_warm.name[i] = '\0';
     tiku_hang_warm.magic = TIKU_HANG_MAGIC;   /* validate LAST (data first) */
+
+    tiku_mpu_lock_nvm(mpu_state);
 }
 
 void tiku_hang_tick(void)
@@ -128,6 +136,12 @@ void tiku_hang_boot_init(void)
     tiku_hang_warm.magic = 0u;                /* one-shot: next boot is clean */
 }
 
+/**
+ * @brief Whether a valid hang record survived into this boot.
+ *
+ * @return Non-zero if the warm-boot record captured at boot carries the
+ *         expected magic (the previous boot recorded a hang culprit).
+ */
 static uint8_t tiku_hang_have(void)
 {
     return (uint8_t)(tiku_hang_boot.magic == TIKU_HANG_MAGIC);

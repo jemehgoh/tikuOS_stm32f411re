@@ -1,5 +1,6 @@
 /*
- * Tiku Operating System
+ * Tiku Operating System v0.05
+ * Simple. Ubiquitous. Intelligence, Everywhere.
  * http://tiku-os.org
  *
  * Authors: Ambuj Varshney <ambuj@tiku-os.org>
@@ -12,18 +13,6 @@
  * RTT or a timeout.  Replies arrive through the shared RX path -- the shell
  * stays interactive the whole time.  After `count` probes it prints a summary
  * and releases the callback.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at:
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -94,6 +83,9 @@ ping_parse_ip(const char *s, uint8_t out[4])
     return (*s == '\0') ? 1u : 0u;
 }
 
+/**
+ * @brief Parse a decimal string into a uint16_t (no error checking).
+ */
 static uint16_t
 ping_parse_u16(const char *s)
 {
@@ -118,6 +110,12 @@ ping_on_reply(const uint8_t *src_ip, uint16_t id, uint16_t seq)
     }
 }
 
+/**
+ * @brief Build and transmit one ICMP echo request to the ping target.
+ *
+ * Advances the sequence number, stamps the send time, and marks the
+ * probe as awaiting a reply for the tick handler.
+ */
 static void
 ping_send_probe(void)
 {

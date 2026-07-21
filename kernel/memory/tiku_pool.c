@@ -27,18 +27,6 @@
  *   pointer is written back. This is the classic freelist technique used
  *   in kernels and allocators where per-object overhead must be zero.
  *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at:
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- *
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -149,6 +137,18 @@ static tiku_mem_err_t pool_write_next(const tiku_pool_t *pool,
 #endif
 static uint8_t pool_nvm_stage[TIKU_POOL_NVM_STAGE_BYTES];
 
+/**
+ * @brief Thread a pool's free-list through NVM-backed block storage.
+ *
+ * The NVM path (Ambiq / RP2350) cannot rewrite a block in place without an
+ * erase per pointer, so blocks at least one stage wide get a direct per-block
+ * next-pointer write, while small blocks that share a sector are coalesced and
+ * written a staged run at a time.
+ *
+ * @param pool  Pool whose block_count / block_size / buf describe the region.
+ * @return TIKU_MEM_OK, or an NVM-tier error on write failure (leaving a
+ *         half-built free-list the caller must reject).
+ */
 static tiku_mem_err_t build_freelist_nvm(tiku_pool_t *pool)
 {
     const tiku_mem_arch_size_t bs = pool->block_size;
@@ -241,6 +241,23 @@ static tiku_mem_err_t build_freelist(tiku_pool_t *pool)
 
     pool->free_head = pool->buf;
     return TIKU_MEM_OK;
+}
+
+/* Bounded freelist membership check used to reject double-free.  Pool free is
+ * normally O(1); the validation walk is O(n), but embedded pools are small and
+ * preventing a used_count underflow / cyclic freelist is worth the bound. */
+static int block_is_already_free(const tiku_pool_t *pool, const void *block)
+{
+    const void *cur = pool->free_head;
+    tiku_mem_arch_size_t seen = 0;
+    while (cur != NULL && seen < pool->block_count) {
+        if (cur == block) {
+            return 1;
+        }
+        cur = *(void * const *)(const void *)cur;
+        seen++;
+    }
+    return 0;
 }
 
 /*---------------------------------------------------------------------------*/
@@ -511,6 +528,9 @@ tiku_mem_err_t tiku_pool_free(tiku_pool_t *pool, void *ptr)
     /* Validate: ptr must be aligned to a block boundary */
     offset = (tiku_mem_arch_size_t)(block - pool->buf);
     if (offset % pool->block_size != 0) {
+        return TIKU_MEM_ERR_INVALID;
+    }
+    if (block_is_already_free(pool, block)) {
         return TIKU_MEM_ERR_INVALID;
     }
 

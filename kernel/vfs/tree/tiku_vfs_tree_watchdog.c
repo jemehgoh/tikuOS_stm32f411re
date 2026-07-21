@@ -24,18 +24,6 @@
  * settings by re-reading them through the tiku_watchdog_get_*()
  * accessors, so e.g. changing the clock never alters the interval.
  *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at:
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- *
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -70,19 +58,6 @@ watchdog_mode_read(char *buf, size_t max)
     return snprintf(buf, max, "%s\n", tiku_watchdog_mode_str());
 }
 
-/**
- * @brief Write handler for /sys/watchdog/mode.
- *
- * Accepts "watchdog" (reset on timeout) or "interval" (periodic
- * interrupt, no reset).  Only the first character is significant:
- * 'w' selects watchdog mode, 'i' selects interval mode, anything
- * else is rejected.  Clock source and interval are preserved by
- * re-reading them from the driver before reconfiguring.
- *
- * @param buf  Input text ("w..." or "i...")
- * @param len  Input length in bytes (unused — first byte decides)
- * @return 0 on success, -1 on unrecognised input
- */
 /* True iff the leading token of @buf (up to len, a NUL, or whitespace) is
  * exactly @tok.  Lets the mode/clock writes accept a full word ("watchdog",
  * "aclk") or its one-letter shorthand ("w", "a") while rejecting anything
@@ -103,6 +78,19 @@ wdt_token_is(const char *buf, size_t len, const char *tok)
     return tok[i] == '\0';         /* matched iff all of tok was consumed */
 }
 
+/**
+ * @brief Write handler for /sys/watchdog/mode.
+ *
+ * Selects the watchdog timer mode from a token: "watchdog"/"w" arms
+ * reset-on-timeout, "interval"/"i" arms the periodic-interrupt (no
+ * reset) mode; any other input is rejected.  The current clock source
+ * and interval are read back from the driver and preserved across the
+ * reconfigure.
+ *
+ * @param buf  Input token ("watchdog"/"w" or "interval"/"i")
+ * @param len  Input length in bytes
+ * @return 0 on success, TIKU_VFS_EINVAL on an unrecognised token
+ */
 static int
 watchdog_mode_write(const char *buf, size_t len)
 {
@@ -112,6 +100,9 @@ watchdog_mode_write(const char *buf, size_t len)
     } else if (wdt_token_is(buf, len, "interval") || wdt_token_is(buf, len, "i")) {
         mode = TIKU_WDT_MODE_INTERVAL;
     } else {
+        return TIKU_VFS_EINVAL;
+    }
+    if (!tiku_watchdog_mode_supported(mode)) {
         return TIKU_VFS_EINVAL;
     }
     tiku_watchdog_config(mode, tiku_watchdog_get_clk(),

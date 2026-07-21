@@ -1,5 +1,6 @@
 /*
- * Tiku Operating System
+ * Tiku Operating System v0.05
+ * Simple. Ubiquitous. Intelligence, Everywhere.
  * http://tiku-os.org
  *
  * Authors: Ambuj Varshney <ambuj@tiku-os.org>
@@ -19,18 +20,6 @@
  *
  * exec_if itself lives in tiku_basic_dispatch.inl since it depends
  * on symbols from this piece.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at:
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
- * implied.  See the License for the specific language governing
- * permissions and limitations under the License.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -81,10 +70,11 @@ multi_if_starts_here(const char *t)
             while (*t == ' ' || *t == '\t') t++;
         }
     }
-    if (!(to_upper(t[0]) == 'I' && to_upper(t[1]) == 'F') ||
-        is_word_cont(t[2])) return 0;
+    if (tok_kw_at(t, "IF") == 0) return 0;
     end = (int)strlen(t);
     while (end > 0 && (t[end-1] == ' ' || t[end-1] == '\t')) end--;
+    /* Line must END with THEN: the crunched token byte, or raw text. */
+    if (end >= 1 && (uint8_t)t[end-1] == BASIC_TOK_BYTE(THEN)) return 1;
     if (end < 4) return 0;
     if (to_upper(t[end-4]) != 'T' || to_upper(t[end-3]) != 'H' ||
         to_upper(t[end-2]) != 'E' || to_upper(t[end-1]) != 'N') return 0;
@@ -106,10 +96,28 @@ line_is_else_kw(const char *t)
             while (*t == ' ' || *t == '\t') t++;
         }
     }
-    if (to_upper(t[0]) == 'E' && to_upper(t[1]) == 'L' &&
-        to_upper(t[2]) == 'S' && to_upper(t[3]) == 'E' &&
-        !is_word_cont(t[4])) return 1;
+    if (tok_kw_at(t, "ELSE") != 0) return 1;
     return 0;
+}
+
+/* Is this line `ELSEIF <cond> THEN`?  Returns a pointer to the condition
+ * text (just past the ELSEIF keyword) if so, else NULL.  Token-exact --
+ * a plain `ELSE` never matches (distinct token / word boundary). */
+static const char *
+line_is_elseif(const char *t)
+{
+    size_t k;
+    while (*t == ' ' || *t == '\t') t++;
+    if (is_alpha(*t)) {
+        const char *r = t;
+        while (is_word_cont(*r)) r++;
+        if (*r == ':') {
+            t = r + 1;
+            while (*t == ' ' || *t == '\t') t++;
+        }
+    }
+    k = tok_kw_at(t, "ELSEIF");
+    return (k != 0) ? t + k : NULL;
 }
 
 /* Is this line `END IF` or `ENDIF`? */
@@ -125,15 +133,14 @@ line_is_endif(const char *t)
             while (*t == ' ' || *t == '\t') t++;
         }
     }
-    if (to_upper(t[0]) == 'E' && to_upper(t[1]) == 'N' &&
-        to_upper(t[2]) == 'D') {
-        const char *q = t + 3;
-        if (*q == 'I' || *q == 'i') {
-            if (to_upper(q[1]) == 'F' && !is_word_cont(q[2])) return 1;
-        } else if (*q == ' ' || *q == '\t') {
+    {
+        size_t k;
+        if (tok_kw_at(t, "ENDIF") != 0) return 1;
+        k = tok_kw_at(t, "END");
+        if (k != 0) {
+            const char *q = t + k;
             while (*q == ' ' || *q == '\t') q++;
-            if (to_upper(q[0]) == 'I' && to_upper(q[1]) == 'F' &&
-                !is_word_cont(q[2])) return 1;
+            if (tok_kw_at(q, "IF") != 0) return 1;
         }
     }
     return 0;
@@ -185,6 +192,106 @@ find_matching_endif(uint16_t start_line)
     return endif_idx;
 }
 
+/* Branch keywords the false-path chain walker stops on. */
+enum { MIF_NONE = 0, MIF_ELSEIF, MIF_ELSE, MIF_ENDIF };
+
+/* From start_line, find the first depth-0 ELSEIF / ELSE / END IF, returning
+ * its prog index and setting *out_type.  Depth-aware: a nested multi-line IF
+ * bumps depth so its inner branch keywords are skipped.  -1 if none. */
+static int
+find_next_if_branch(uint16_t start_line, int *out_type)
+{
+    int depth = 0;
+    int idx = prog_next_index((uint16_t)(start_line + 1));
+    while (idx >= 0) {
+        const char *t = prog[idx].text;
+        if (multi_if_starts_here(t)) {
+            depth++;
+        } else if (line_is_endif(t)) {
+            if (depth == 0) { *out_type = MIF_ENDIF; return idx; }
+            depth--;
+        } else if (depth == 0 && line_is_elseif(t) != NULL) {
+            *out_type = MIF_ELSEIF; return idx;
+        } else if (depth == 0 && line_is_else_kw(t)) {
+            *out_type = MIF_ELSE; return idx;
+        }
+        if (prog[idx].number == 0xFFFFu) break;
+        idx = prog_next_index((uint16_t)(prog[idx].number + 1));
+    }
+    *out_type = MIF_NONE;
+    return -1;
+}
+
+/* Resume execution at the line AFTER prog index idx (a branch's body, or the
+ * line past END IF).  If idx was the program's last line, end the run. */
+static void
+multi_if_enter_after(int idx)
+{
+    int next = prog_next_index((uint16_t)(prog[idx].number + 1));
+    if (next < 0) {
+        basic_running = 0;
+        basic_pc = 0;
+        return;
+    }
+    basic_pc = prog[next].number;
+    basic_pc_set = 1;
+}
+
+/* A multi-line IF (or a prior ELSEIF) evaluated FALSE at from_line.  Walk the
+ * ELSEIF/ELSE chain: enter the first ELSEIF whose condition is true, else the
+ * ELSE body, else fall past END IF.  This is the whole multi-line branch
+ * selection -- reaching an ELSEIF/ELSE by fall-through always means "skip to
+ * END IF" (a branch already ran), handled by exec_elseif / exec_else_kw. */
+static void
+multi_if_take_false(uint16_t from_line, const char **p)
+{
+    uint16_t scan = from_line;
+    for (;;) {
+        int type;
+        int idx = find_next_if_branch(scan, &type);
+        if (idx < 0) {
+            basic_throw(TIKU_BASIC_ERR_GENERAL, "IF without END IF");
+            while (**p) (*p)++;
+            return;
+        }
+        if (type == MIF_ELSEIF) {
+            const char *c = line_is_elseif(prog[idx].text);
+            long cond = parse_cond(&c);
+            if (basic_error) { while (**p) (*p)++; return; }
+            if (cond) {
+                multi_if_enter_after(idx);   /* run this ELSEIF's body */
+                while (**p) (*p)++;
+                return;
+            }
+            scan = prog[idx].number;         /* condition false: keep walking */
+            continue;
+        }
+        /* ELSE body, or (END IF) past the whole block. */
+        multi_if_enter_after(idx);
+        while (**p) (*p)++;
+        return;
+    }
+}
+
+/* ELSEIF reached as a top-level statement -- like ELSE, it means a taken
+ * branch's body just finished, so skip forward past the matching END IF. */
+static void
+exec_elseif(const char **p)
+{
+    int idx;
+    if (!basic_running) {
+        basic_throw(TIKU_BASIC_ERR_GENERAL, "ELSEIF outside RUN");
+        return;
+    }
+    idx = find_matching_endif(basic_pc);
+    if (idx < 0) {
+        basic_throw(TIKU_BASIC_ERR_GENERAL, "ELSEIF without END IF");
+        return;
+    }
+    multi_if_enter_after(idx);
+    while (**p) (*p)++;
+}
+
 /* ELSE encountered as a top-level statement -- this means a multi-
  * line IF's THEN branch just finished. Skip forward past the
  * matching END IF. */
@@ -193,14 +300,12 @@ exec_else_kw(const char **p)
 {
     int idx;
     if (!basic_running) {
-        basic_error = 1;
-        SHELL_PRINTF(SH_RED "? ELSE outside RUN\n" SH_RST);
+        basic_throw(TIKU_BASIC_ERR_GENERAL, "ELSE outside RUN");
         return;
     }
     idx = find_matching_endif(basic_pc);
     if (idx < 0) {
-        basic_error = 1;
-        SHELL_PRINTF(SH_RED "? ELSE without END IF\n" SH_RST);
+        basic_throw(TIKU_BASIC_ERR_GENERAL, "ELSE without END IF");
         return;
     }
     {

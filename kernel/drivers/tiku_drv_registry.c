@@ -24,18 +24,6 @@
  * sequence, so one bad sensor cannot prevent the rest of the system
  * (and the scheduler) from coming up.  See drivers.md.
  *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at:
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- *
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -68,6 +56,8 @@
 /* PUBLIC FUNCTIONS                                                          */
 /*---------------------------------------------------------------------------*/
 
+static uint8_t registry_initialised;
+
 /**
  * @brief Walk the driver table and initialise every registered driver.
  *
@@ -95,6 +85,11 @@
 void tiku_drv_init_all(void)
 {
     uint8_t i;
+
+    if (registry_initialised) {
+        return;
+    }
+    registry_initialised = 1U;
 
     if (tiku_drv_table_count == 0U) {
         /* No drivers registered. Nothing to do — and zero

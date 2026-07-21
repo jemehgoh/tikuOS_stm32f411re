@@ -1,5 +1,6 @@
 /*
- * Tiku Operating System
+ * Tiku Operating System v0.05
+ * Simple. Ubiquitous. Intelligence, Everywhere.
  * http://tiku-os.org
  *
  * Authors: Ambuj Varshney <ambuj@tiku-os.org>
@@ -33,15 +34,25 @@
 /*
  * Region layout. The NVM memory tier bump-allocates from the FRONT of the
  * region; the top TIKU_NVM_RESERVED_BYTES is held back for durable NAMED data
- * that needs a STABLE location across boots (the BASIC saved program today, the
- * file store later) -- the tier never hands this tail out, so a named consumer
- * can own a fixed offset in [size - reserved, size). 0 where the tier owns the
- * whole region (no carved tail).
+ * that needs a STABLE location across boots -- the tier never hands this tail
+ * out, so a named consumer can own a fixed offset in [size - reserved, size).
+ * 0 where the tier owns the whole region (no carved tail).
+ *
+ * Current tail tenants (kernel/shell/basic): the BASIC saved-program slot at
+ * the tail BASE and the BASIC execution-state checkpoint slot at the tail TOP
+ * (PERSIST / RUN RESUME); a _Static_assert next to the slot layout in
+ * tiku_basic_ckpt.inl checks both fit.  Apollo510's tail is larger because its
+ * HUGE-tier program slot (1700 lines, ~258 KB) plus the checkpoint slot
+ * outgrew the shared 256 KB default.
  */
-#if defined(PLATFORM_AMBIQ)
+#if defined(AM_PART_APOLLO510)
+#define TIKU_NVM_RESERVED_BYTES  (320u * 1024u)   /* HUGE program + ckpt slots */
+#elif defined(PLATFORM_AMBIQ)
 #define TIKU_NVM_RESERVED_BYTES  (256u * 1024u)
 #elif defined(PLATFORM_RP2350)
 #define TIKU_NVM_RESERVED_BYTES  (128u * 1024u)   /* durable named-data tail */
+#elif defined(PLATFORM_NORDIC)
+#define TIKU_NVM_RESERVED_BYTES  (64u * 1024u)    /* RRAM tail (Ambiq-parity) */
 #else
 #define TIKU_NVM_RESERVED_BYTES  0u
 #endif
@@ -57,6 +68,12 @@
 #define TIKU_NVMFS_FS_BYTES  (512u * 1024u)    /* 512 KB (apollo4l) */
 #elif defined(PLATFORM_RP2350)
 #define TIKU_NVMFS_FS_BYTES  (2816u * 1024u)   /* 2.75 MB (rp2350 Flash FS) */
+#elif defined(PLATFORM_NORDIC)
+#define TIKU_NVMFS_FS_BYTES  (256u * 1024u)    /* 256 KB RRAM FS extent (the
+                                                * old 16 KB back-half + probe-
+                                                * scratch split is gone: the
+                                                * front is the NVM tier now,
+                                                * Ambiq-parity layout) */
 #else
 #define TIKU_NVMFS_FS_BYTES  0u
 #endif

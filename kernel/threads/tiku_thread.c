@@ -1,5 +1,6 @@
 /*
- * Tiku Operating System
+ * Tiku Operating System v0.05
+ * Simple. Ubiquitous. Intelligence, Everywhere.
  * http://tiku-os.org
  *
  * Authors: Ambuj Varshney <ambuj@tiku-os.org>
@@ -22,12 +23,6 @@
  *   - If nothing is runnable the switcher falls back to the kernel:
  *     its loop is the only context that knows how to idle properly
  *     (tickless stretch + WFI), so the "all quiet" case lands there.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at:
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -143,6 +138,20 @@ int tiku_thread_in_kernel(void)
     return !s_started || s_current == (tiku_thread_t *)0;
 }
 
+/**
+ * @brief Cooperative context-switch core: park the outgoing context and pick
+ *        the next worker to run.
+ *
+ * Invoked from the arch switch trampoline with the outgoing stack pointer.
+ * Charges the elapsed cycles to whoever was running (a worker or the kernel),
+ * saves its @p old_sp, checks the outgoing stack canary, then selects the next
+ * READY, in-budget worker from the round-robin cursor (an over-budget worker
+ * is skipped until a refill lifts it back over budget).  With no runnable
+ * worker it returns to the kernel context.
+ *
+ * @param old_sp  Stack pointer of the context being switched out.
+ * @return The stack pointer of the context to switch in.
+ */
 uint32_t *tiku_thread_switch(uint32_t *old_sp)
 {
     uint32_t now = tiku_thread_arch_cycles();
@@ -307,6 +316,29 @@ int tiku_thread_worker_ready(void)
         }
     }
     return 0;
+}
+
+uint8_t tiku_thread_count(void)
+{
+    /* The slot capacity to iterate; tiku_thread_get() returns NULL for an
+     * empty slot, so callers skip those. */
+    return (uint8_t)TIKU_THREADS_MAX;
+}
+
+tiku_thread_t *tiku_thread_get(uint8_t i)
+{
+    return (i < (uint8_t)TIKU_THREADS_MAX) ? s_threads[i] : (tiku_thread_t *)0;
+}
+
+tiku_thread_state_t tiku_thread_state(const tiku_thread_t *t)
+{
+    return (t != (const tiku_thread_t *)0) ? t->state : TIKU_THREAD_DONE;
+}
+
+int tiku_thread_is_done(const tiku_thread_t *t)
+{
+    /* A NULL/never-started worker reads as done so an await can't hang. */
+    return (t == (const tiku_thread_t *)0) || (t->state == TIKU_THREAD_DONE);
 }
 
 /*---------------------------------------------------------------------------*/
