@@ -76,6 +76,8 @@ void tiku_sched_init(void)
 {
     sched_state = TIKU_SCHED_RUNNING;
     idle_hook = (tiku_sched_idle_hook_t)0;
+    idle_count = 0u;
+    idle_tick_wakes = 1u;
 
     SCHED_PRINTF("Init: process subsystem\n");
     tiku_process_init();
@@ -195,6 +197,7 @@ void tiku_sched_loop(void)
             } else
 #endif
             {
+                tiku_clock_time_t ahead = 0u;
                 uint8_t stretched = 0u;
 
                 /* Tickless: with timers armed (none due — has_pending
@@ -209,8 +212,7 @@ void tiku_sched_loop(void)
                 if (idle_tick_wakes &&
                     idle_hook != (tiku_sched_idle_hook_t)0 &&
                     tiku_timer_any_pending()) {
-                    tiku_clock_time_t ahead = (tiku_clock_time_t)
-                        (tiku_timer_next_expiration() - tiku_clock_time());
+                    ahead = tiku_timer_next_delay();
                     if (ahead > 1u) {
                         stretched =
                             (uint8_t)tiku_clock_tickless_begin(ahead);

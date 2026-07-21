@@ -387,7 +387,17 @@ void tiku_cpu_freq_stm32f411_init(unsigned int target_mhz) {
 }
 
 void tiku_cpu_boot_stm32f411_power_wfi_enter(void) {
-    __asm__ volatile ("wfi" ::: "memory");
+    /* The scheduler calls the idle hook from inside an atomic section.
+     * Re-enable IRQs for the sleep window, then return with them masked
+     * again so the post-WFI tickless reconcile path still runs inside the
+     * same critical section. */
+    __asm__ volatile (
+        "cpsie i\n"
+        "dsb\n"
+        "isb\n"
+        "wfi\n"
+        "cpsid i\n"
+        ::: "memory");
 }
 
 void tiku_cpu_boot_stm32f411_reset(void) {
