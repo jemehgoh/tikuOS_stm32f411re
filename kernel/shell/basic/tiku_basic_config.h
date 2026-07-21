@@ -1,5 +1,6 @@
 /*
- * Tiku Operating System
+ * Tiku Operating System v0.05
+ * Simple. Ubiquitous. Intelligence, Everywhere.
  * http://tiku-os.org
  *
  * Authors: Ambuj Varshney <ambuj@tiku-os.org>
@@ -12,18 +13,6 @@
  * optional language features (string vars, DEF FN, arrays,
  * fixed-point), and which hardware bridges (GPIO / ADC / I2C / LED
  * / VFS / REBOOT) are compiled in.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at:
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
- * implied.  See the License for the specific language governing
- * permissions and limitations under the License.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -54,7 +43,14 @@
  * Every macro stays -D-overridable; these branches only choose the default. */
 #if defined(PLATFORM_AMBIQ) || defined(PLATFORM_RP2350)
 #define TIKU_BASIC_TIER_BIG  1
-#elif defined(TIKU_MEMORY_MODEL_LARGE)
+#elif defined(TIKU_MEMORY_MODEL_LARGE) || defined(PLATFORM_NORDIC)
+/* The nRF54L15 sits between the SMALL parts and the 512 KB BIG parts: 256 KB
+ * SRAM.  The BIG tier's arena-backed FETCH buffers (sized for 512 KB) overflow
+ * that, but the SMALL 64-byte defaults are too tight -- a 64-hex SHA256$ digest
+ * (let alone its 88-char BASE64$) and the 60-line mem-stress program don't fit.
+ * The FRAM (middle) tier is exactly the right size: 128-byte string scratch,
+ * 2 KB string heap, 96 program lines.  It is pure sizing (no FRAM-specific
+ * behaviour), so it fits the nRF54L15's RRAM/SRAM split cleanly. */
 #define TIKU_BASIC_TIER_FRAM 1
 #endif
 
@@ -213,7 +209,12 @@
 #  endif
 #endif
 #ifndef TIKU_BASIC_NET_ENABLE
-#  if defined(TIKU_BASIC_TIER_BIG) && (TIKU_KIT_NET_ENABLE + 0)
+/* Net words ride the big tier's roomy buffers by default; nRF54L runs the
+ * FRAM tier (BIG's buffers overflow its 256 KB SRAM) but has the full net
+ * kit + CRACEN TRNG, so it opts in too -- HTTPGET$/HTTPPOST$ results are
+ * simply capped at the FRAM-tier string length (status line + head fit). */
+#  if (defined(TIKU_BASIC_TIER_BIG) || defined(PLATFORM_NORDIC)) && \
+      (TIKU_KIT_NET_ENABLE + 0)
 #    define TIKU_BASIC_NET_ENABLE    1
 #  else
 #    define TIKU_BASIC_NET_ENABLE    0
@@ -221,12 +222,16 @@
 #endif
 /* BLE : BLEADV / BLEOFF / BLESEND / BLEBEACON + BLEUP / BLEGET$ -- a "serial
  *       over BLE" vocabulary on the driver-agnostic facade
- *       (interfaces/bluetooth/tiku_ble_serial).  GENERAL, not chip-specific:
- *       on whenever the build has a BLE radio backend, which the Makefile
- *       signals via the generic TIKU_HAS_BLE capability (set today by the
- *       EM9305 driver on apollo510b).  -D-overridable like the rest. */
+ *       (interfaces/bluetooth/tiku_ble_serial), plus BLEBEACON / BLESCAN$ on
+ *       the broadcast/observer facade (tiku_ble_adv).  GENERAL, not
+ *       chip-specific: on whenever the build has ANY BLE radio backend,
+ *       which the Makefile signals via the generic capabilities --
+ *       TIKU_HAS_BLE (connection-capable: EM9305 on apollo510b) and/or
+ *       TIKU_HAS_BLE_ADV (broadcast: nRF54L15 on-die RADIO).  Words for an
+ *       absent capability are compiled out individually inside the .inl.
+ *       -D-overridable like the rest. */
 #ifndef TIKU_BASIC_BLE_ENABLE
-#  if (TIKU_HAS_BLE + 0)
+#  if (TIKU_HAS_BLE + 0) || (TIKU_HAS_BLE_ADV + 0)
 #    define TIKU_BASIC_BLE_ENABLE    1
 #  else
 #    define TIKU_BASIC_BLE_ENABLE    0
@@ -332,6 +337,13 @@
 #    define TIKU_BASIC_NAMEDVAR_MAX  16
 #  endif
 #endif
+/* Native builtin registry (tiku_basic_ext.h): boot-time registered
+ * statement/function words from kernel services and tikukits.  Slots are a
+ * few bytes of SRAM each; 0 compiles the whole feature out. */
+#ifndef TIKU_BASIC_EXT_MAX
+#define TIKU_BASIC_EXT_MAX          8
+#endif
+
 #ifndef TIKU_BASIC_NAMEDVAR_LEN
 #define TIKU_BASIC_NAMEDVAR_LEN     8       /* 7 chars + NUL */
 #endif
@@ -486,9 +498,14 @@
 
 /* REBOOT triggers the watchdog and spins; only meaningful on real
  * silicon. Defaults off in host builds because the spin would hang
- * the test driver. */
+ * the test driver.  (Was msp430-only -- the same stale single-platform
+ * gate shape as the 2026-07 durability audit's bug class; found live on
+ * the LM20 when the F1 resume proof dispatched REBOOT and got "? syntax".
+ * All real parts have the watchdog path: the shell `reboot` command uses
+ * it everywhere.) */
 #ifndef TIKU_BASIC_REBOOT_ENABLE
-#ifdef PLATFORM_MSP430
+#if defined(PLATFORM_MSP430) || defined(PLATFORM_RP2350) || \
+    defined(PLATFORM_AMBIQ)  || defined(PLATFORM_NORDIC)
 #define TIKU_BASIC_REBOOT_ENABLE    1
 #else
 #define TIKU_BASIC_REBOOT_ENABLE    0
@@ -518,12 +535,82 @@
 #define BASIC_CTRL_C       0x03
 #define BASIC_PERSIST_KEY  "prog"
 
+/*---------------------------------------------------------------------------*/
+/* F1: POWER-FAILURE-TRANSPARENT RUN (execution-state checkpoint / resume)    */
+/*---------------------------------------------------------------------------*/
+/*
+ * PERSIST ON checkpoints the reified interpreter state (program counter,
+ * control-flow stacks, scalar + string variables, error / DATA / PRNG state)
+ * into durable NVM at yield boundaries; RUN RESUME continues a program mid-loop
+ * after a reset or power cut instead of restarting.  This is distinct from SAVE
+ * / LOAD, which persist the *program text*: PERSIST persists the *running
+ * machine*.  See tiku_basic_ckpt.inl for the slot formats and torn-write
+ * discipline.
+ *
+ * v1 checkpoints the core scalar machine.  Arrays (DIM), big response buffers,
+ * DEF FN, and the EVERY / ON CHANGE timer tables are NOT yet in the checkpoint
+ * -- PERSIST ON warns if any are live so the boundary is never silent.
+ *
+ * Durability by substrate (same envelope as SAVE, see BASIC_NVM_ON_REGION):
+ *   MSP430          .persistent FRAM      -- durable, per-batch checkpoints
+ *   Ambiq / RP2350  carved NVM region     -- durable, interval-gated (below)
+ *   Nordic / host   .bss                  -- session-only (the nRF54 durable
+ *                   .persistent RRAM reserve is 8 KB; BASIC's buffers do not
+ *                   fit -- enlarging it relocates the TFS/persist layout, a
+ *                   deliberate port change deferred to its own pass) */
+#ifndef TIKU_BASIC_PERSIST_RUN_ENABLE
+#define TIKU_BASIC_PERSIST_RUN_ENABLE 1
+#endif
+
+/* Minimum seconds between run-state checkpoints, counted from PERSIST ON.
+ * 0 = checkpoint every yield batch, the finest resume granularity -- right
+ * where NVM writes are cheap byte stores with effectively unlimited endurance
+ * (MSP430 FRAM ~1e15).  Nonzero paces the program-op substrates:
+ *   RP2350 QSPI flash : each checkpoint read-modify-ERASES its 4 KB sectors
+ *                       (~1e5 cycles); 60 s ~= 69 days of continuous armed
+ *                       running before the rated limit.
+ *   Ambiq MRAM        : bootrom word-program, no erase, but each save is a
+ *                       masked-IRQ bootrom call -- 5 s keeps that jitter rare.
+ *   Nordic RRAM       : byte-writable, no erase, but ~1e5-class write
+ *                       endurance -- 5 s paces the wear like Ambiq.
+ * Coarser interval = longer replay window after a power cut (the program
+ * re-runs at most the last interval's worth of lines). */
+#ifndef TIKU_BASIC_CKPT_INTERVAL_S
+#  if defined(PLATFORM_RP2350)
+#    define TIKU_BASIC_CKPT_INTERVAL_S 60
+#  elif defined(PLATFORM_AMBIQ) || defined(PLATFORM_NORDIC)
+#    define TIKU_BASIC_CKPT_INTERVAL_S 5
+#  else
+#    define TIKU_BASIC_CKPT_INTERVAL_S 0
+#  endif
+#endif
+
+/* Where BASIC's durable slots (saved program + F1 run-state checkpoint) live.
+ * Two backings, ONE decision point, keyed on the REGION LAYOUT rather than a
+ * platform list so a new port with a reserved tail lights up automatically:
+ *
+ *   BASIC_NVM_ON_REGION = 1 -- the carved NVM region's reserved tail
+ *     (TIKU_NVM_RESERVED_BYTES > 0: Ambiq MRAM, RP2350 QSPI flash, Nordic
+ *     RRAM).  The slots are fixed offsets in the tail, written via
+ *     tiku_tier_nvm_write (bootrom / erase+program / memcpy-behind-WEN);
+ *     the _Static_assert in tiku_basic_ckpt.inl proves both slots fit.
+ *
+ *   BASIC_NVM_ON_REGION = 0 -- byte-writable buffers.  On MSP430 they carry
+ *     TIKU_DURABLE (.persistent FRAM).  On host they land in plain .bss
+ *     (volatile test harness). */
+#include <kernel/memory/tiku_nvm_region.h>
+#if TIKU_NVM_RESERVED_BYTES > 0
+#define BASIC_NVM_ON_REGION  1
+#else
+#define BASIC_NVM_ON_REGION  0
+#endif
+
 #ifdef PLATFORM_MSP430
-#define BASIC_NVM_PERSISTENT __attribute__((section(".persistent")))
+#define BASIC_NVM_PERSISTENT TIKU_DURABLE   /* FRAM in place (tiku_mem.h) */
 #elif defined(PLATFORM_AMBIQ)
-/* On Ambiq the persist-backed save buffer is not built: the saved program is
- * durable in the carved NVM region (see basic_prog_store/fetch). This attribute
- * is unused there, kept defined for symmetry. */
+/* On the region-backed parts the persist-store buffers are not built (the
+ * durable slots live in the carved region).  This attribute is unused there,
+ * kept defined for symmetry. */
 #define BASIC_NVM_PERSISTENT __attribute__((section(".ssram")))
 #else
 #define BASIC_NVM_PERSISTENT

@@ -1,5 +1,6 @@
 /*
- * Tiku Operating System
+ * Tiku Operating System v0.05
+ * Simple. Ubiquitous. Intelligence, Everywhere.
  * http://tiku-os.org
  *
  * tiku_shell_cmd_queue.c - "queue" command implementation
@@ -18,6 +19,9 @@
 /* EVENT NAME LOOKUP                                                         */
 /*---------------------------------------------------------------------------*/
 
+/**
+ * @brief Map a process event id to a short display name.
+ */
 static const char *
 event_name(tiku_event_t ev)
 {

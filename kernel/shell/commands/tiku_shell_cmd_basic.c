@@ -1,5 +1,6 @@
 /*
- * Tiku Operating System
+ * Tiku Operating System v0.05
+ * Simple. Ubiquitous. Intelligence, Everywhere.
  * http://tiku-os.org
  *
  * Authors: Ambuj Varshney <ambuj@tiku-os.org>
@@ -10,23 +11,13 @@
  * actual interpreter engine lives at kernel/shell/basic/ and is
  * exposed via tiku_basic.h:
  *
- *   `basic`            -> tiku_basic_repl()    (interactive REPL)
- *   `basic run`        -> tiku_basic_autorun() (run the saved program)
+ *   `basic`            -> tiku_basic_mode_enter()        (interactive REPL mode)
+ *   `basic run`        -> tiku_basic_mode_run_saved()    (run saved, non-blocking)
+ *   `basic resume`     -> tiku_basic_mode_resume_saved() (F1: resume-or-start saved)
+ *   `basic run resume` -> same as `basic resume`
  *   `basic run  <path>`-> load a /data file and run it
  *   `basic load <path>`-> load a /data file into the program store
  *   `basic save <path>`-> save the current program to a /data file
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at:
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
- * implied.  See the License for the specific language governing
- * permissions and limitations under the License.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -60,6 +51,13 @@ basic_from_file(const char *path, int run)
     char resolved[TIKU_SHELL_CWD_SIZE];
     int  n;
 
+    /* Refuse re-entry into a live interactive BASIC session.  Reachable when a
+     * scheduled `basic run/load <path>` job or rule fires (jobs tick before the
+     * BASIC mode tick); without this it would clobber the user's in-memory
+     * program and block the cooperative scheduler mid-session. */
+    if (tiku_basic_mode_active()) {
+        return;
+    }
     tiku_shell_cwd_resolve(path, resolved, sizeof resolved);
     n = tiku_vfs_read(resolved, basic_file_buf, sizeof basic_file_buf - 1u);
     if (n < 0) {
@@ -107,11 +105,20 @@ tiku_shell_cmd_basic(uint8_t argc, const char *argv[])
 {
     const char *sub = (argc >= 2u) ? argv[1] : NULL;
 
+    /* `basic resume` / `basic run resume`: F1 power-failure-transparent
+     * autostart -- continue the saved program from its checkpoint, or start it
+     * fresh if there is none. */
+    if (sub != NULL && strcmp(sub, "resume") == 0) {
+        (void)tiku_basic_mode_resume_saved();
+        return;
+    }
     if (sub != NULL && strcmp(sub, "run") == 0) {
-        if (argc >= 3u) {
-            basic_from_file(argv[2], 1);   /* run <path> */
+        if (argc >= 3u && strcmp(argv[2], "resume") == 0) {
+            (void)tiku_basic_mode_resume_saved();
+        } else if (argc >= 3u) {
+            basic_from_file(argv[2], 1);       /* run <path> (blocking) */
         } else {
-            tiku_basic_autorun();          /* run saved  */
+            (void)tiku_basic_mode_run_saved(); /* run saved (non-blocking mode) */
         }
         return;
     }
@@ -123,5 +130,5 @@ tiku_shell_cmd_basic(uint8_t argc, const char *argv[])
         basic_to_file(argv[2]);
         return;
     }
-    tiku_basic_repl();
+    tiku_basic_mode_enter();
 }

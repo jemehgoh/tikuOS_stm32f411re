@@ -1,5 +1,6 @@
 /*
- * Tiku Operating System
+ * Tiku Operating System v0.05
+ * Simple. Ubiquitous. Intelligence, Everywhere.
  * http://tiku-os.org
  *
  * Authors: Ambuj Varshney <ambuj@tiku-os.org>
@@ -15,18 +16,6 @@
  * TIKU_BASIC_NAMED_SLOT_BYTES wide; the count is bounded by
  * TIKU_BASIC_NAMED_SLOTS.  All four functions compile to nothing
  * when TIKU_BASIC_NAMED_SLOTS is 0.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at:
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
- * implied.  See the License for the specific language governing
- * permissions and limitations under the License.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -78,19 +67,28 @@ basic_save_to_named(const char *name)
         int idx = prog_next_index(cur);
         int n;
         if (idx < 0) break;
-        n = snprintf(tmp + pos, sizeof(tmp) - pos, "%u %s\n",
-                     (unsigned)prog[idx].number, prog[idx].text);
+        /* Number + detokenized body: slot format stays plain text (A2). */
+        n = snprintf(tmp + pos, sizeof(tmp) - pos, "%u ",
+                     (unsigned)prog[idx].number);
         if (n < 0 || (size_t)n >= sizeof(tmp) - pos) {
-            SHELL_PRINTF(SH_RED "? slot too small for program\n" SH_RST);
+            basic_report(TIKU_BASIC_ERR_IO, "slot too small for program");
             return -1;
         }
         pos += (size_t)n;
+        n = basic_detok(tmp + pos, sizeof(tmp) - pos, prog[idx].text);
+        if (n < 0 || (size_t)n + 2u > sizeof(tmp) - pos) {
+            basic_report(TIKU_BASIC_ERR_IO, "slot too small for program");
+            return -1;
+        }
+        pos += (size_t)n;
+        tmp[pos++] = '\n';
+        tmp[pos]   = '\0';
         if (prog[idx].number == 0xFFFFu) break;
         cur = (uint16_t)(prog[idx].number + 1);
     }
     slot = basic_slot_alloc(name);
     if (slot < 0) {
-        SHELL_PRINTF(SH_RED "? all slots in use\n" SH_RST);
+        basic_report(TIKU_BASIC_ERR_IO, "all slots in use");
         return -1;
     }
     mpu = tiku_mpu_unlock_nvm();
@@ -113,7 +111,7 @@ basic_load_from_named(const char *name)
     size_t n;
     char *line, *p;
     if (slot < 0) {
-        SHELL_PRINTF(SH_RED "? '%s' not found\n" SH_RST, name);
+        basic_reportf(TIKU_BASIC_ERR_SYNTAX, "'%s' not found", name);
         return -1;
     }
     n = basic_named_slots[slot].length;

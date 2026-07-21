@@ -1,5 +1,6 @@
 /*
- * Tiku Operating System
+ * Tiku Operating System v0.05
+ * Simple. Ubiquitous. Intelligence, Everywhere.
  * http://tiku-os.org
  *
  * Authors: Ambuj Varshney <ambuj@tiku-os.org>
@@ -167,6 +168,234 @@ tiku_ble_serial_beacon(const char *name)
 {
     tiku_em9305_beacon_t b;
     return tiku_em9305_beacon(name, &b);   /* 0 == TIKU_EM9305_OK on success */
+}
+
+/*===========================================================================*/
+/* Backend: Nordic on-die FLPR controller (nRF54L, L6)                       */
+/*===========================================================================*/
+#elif (defined(TIKU_FLPR_ENABLE) && (TIKU_FLPR_ENABLE + 0) &&                 \
+       defined(TIKU_HAS_BLE_ADV) && (TIKU_HAS_BLE_ADV + 0))
+
+#include <arch/nordic/tiku_flpr_arch.h>        /* the on-die BLE controller  */
+#include <arch/nordic/tiku_radio_arch.h>       /* adv_build + link cfg + TIFS */
+#include <arch/nordic/tiku_device_select.h>    /* NRF_RADIO_S (TIFS)          */
+#include <interfaces/bluetooth/tiku_ble_adv.h> /* R7 radio-ownership arbiter  */
+#include <kernel/cpu/tiku_common.h>            /* unique id -> AdvA           */
+#include <interfaces/bluetooth/tiku_ble_host.h>  /* Phase B: M33 ATT/GATT host */
+#include <kernel/cpu/tiku_watchdog.h>          /* kick while draining the slot */
+#include <string.h>
+
+/* Phase B: the FLPR is a pure CONTROLLER -- it forwards L2CAP frames over the
+ * mailbox.  This backend pumps them through the M33 ATT/GATT host in
+ * service() (called from ready()): a received frame -> tiku_ble_host_rx ->
+ * response; a NUS RX write surfaces as bytes callers read via recv(), and
+ * send() is an ATT notification.  start() programs the static link config
+ * while RADIO is secure, then hands RADIO+UARTE21 to the FLPR. */
+#define BLE_SERIAL_NAME_CAP  24u
+#define BLE_SERIAL_RXBUF     (TIKU_BLE_HOST_MTU)   /* hold a full recombined msg*/
+
+static uint8_t s_started;
+static uint8_t s_adv[48];                          /* stored for re-advertise */
+static uint8_t s_addr[6];
+static uint8_t s_advlen;
+static uint8_t s_rx[BLE_SERIAL_RXBUF];             /* buffered NUS RX bytes   */
+static uint8_t s_rx_len;
+
+int
+tiku_ble_serial_available(void)
+{
+    return 1;
+}
+
+int
+tiku_ble_serial_start(const char *name)
+{
+    uint8_t     addr[6], ad[31], adv[48];
+    uint8_t     adlen = 0u, advlen, nl;
+    const char *nm = (name != (const char *)0 && name[0] != '\0')
+                     ? name : "tikuOS";
+    int         rc;
+
+    if (tiku_flpr_arch_start() != 0 || !tiku_flpr_arch_running()) {
+        return -1;
+    }
+    if (tiku_ble_adv_conn_claim() != 0) {      /* R7: one radio, one owner    */
+        return -1;                             /* a beacon/observer holds it  */
+    }
+    tiku_common_unique_id(addr, 6u);
+    addr[5] |= 0xC0u;                          /* random static address       */
+    nl = (uint8_t)strlen(nm);
+    if (nl > BLE_SERIAL_NAME_CAP) {
+        nl = BLE_SERIAL_NAME_CAP;
+    }
+    ad[adlen++] = 0x02u; ad[adlen++] = 0x01u; ad[adlen++] = 0x06u;  /* Flags  */
+    ad[adlen++] = (uint8_t)(1u + nl); ad[adlen++] = 0x09u;          /* Name   */
+    memcpy(&ad[adlen], nm, nl);
+    adlen = (uint8_t)(adlen + nl);
+    advlen = tiku_radio_arch_adv_build(adv, addr, ad, adlen);
+    adv[0] = 0x40u;                            /* ADV_IND (connectable)       */
+
+    tiku_radio_arch_init();                    /* static link cfg (secure)    */
+    NRF_RADIO_S->TIFS = 150u;                  /* T_IFS turnaround            */
+    tiku_radio_arch_constlat_hold(1);
+    tiku_ble_host_reset();                     /* Phase B: fresh ATT server   */
+    s_rx_len = 0u;
+    rc = tiku_flpr_arch_conn_start(adv, advlen, addr);   /* non-blocking      */
+    if (rc != 0) {
+        tiku_radio_arch_constlat_hold(0);
+        tiku_ble_adv_conn_release();
+        return -1;
+    }
+    /* Stash the ADV + AdvA so a dropped link can be re-advertised without the
+     * caller restarting the service (auto-reconnect). */
+    if (advlen > (uint8_t)sizeof(s_adv)) {
+        advlen = (uint8_t)sizeof(s_adv);
+    }
+    memcpy(s_adv, adv, advlen);
+    s_advlen = advlen;
+    memcpy(s_addr, addr, 6u);
+    s_started = 1u;
+    return 0;
+}
+
+/* Auto-reconnect: the FLPR controller drops to conn_state 3 (ended) on
+ * supervision timeout / peer disconnect, or 2 (gave up) if an advertise
+ * window expired with no central.  In either idle state, re-advertise so the
+ * service stays reachable; conn_start resets conn_state to 0 (advertising),
+ * so this fires once per drop, not every poll. */
+static void serial_reconnect(void)
+{
+    uint32_t st;
+    if (s_started == 0u) {
+        return;
+    }
+    st = tiku_flpr_arch_conn_state();
+    if (st != 0u && st != 1u) {                /* not advertising, not connected*/
+        tiku_flpr_arch_conn_stop();            /* reclaim the RADIO to secure   */
+        tiku_radio_arch_init();                /* re-set the ADV link config    */
+        NRF_RADIO_S->TIFS = 150u;
+        tiku_ble_host_reset();                 /* fresh ATT server for the next */
+        s_rx_len = 0u;
+        (void)tiku_flpr_arch_conn_start(s_adv, s_advlen, s_addr);
+    }
+}
+
+void
+tiku_ble_serial_stop(void)
+{
+    if (s_started) {
+        tiku_flpr_arch_conn_stop();
+        tiku_radio_arch_constlat_hold(0);
+        tiku_ble_adv_conn_release();           /* R7: free the radio          */
+        s_started = 0u;
+    }
+}
+
+/* Drain the host's pending TX PDU as data-PDU-sized fragments (each with its
+ * LLID), retrying while the mailbox slot is busy, until sent or the link
+ * drops. */
+static void serial_drain_tx(void)
+{
+    uint8_t  frag[32], llid;
+    uint16_t fl;
+    while ((fl = tiku_ble_host_next_tx(frag, sizeof(frag), &llid)) > 0u) {
+        while (tiku_flpr_arch_conn_send(frag, fl, llid) == -2 &&
+               tiku_flpr_arch_conn_active()) {
+            tiku_watchdog_kick();
+        }
+        if (!tiku_flpr_arch_conn_active()) {
+            break;
+        }
+    }
+}
+
+/* Pump one L2CAP fragment: in from the controller -> recombine + ATT/GATT on
+ * the M33 -> response fragmented out.  A NUS RX write surfaces bytes buffered
+ * for recv(). */
+void
+tiku_ble_serial_service(void)
+{
+    uint8_t  frame[40], nus[BLE_SERIAL_RXBUF], llid_in;
+    int      n;
+    uint16_t m;
+
+    if (!tiku_flpr_arch_conn_active()) {
+        return;
+    }
+    serial_drain_tx();                           /* flush pending TX first    */
+    n = tiku_flpr_arch_conn_recv(frame, sizeof(frame), &llid_in);
+    if (n <= 0) {
+        return;
+    }
+    tiku_ble_host_rx(frame, (uint16_t)n, llid_in);
+    serial_drain_tx();                           /* send the ATT response     */
+    m = tiku_ble_host_nus_recv(nus, sizeof(nus));
+    if (m > 0u) {
+        uint16_t i;
+        if (m > (uint16_t)sizeof(s_rx)) {
+            m = (uint16_t)sizeof(s_rx);
+        }
+        for (i = 0u; i < m; i++) {
+            s_rx[i] = nus[i];
+        }
+        s_rx_len = (uint8_t)m;
+    }
+}
+
+int
+tiku_ble_serial_ready(void)
+{
+    serial_reconnect();                        /* re-advertise a dropped link */
+    tiku_ble_serial_service();                 /* pump the L2CAP <-> host loop */
+    return (tiku_flpr_arch_conn_active() &&
+            tiku_ble_host_subscribed()) ? 1 : 0;
+}
+
+int
+tiku_ble_serial_send(const uint8_t *data, uint16_t len)
+{
+    if (data == (const uint8_t *)0 || !tiku_flpr_arch_conn_active()) {
+        return -1;
+    }
+    if (tiku_ble_host_nus_notify(data, len) != 0) {
+        return 0;                              /* not subscribed / TX busy    */
+    }
+    serial_drain_tx();                         /* fragment + send             */
+    return (int)((len > (TIKU_BLE_HOST_MTU - 3u))
+                 ? (TIKU_BLE_HOST_MTU - 3u) : len);
+}
+
+int
+tiku_ble_serial_rx_ready(void)
+{
+    return (s_rx_len > 0u) ? 1 : 0;
+}
+
+int
+tiku_ble_serial_recv(uint8_t *buf, uint16_t cap)
+{
+    uint8_t nn = s_rx_len, i;
+
+    if (buf == (uint8_t *)0 || nn == 0u) {
+        return 0;
+    }
+    if (nn > cap) {
+        nn = (uint8_t)cap;
+    }
+    for (i = 0u; i < nn; i++) {
+        buf[i] = s_rx[i];
+    }
+    s_rx_len = 0u;
+    return (int)nn;
+}
+
+/* Non-connectable beacon: the broadcast facade (tiku_ble_adv) owns that on
+ * Nordic, and BASIC's BLEBEACON routes there directly, so this is unused. */
+int
+tiku_ble_serial_beacon(const char *name)
+{
+    (void)name;
+    return -1;
 }
 
 /*===========================================================================*/

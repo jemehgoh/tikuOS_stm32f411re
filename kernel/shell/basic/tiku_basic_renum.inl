@@ -1,5 +1,6 @@
 /*
- * Tiku Operating System
+ * Tiku Operating System v0.05
+ * Simple. Ubiquitous. Intelligence, Everywhere.
  * http://tiku-os.org
  *
  * Authors: Ambuj Varshney <ambuj@tiku-os.org>
@@ -14,18 +15,6 @@
  * any existing line are left alone -- they were already broken;
  * we don't want to break them harder by mapping them to a random
  * new number.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at:
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
- * implied.  See the License for the specific language governing
- * permissions and limitations under the License.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -51,6 +40,13 @@ static int
 match_kw_no_ws(const char **q, const char *kw)
 {
     const char *r = *q;
+    uint8_t     b = (uint8_t)*r;
+    if (b >= BASIC_TOK_BASE) {               /* A2: crunched keyword byte */
+        if (b >= BASIC_TOK_BASE + BASIC_TOK_N ||
+            strcmp(basic_tok_tab[b - BASIC_TOK_BASE], kw) != 0) return 0;
+        *q = r + 1;
+        return 1;
+    }
     while (*kw) {
         if (to_upper(*r) != *kw) return 0;
         r++; kw++;
@@ -157,7 +153,7 @@ exec_renum(const char **q)
         }
     }
     if (start <= 0 || step <= 0 || start + (long)TIKU_BASIC_PROGRAM_LINES * step >= 0xFFFEL) {
-        SHELL_PRINTF(SH_RED "? bad RENUM range\n" SH_RST);
+        basic_report(TIKU_BASIC_ERR_SYNTAX, "bad RENUM range");
         return;
     }
 
@@ -191,8 +187,7 @@ exec_renum(const char **q)
         if (prog[i].number == 0) continue;
         if (renum_rewrite_body(prog[i].text, tmp, sizeof(tmp),
                                old_nos, new_nos, n_lines) != 0) {
-            SHELL_PRINTF(SH_RED "? RENUM: line too long after rewrite\n"
-                         SH_RST);
+            basic_report(TIKU_BASIC_ERR_GENERAL, "RENUM: line too long after rewrite");
             return;
         }
         strncpy(prog[i].text, tmp, TIKU_BASIC_LINE_MAX - 1);
@@ -205,6 +200,7 @@ exec_renum(const char **q)
         prog[i].number =
             renum_lookup(old_nos, new_nos, n_lines, prog[i].number);
     }
+    basic_line_index_ok = 0;                  /* A3: RENUM changed line numbers */
     SHELL_PRINTF("renumbered %d lines from %u step %u\n",
                  n_lines, (unsigned)start, (unsigned)step);
 }

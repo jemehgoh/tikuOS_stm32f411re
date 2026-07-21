@@ -1,5 +1,6 @@
 /*
- * Tiku Operating System
+ * Tiku Operating System v0.05
+ * Simple. Ubiquitous. Intelligence, Everywhere.
  * http://tiku-os.org
  *
  * Authors: Ambuj Varshney <ambuj@tiku-os.org>
@@ -13,18 +14,6 @@
  * REPL and the INPUT statement.  It mirrors the host shell's
  * BACKSPACE / local-echo behaviour and treats Ctrl-C as a hard
  * cancel of the line.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at:
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
- * implied.  See the License for the specific language governing
- * permissions and limitations under the License.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -55,6 +44,11 @@ read_line(char *buf, uint16_t cap)
         ch = tiku_shell_net_getc();
         if (ch < 0) continue;
 #else
+        /* Non-SLIP builds have no net_getc to feed the check-in hang
+         * detector, so kick it here: a quiet REPL prompt / INPUT wait is
+         * liveness, not a wedge.  Without this an idle prompt warm-resets
+         * at TIKU_HANG_THRESHOLD_TICKS (~8 s at 128 Hz). */
+        tiku_watchdog_kick();
         if (!tiku_shell_io_rx_ready()) continue;
         ch = tiku_shell_io_getc();
         if (ch < 0) continue;

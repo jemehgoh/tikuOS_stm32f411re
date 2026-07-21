@@ -1,5 +1,6 @@
 /*
- * Tiku Operating System
+ * Tiku Operating System v0.05
+ * Simple. Ubiquitous. Intelligence, Everywhere.
  * http://tiku-os.org
  *
  * Authors: Ambuj Varshney <ambuj@tiku-os.org>
@@ -22,18 +23,6 @@
  * if_then_scratch buffer are also in tiku_basic_dispatch.inl
  * because exec_if depends on the multi-line IF helpers in
  * tiku_basic_multi_if.inl.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at:
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
- * implied.  See the License for the specific language governing
- * permissions and limitations under the License.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -74,8 +63,7 @@ exec_print(const char **p)
             long target;
             skip_ws(p);
             if (**p != '(') {
-                basic_error = 1;
-                SHELL_PRINTF(SH_RED "? '(' expected\n" SH_RST);
+                basic_throw(TIKU_BASIC_ERR_SYNTAX, "'(' expected");
                 return;
             }
             (*p)++;
@@ -83,8 +71,7 @@ exec_print(const char **p)
             if (basic_error) return;
             skip_ws(p);
             if (**p != ')') {
-                basic_error = 1;
-                SHELL_PRINTF(SH_RED "? ')' expected\n" SH_RST);
+                basic_throw(TIKU_BASIC_ERR_SYNTAX, "')' expected");
                 return;
             }
             (*p)++;
@@ -99,8 +86,7 @@ exec_print(const char **p)
             long n;
             skip_ws(p);
             if (**p != '(') {
-                basic_error = 1;
-                SHELL_PRINTF(SH_RED "? '(' expected\n" SH_RST);
+                basic_throw(TIKU_BASIC_ERR_SYNTAX, "'(' expected");
                 return;
             }
             (*p)++;
@@ -108,8 +94,7 @@ exec_print(const char **p)
             if (basic_error) return;
             skip_ws(p);
             if (**p != ')') {
-                basic_error = 1;
-                SHELL_PRINTF(SH_RED "? ')' expected\n" SH_RST);
+                basic_throw(TIKU_BASIC_ERR_SYNTAX, "')' expected");
                 return;
             }
             (*p)++;
@@ -160,15 +145,13 @@ exec_let(const char **p, int already_consumed_var)
     skip_ws(p);
     if (!parse_var_full(p, &idx, &is_string)) {
         if (!basic_error) {
-            basic_error = 1;
-            SHELL_PRINTF(SH_RED "? variable expected\n" SH_RST);
+            basic_throw(TIKU_BASIC_ERR_SYNTAX, "variable expected");
         }
         return;
     }
     skip_ws(p);
     if (**p != '=') {
-        basic_error = 1;
-        SHELL_PRINTF(SH_RED "? '=' expected\n" SH_RST);
+        basic_throw(TIKU_BASIC_ERR_SYNTAX, "'=' expected");
         return;
     }
     (*p)++;
@@ -178,8 +161,7 @@ exec_let(const char **p, int already_consumed_var)
         if (parse_strexpr(p, buf, sizeof(buf)) != 0) return;
         basic_strvars[idx] = basic_str_alloc(buf, strlen(buf));
         if (basic_strvars[idx] == NULL) {
-            basic_error = 1;
-            SHELL_PRINTF(SH_RED "? out of string heap\n" SH_RST);
+            basic_throw(TIKU_BASIC_ERR_NOMEM, "out of string heap");
         }
         return;
     }
@@ -187,7 +169,42 @@ exec_let(const char **p, int already_consumed_var)
     (void)is_string;
     v = parse_expr(p);
     if (basic_error) return;
+    /* A CONST-defined named slot (index >= 26) is read-only. */
+    if (idx >= 26 && basic_namedvar_const[idx - 26]) {
+        basic_throw(TIKU_BASIC_ERR_GENERAL, "cannot assign to CONST");
+        return;
+    }
     basic_vars[idx] = v;
+}
+
+/* CONST NAME = expr (F4): evaluate expr once and bind NAME as a read-only
+ * numeric named constant.  Reassigning it afterwards is rejected in exec_let.
+ * (String constants are not supported -- use a plain string var.) */
+static void
+exec_const(const char **p)
+{
+    int  idx, is_string = 0;
+    long v;
+    skip_ws(p);
+    if (!parse_var_full(p, &idx, &is_string) || is_string) {
+        basic_throw(TIKU_BASIC_ERR_SYNTAX, "CONST needs a numeric NAME");
+        return;
+    }
+    if (idx < 26) {
+        basic_throw(TIKU_BASIC_ERR_SYNTAX, "CONST needs a multi-letter name");
+        return;
+    }
+    skip_ws(p);
+    if (**p != '=') {
+        basic_throw(TIKU_BASIC_ERR_SYNTAX, "'=' expected");
+        return;
+    }
+    (*p)++;
+    v = parse_expr(p);
+    if (basic_error) return;
+    basic_namedvar_const[idx - 26] = 0;      /* allow this defining write */
+    basic_vars[idx]                = v;
+    basic_namedvar_const[idx - 26] = 1;      /* now read-only */
 }
 
 #if TIKU_BASIC_STRVARS_ENABLE
@@ -228,8 +245,7 @@ exec_strslice_assign(const char **p, char kind)
 
     skip_ws(p);
     if (**p != '(') {
-        basic_error = 1;
-        SHELL_PRINTF(SH_RED "? '(' expected\n" SH_RST);
+        basic_throw(TIKU_BASIC_ERR_SYNTAX, "'(' expected");
         return;
     }
     (*p)++;
@@ -238,16 +254,14 @@ exec_strslice_assign(const char **p, char kind)
     svar = to_upper(**p);
     if (svar < 'A' || svar > 'Z' ||
         *(*p + 1) != '$' || is_word_cont(*(*p + 2))) {
-        basic_error = 1;
-        SHELL_PRINTF(SH_RED "? string var expected\n" SH_RST);
+        basic_throw(TIKU_BASIC_ERR_TYPE, "string var expected");
         return;
     }
     sidx = svar - 'A';
     (*p) += 2;
     skip_ws(p);
     if (**p != ',') {
-        basic_error = 1;
-        SHELL_PRINTF(SH_RED "? ',' expected\n" SH_RST);
+        basic_throw(TIKU_BASIC_ERR_SYNTAX, "',' expected");
         return;
     }
     (*p)++;
@@ -270,15 +284,13 @@ exec_strslice_assign(const char **p, char kind)
     }
     skip_ws(p);
     if (**p != ')') {
-        basic_error = 1;
-        SHELL_PRINTF(SH_RED "? ')' expected\n" SH_RST);
+        basic_throw(TIKU_BASIC_ERR_SYNTAX, "')' expected");
         return;
     }
     (*p)++;
     skip_ws(p);
     if (**p != '=') {
-        basic_error = 1;
-        SHELL_PRINTF(SH_RED "? '=' expected\n" SH_RST);
+        basic_throw(TIKU_BASIC_ERR_SYNTAX, "'=' expected");
         return;
     }
     (*p)++;
@@ -287,8 +299,7 @@ exec_strslice_assign(const char **p, char kind)
     src = basic_strvars[sidx] ? basic_strvars[sidx] : "";
     src_len = strlen(src);
     if (src_len + 1u > sizeof(buf)) {
-        basic_error = 1;
-        SHELL_PRINTF(SH_RED "? string too long\n" SH_RST);
+        basic_throw(TIKU_BASIC_ERR_GENERAL, "string too long");
         return;
     }
     memcpy(buf, src, src_len);
@@ -305,8 +316,7 @@ exec_strslice_assign(const char **p, char kind)
         /* Out-of-range start is a no-op (matches QuickBASIC). */
         basic_strvars[sidx] = basic_str_alloc(buf, src_len);
         if (basic_strvars[sidx] == NULL) {
-            basic_error = 1;
-            SHELL_PRINTF(SH_RED "? out of string heap\n" SH_RST);
+            basic_throw(TIKU_BASIC_ERR_NOMEM, "out of string heap");
         }
         return;
     }
@@ -322,8 +332,7 @@ exec_strslice_assign(const char **p, char kind)
     }
     basic_strvars[sidx] = basic_str_alloc(buf, src_len);
     if (basic_strvars[sidx] == NULL) {
-        basic_error = 1;
-        SHELL_PRINTF(SH_RED "? out of string heap\n" SH_RST);
+        basic_throw(TIKU_BASIC_ERR_NOMEM, "out of string heap");
     }
 }
 #endif /* TIKU_BASIC_STRVARS_ENABLE */
@@ -356,8 +365,7 @@ exec_input(const char **p)
 
     if (!parse_var_full(p, &idx, &is_string)) {
         if (!basic_error) {
-            basic_error = 1;
-            SHELL_PRINTF(SH_RED "? variable expected\n" SH_RST);
+            basic_throw(TIKU_BASIC_ERR_SYNTAX, "variable expected");
         }
         return;
     }
@@ -371,8 +379,7 @@ exec_input(const char **p)
     if (is_string) {
         basic_strvars[idx] = basic_str_alloc(buf, strlen(buf));
         if (basic_strvars[idx] == NULL) {
-            basic_error = 1;
-            SHELL_PRINTF(SH_RED "? out of string heap\n" SH_RST);
+            basic_throw(TIKU_BASIC_ERR_NOMEM, "out of string heap");
         }
         return;
     }
@@ -391,11 +398,78 @@ exec_input(const char **p)
  * Labels are matched case-insensitively and must be at line start
  * (immediately after any leading whitespace -- not after a number or
  * other statement). */
+/* A3 #2: one walk over prog[] collecting label definitions (`name:` at line
+ * start) and SUB headers into the registries.  Rebuilt after any edit. */
+static void
+basic_symreg_build(void)
+{
+    uint16_t i;
+    basic_label_reg_n   = 0;
+    basic_label_reg_ovf = 0;
+#if TIKU_BASIC_SUBS_ENABLE
+    basic_sub_reg_n     = 0;
+    basic_sub_reg_ovf   = 0;
+#endif
+    for (i = 0; i < TIKU_BASIC_PROGRAM_LINES; i++) {
+        const char *t;
+        if (prog[i].number == 0) continue;
+        t = prog[i].text;
+        while (*t == ' ' || *t == '\t') t++;
+        if (is_alpha(*t)) {
+            const char *r = t;
+            while (is_word_cont(*r)) r++;
+            if (*r == ':') {
+                if (basic_label_reg_n < BASIC_SYMREG_MAX) {
+                    basic_label_reg[basic_label_reg_n].idx = i;
+                    basic_label_reg[basic_label_reg_n].off =
+                        (uint8_t)(t - prog[i].text);
+                    basic_label_reg_n++;
+                } else {
+                    basic_label_reg_ovf = 1;
+                }
+                continue;               /* a label line is not a SUB header */
+            }
+        }
+#if TIKU_BASIC_SUBS_ENABLE
+        {
+            size_t k = tok_kw_at(t, "SUB");
+            if (k != 0) {
+                const char *nm = t + k;
+                while (*nm == ' ' || *nm == '\t') nm++;
+                if (basic_sub_reg_n < BASIC_SYMREG_MAX) {
+                    basic_sub_reg[basic_sub_reg_n].idx = i;
+                    basic_sub_reg[basic_sub_reg_n].off =
+                        (uint8_t)(nm - prog[i].text);
+                    basic_sub_reg_n++;
+                } else {
+                    basic_sub_reg_ovf = 1;
+                }
+            }
+        }
+#endif
+    }
+    basic_symreg_ok = 1;
+}
+
 static int
 prog_find_label(const char *name, size_t name_len)
 {
     uint16_t i;
     size_t  k;
+    uint8_t r;
+    if (!basic_symreg_ok) basic_symreg_build();
+    for (r = 0; r < basic_label_reg_n; r++) {
+        const char *t = prog[basic_label_reg[r].idx].text +
+                        basic_label_reg[r].off;
+        for (k = 0; k < name_len; k++) {
+            if (to_upper(t[k]) != to_upper(name[k])) break;
+        }
+        if (k == name_len && t[name_len] == ':') {
+            return (int)basic_label_reg[r].idx;
+        }
+    }
+    if (!basic_label_reg_ovf) return -1;
+    /* Registry overflowed: fall back to the full scan. */
     for (i = 0; i < TIKU_BASIC_PROGRAM_LINES; i++) {
         const char *t;
         if (prog[i].number == 0) continue;
@@ -439,8 +513,7 @@ parse_label_ref(const char **p, long *out_target)
     name[n] = '\0';
     idx = prog_find_label(name, n);
     if (idx < 0) {
-        basic_error = 1;
-        SHELL_PRINTF(SH_RED "? unknown label %s\n" SH_RST, name);
+        basic_throwf(TIKU_BASIC_ERR_GENERAL, "unknown label %s", name);
         return -1;
     }
     *p = q;
@@ -459,8 +532,7 @@ exec_goto(const char **p)
         if (basic_error) return;
     }
     if (!basic_running) {
-        basic_error = 1;
-        SHELL_PRINTF(SH_RED "? GOTO outside RUN\n" SH_RST);
+        basic_throw(TIKU_BASIC_ERR_GENERAL, "GOTO outside RUN");
         return;
     }
     basic_pc = (uint16_t)target;
@@ -488,13 +560,11 @@ exec_gosub(const char **p)
         if (basic_error) return;
     }
     if (!basic_running) {
-        basic_error = 1;
-        SHELL_PRINTF(SH_RED "? GOSUB outside RUN\n" SH_RST);
+        basic_throw(TIKU_BASIC_ERR_GENERAL, "GOSUB outside RUN");
         return;
     }
     if (gosub_sp >= TIKU_BASIC_GOSUB_DEPTH) {
-        basic_error = 1;
-        SHELL_PRINTF(SH_RED "? GOSUB stack overflow\n" SH_RST);
+        basic_throw(TIKU_BASIC_ERR_NOMEM, "GOSUB stack overflow");
         return;
     }
     gosub_stack[gosub_sp++] = line_after(basic_pc);
@@ -507,8 +577,7 @@ exec_return(void)
 {
     uint16_t r;
     if (gosub_sp == 0) {
-        basic_error = 1;
-        SHELL_PRINTF(SH_RED "? RETURN without GOSUB\n" SH_RST);
+        basic_throw(TIKU_BASIC_ERR_GENERAL, "RETURN without GOSUB");
         return;
     }
     r = gosub_stack[--gosub_sp];
@@ -613,34 +682,46 @@ basic_jump_after(int idx)
     basic_pc_set = 1;
 }
 
+#if TIKU_BASIC_SUBS_ENABLE
+static void exec_endsub(void);      /* defined later in tiku_basic_subs.inl */
+#endif
+
 /**
- * @brief EXIT FOR | EXIT WHILE | EXIT REPEAT  -- early exit from the
- *        innermost matching loop.
+ * @brief EXIT FOR | EXIT WHILE | EXIT REPEAT | EXIT SUB  -- early exit from
+ *        the innermost matching loop or subroutine.
  *
  * Pops the corresponding frame and advances basic_pc to the line
- * after the matching NEXT / WEND / UNTIL.  Exits in immediate mode
+ * after the matching NEXT / WEND / UNTIL (loops), or to the caller
+ * (EXIT SUB, identical to reaching ENDSUB).  Exits in immediate mode
  * are rejected because there's no run to terminate.
  */
 static void
 exec_exit(const char **p)
 {
     if (!basic_running) {
-        basic_error = 1;
-        SHELL_PRINTF(SH_RED "? EXIT outside RUN\n" SH_RST);
+        basic_throw(TIKU_BASIC_ERR_GENERAL, "EXIT outside RUN");
         return;
     }
     skip_ws(p);
+#if TIKU_BASIC_SUBS_ENABLE
+    if (match_kw(p, "SUB")) {
+        if (basic_call_sp == 0) {
+            basic_throw(TIKU_BASIC_ERR_GENERAL, "EXIT SUB outside a SUB");
+            return;
+        }
+        exec_endsub();          /* restore params+locals, return to caller */
+        return;
+    }
+#endif
     if (match_kw(p, "FOR")) {
         int idx;
         if (for_sp == 0) {
-            basic_error = 1;
-            SHELL_PRINTF(SH_RED "? EXIT FOR without FOR\n" SH_RST);
+            basic_throw(TIKU_BASIC_ERR_GENERAL, "EXIT FOR without FOR");
             return;
         }
         idx = find_matching_next(basic_pc);
         if (idx < 0) {
-            basic_error = 1;
-            SHELL_PRINTF(SH_RED "? FOR without NEXT\n" SH_RST);
+            basic_throw(TIKU_BASIC_ERR_GENERAL, "FOR without NEXT");
             return;
         }
         for_sp--;
@@ -650,14 +731,12 @@ exec_exit(const char **p)
     if (match_kw(p, "WHILE")) {
         int idx;
         if (loop_sp == 0) {
-            basic_error = 1;
-            SHELL_PRINTF(SH_RED "? EXIT WHILE without WHILE\n" SH_RST);
+            basic_throw(TIKU_BASIC_ERR_GENERAL, "EXIT WHILE without WHILE");
             return;
         }
         idx = find_matching_wend(loop_stack[loop_sp - 1].back_line);
         if (idx < 0) {
-            basic_error = 1;
-            SHELL_PRINTF(SH_RED "? WHILE without WEND\n" SH_RST);
+            basic_throw(TIKU_BASIC_ERR_GENERAL, "WHILE without WEND");
             return;
         }
         loop_sp--;
@@ -667,22 +746,19 @@ exec_exit(const char **p)
     if (match_kw(p, "REPEAT")) {
         int idx;
         if (loop_sp == 0) {
-            basic_error = 1;
-            SHELL_PRINTF(SH_RED "? EXIT REPEAT without REPEAT\n" SH_RST);
+            basic_throw(TIKU_BASIC_ERR_GENERAL, "EXIT REPEAT without REPEAT");
             return;
         }
         idx = find_matching_until(loop_stack[loop_sp - 1].back_line);
         if (idx < 0) {
-            basic_error = 1;
-            SHELL_PRINTF(SH_RED "? REPEAT without UNTIL\n" SH_RST);
+            basic_throw(TIKU_BASIC_ERR_GENERAL, "REPEAT without UNTIL");
             return;
         }
         loop_sp--;
         basic_jump_after(idx);
         return;
     }
-    basic_error = 1;
-    SHELL_PRINTF(SH_RED "? EXIT FOR | WHILE | REPEAT\n" SH_RST);
+    basic_throw(TIKU_BASIC_ERR_GENERAL, "EXIT FOR | WHILE | REPEAT | SUB");
 }
 
 /**
@@ -697,23 +773,20 @@ static void
 exec_continue(const char **p)
 {
     if (!basic_running) {
-        basic_error = 1;
-        SHELL_PRINTF(SH_RED "? CONTINUE outside RUN\n" SH_RST);
+        basic_throw(TIKU_BASIC_ERR_GENERAL, "CONTINUE outside RUN");
         return;
     }
     skip_ws(p);
     if (match_kw(p, "FOR")) {
         int idx;
         if (for_sp == 0) {
-            basic_error = 1;
-            SHELL_PRINTF(SH_RED "? CONTINUE FOR without FOR\n" SH_RST);
+            basic_throw(TIKU_BASIC_ERR_GENERAL, "CONTINUE FOR without FOR");
             return;
         }
         idx = find_matching_next(
             (uint16_t)(for_stack[for_sp - 1].loop_line - 1u));
         if (idx < 0) {
-            basic_error = 1;
-            SHELL_PRINTF(SH_RED "? FOR without NEXT\n" SH_RST);
+            basic_throw(TIKU_BASIC_ERR_GENERAL, "FOR without NEXT");
             return;
         }
         basic_pc     = prog[idx].number;
@@ -722,8 +795,7 @@ exec_continue(const char **p)
     }
     if (match_kw(p, "WHILE")) {
         if (loop_sp == 0) {
-            basic_error = 1;
-            SHELL_PRINTF(SH_RED "? CONTINUE WHILE without WHILE\n" SH_RST);
+            basic_throw(TIKU_BASIC_ERR_GENERAL, "CONTINUE WHILE without WHILE");
             return;
         }
         basic_pc     = loop_stack[loop_sp - 1].back_line;
@@ -733,22 +805,19 @@ exec_continue(const char **p)
     if (match_kw(p, "REPEAT")) {
         int idx;
         if (loop_sp == 0) {
-            basic_error = 1;
-            SHELL_PRINTF(SH_RED "? CONTINUE REPEAT without REPEAT\n" SH_RST);
+            basic_throw(TIKU_BASIC_ERR_GENERAL, "CONTINUE REPEAT without REPEAT");
             return;
         }
         idx = find_matching_until(loop_stack[loop_sp - 1].back_line);
         if (idx < 0) {
-            basic_error = 1;
-            SHELL_PRINTF(SH_RED "? REPEAT without UNTIL\n" SH_RST);
+            basic_throw(TIKU_BASIC_ERR_GENERAL, "REPEAT without UNTIL");
             return;
         }
         basic_pc     = prog[idx].number;
         basic_pc_set = 1;
         return;
     }
-    basic_error = 1;
-    SHELL_PRINTF(SH_RED "? CONTINUE FOR | WHILE | REPEAT\n" SH_RST);
+    basic_throw(TIKU_BASIC_ERR_GENERAL, "CONTINUE FOR | WHILE | REPEAT");
 }
 
 /*---------------------------------------------------------------------------*/
@@ -762,24 +831,20 @@ exec_for(const char **p)
     long e1, e2, e3 = 1;
 
     if (!basic_running) {
-        basic_error = 1;
-        SHELL_PRINTF(SH_RED "? FOR outside RUN\n" SH_RST);
+        basic_throw(TIKU_BASIC_ERR_GENERAL, "FOR outside RUN");
         return;
     }
     if (for_sp >= TIKU_BASIC_FOR_DEPTH) {
-        basic_error = 1;
-        SHELL_PRINTF(SH_RED "? FOR stack overflow\n" SH_RST);
+        basic_throw(TIKU_BASIC_ERR_NOMEM, "FOR stack overflow");
         return;
     }
     if (!parse_var(p, &idx)) {
-        basic_error = 1;
-        SHELL_PRINTF(SH_RED "? variable expected\n" SH_RST);
+        basic_throw(TIKU_BASIC_ERR_SYNTAX, "variable expected");
         return;
     }
     skip_ws(p);
     if (**p != '=') {
-        basic_error = 1;
-        SHELL_PRINTF(SH_RED "? '=' expected\n" SH_RST);
+        basic_throw(TIKU_BASIC_ERR_SYNTAX, "'=' expected");
         return;
     }
     (*p)++;
@@ -787,8 +852,7 @@ exec_for(const char **p)
     if (basic_error) return;
     skip_ws(p);
     if (!match_kw(p, "TO")) {
-        basic_error = 1;
-        SHELL_PRINTF(SH_RED "? TO expected\n" SH_RST);
+        basic_throw(TIKU_BASIC_ERR_SYNTAX, "TO expected");
         return;
     }
     e2 = parse_expr(p);
@@ -798,8 +862,7 @@ exec_for(const char **p)
         e3 = parse_expr(p);
         if (basic_error) return;
         if (e3 == 0) {
-            basic_error = 1;
-            SHELL_PRINTF(SH_RED "? STEP cannot be 0\n" SH_RST);
+            basic_throw(TIKU_BASIC_ERR_GENERAL, "STEP cannot be 0");
             return;
         }
     }
@@ -831,21 +894,18 @@ exec_next(const char **p)
     long  v;
 
     if (!basic_running) {
-        basic_error = 1;
-        SHELL_PRINTF(SH_RED "? NEXT outside RUN\n" SH_RST);
+        basic_throw(TIKU_BASIC_ERR_GENERAL, "NEXT outside RUN");
         return;
     }
     if (for_sp == 0) {
-        basic_error = 1;
-        SHELL_PRINTF(SH_RED "? NEXT without FOR\n" SH_RST);
+        basic_throw(TIKU_BASIC_ERR_GENERAL, "NEXT without FOR");
         return;
     }
     skip_ws(p);
     has_var = parse_var(p, &idx);
     f = &for_stack[for_sp - 1];
     if (has_var && (uint16_t)idx != f->var_idx) {
-        basic_error = 1;
-        SHELL_PRINTF(SH_RED "? NEXT mismatch\n" SH_RST);
+        basic_throw(TIKU_BASIC_ERR_GENERAL, "NEXT mismatch");
         return;
     }
     v = basic_vars[f->var_idx] + f->step;
@@ -866,24 +926,56 @@ exec_next(const char **p)
     basic_pc_set = 1;
 }
 
-/* Walk a single line of source and find the position of an unquoted
- * ELSE keyword (case-insensitive, word-bounded). Returns a pointer
- * inside @p src to the 'E' of ELSE, or NULL if no ELSE is present.
- * Skips characters inside double-quoted strings so PRINT bodies
- * containing the substring don't trigger a false match. */
+/* Walk a single line of source (the text AFTER this IF's THEN) and find
+ * the ELSE that binds to *this* IF.  Returns a pointer inside @p src to
+ * the 'E' of that ELSE, or NULL if this IF has none.  Case-insensitive,
+ * word-bounded; characters inside double-quoted strings are skipped so a
+ * PRINT body containing the substring doesn't trigger a false match.
+ *
+ * Nesting (A6 fix): ELSE binds to the *nearest* IF, the conventional
+ * rule.  A nested `IF ... THEN` in our THEN-branch opens an inner IF that
+ * claims the next ELSE, so we count unmatched inner THENs and only return
+ * an ELSE once that count is zero.  Thus in
+ *     IF a THEN IF b THEN x ELSE y
+ * the ELSE binds to `IF b` (this function returns NULL for the outer IF),
+ * not to the outer IF as the old first-ELSE scan did. */
 static const char *
 scan_for_else(const char *src)
 {
     const char *q = src;
-    int in_str = 0;
+    int in_str  = 0;
+    int pending = 0;                 /* inner IF...THENs awaiting an ELSE */
     while (*q != '\0') {
-        if (*q == '"') { in_str = !in_str; q++; continue; }
-        if (in_str)    { q++; continue; }
+        uint8_t b = (uint8_t)*q;
+        if (b == '"') { in_str = !in_str; q++; continue; }
+        if (in_str)   { q++; continue; }
+        /* A2: crunched keyword bytes (unambiguous, no boundary checks). */
+        if (b == BASIC_TOK_BYTE(THEN)) { pending++; q++; continue; }
+        if (b == BASIC_TOK_BYTE(ELSE)) {
+            if (pending > 0) { pending--; q++; continue; }
+            return q;
+        }
+        /* Raw text forms (immediate-mode lines are never crunched). */
+        if ((to_upper(q[0]) == 'T') && (to_upper(q[1]) == 'H') &&
+            (to_upper(q[2]) == 'E') && (to_upper(q[3]) == 'N')) {
+            char prev = (q == src) ? ' ' : q[-1];
+            if (!is_word_cont(prev) && !is_word_cont(q[4])) {
+                pending++;           /* an inner IF will claim the next ELSE */
+                q += 4;
+                continue;
+            }
+        }
         if ((to_upper(q[0]) == 'E') && (to_upper(q[1]) == 'L') &&
             (to_upper(q[2]) == 'S') && (to_upper(q[3]) == 'E')) {
             char prev = (q == src) ? ' ' : q[-1];
-            char next = q[4];
-            if (!is_word_cont(prev) && !is_word_cont(next)) return q;
+            if (!is_word_cont(prev) && !is_word_cont(q[4])) {
+                if (pending > 0) {
+                    pending--;        /* this ELSE closes an inner IF */
+                    q += 4;
+                    continue;
+                }
+                return q;             /* this ELSE binds to our IF */
+            }
         }
         q++;
     }
@@ -901,8 +993,7 @@ parse_port_pin(const char **p, long *port, long *pin)
     if (basic_error) return -1;
     skip_ws(p);
     if (**p != ',') {
-        basic_error = 1;
-        SHELL_PRINTF(SH_RED "? ',' expected\n" SH_RST);
+        basic_throw(TIKU_BASIC_ERR_SYNTAX, "',' expected");
         return -1;
     }
     (*p)++;
@@ -920,8 +1011,7 @@ exec_pin(const char **p)
     if (parse_port_pin(p, &port, &pin) != 0) return;
     skip_ws(p);
     if (**p != ',') {
-        basic_error = 1;
-        SHELL_PRINTF(SH_RED "? ',' expected\n" SH_RST);
+        basic_throw(TIKU_BASIC_ERR_SYNTAX, "',' expected");
         return;
     }
     (*p)++;
@@ -931,8 +1021,7 @@ exec_pin(const char **p)
             ? tiku_gpio_arch_set_input ((uint8_t)port, (uint8_t)pin)
             : tiku_gpio_arch_set_output((uint8_t)port, (uint8_t)pin);
     if (rc < 0) {
-        basic_error = 1;
-        SHELL_PRINTF(SH_RED "? bad GPIO P%ld.%ld\n" SH_RST, port, pin);
+        basic_throwf(TIKU_BASIC_ERR_SYNTAX, "bad GPIO P%ld.%ld", port, pin);
     }
 }
 
@@ -945,8 +1034,7 @@ exec_digwrite(const char **p)
     if (parse_port_pin(p, &port, &pin) != 0) return;
     skip_ws(p);
     if (**p != ',') {
-        basic_error = 1;
-        SHELL_PRINTF(SH_RED "? ',' expected\n" SH_RST);
+        basic_throw(TIKU_BASIC_ERR_SYNTAX, "',' expected");
         return;
     }
     (*p)++;
@@ -956,8 +1044,7 @@ exec_digwrite(const char **p)
             ? tiku_gpio_arch_write ((uint8_t)port, (uint8_t)pin, (uint8_t)val)
             : tiku_gpio_arch_toggle((uint8_t)port, (uint8_t)pin);
     if (rc < 0) {
-        basic_error = 1;
-        SHELL_PRINTF(SH_RED "? bad GPIO P%ld.%ld\n" SH_RST, port, pin);
+        basic_throwf(TIKU_BASIC_ERR_SYNTAX, "bad GPIO P%ld.%ld", port, pin);
     }
 }
 #endif
@@ -974,29 +1061,27 @@ exec_i2cwrite(const char **p)
     if (basic_error) return;
     skip_ws(p);
     if (**p != ',') {
-        basic_error = 1; SHELL_PRINTF(SH_RED "? ',' expected\n" SH_RST); return;
+        basic_throw(TIKU_BASIC_ERR_SYNTAX, "',' expected"); return;
     }
     (*p)++;
     reg = parse_expr(p);
     if (basic_error) return;
     skip_ws(p);
     if (**p != ',') {
-        basic_error = 1; SHELL_PRINTF(SH_RED "? ',' expected\n" SH_RST); return;
+        basic_throw(TIKU_BASIC_ERR_SYNTAX, "',' expected"); return;
     }
     (*p)++;
     val = parse_expr(p);
     if (basic_error) return;
 
     if (basic_i2c_ensure() != 0) {
-        basic_error = 1;
-        SHELL_PRINTF(SH_RED "? I2C init failed\n" SH_RST);
+        basic_throw(TIKU_BASIC_ERR_GENERAL, "I2C init failed");
         return;
     }
     buf[0] = (uint8_t)reg;
     buf[1] = (uint8_t)val;
     if (tiku_i2c_write((uint8_t)addr, buf, 2) != TIKU_I2C_OK) {
-        basic_error = 1;
-        SHELL_PRINTF(SH_RED "? I2C write failed (addr=0x%02x)\n" SH_RST, (unsigned)addr);
+        basic_throwf(TIKU_BASIC_ERR_IO, "I2C write failed (addr=0x%02x)", (unsigned)addr);
     }
 }
 #endif
@@ -1027,14 +1112,13 @@ exec_led(const char **p)
     if (basic_error) return;
     skip_ws(p);
     if (**p != ',') {
-        basic_error = 1; SHELL_PRINTF(SH_RED "? ',' expected\n" SH_RST); return;
+        basic_throw(TIKU_BASIC_ERR_SYNTAX, "',' expected"); return;
     }
     (*p)++;
     val = parse_expr(p);
     if (basic_error) return;
     if (idx < 0 || idx >= (long)tiku_led_count()) {
-        basic_error = 1;
-        SHELL_PRINTF(SH_RED "? bad LED %ld (count=%u)" SH_RST "\n",
+        basic_throwf(TIKU_BASIC_ERR_RANGE, "bad LED %ld (count=%u)",
                      idx, (unsigned)tiku_led_count());
         return;
     }
@@ -1057,23 +1141,20 @@ parse_path_literal(const char **p, char *buf, size_t cap)
     size_t n = 0;
     skip_ws(p);
     if (**p != '"') {
-        basic_error = 1;
-        SHELL_PRINTF(SH_RED "? quoted path expected\n" SH_RST);
+        basic_throw(TIKU_BASIC_ERR_IO, "quoted path expected");
         return -1;
     }
     (*p)++;
     while (**p != '\0' && **p != '"') {
         if (n + 1 >= cap) {
-            basic_error = 1;
-            SHELL_PRINTF(SH_RED "? path too long\n" SH_RST);
+            basic_throw(TIKU_BASIC_ERR_IO, "path too long");
             return -1;
         }
         buf[n++] = **p;
         (*p)++;
     }
     if (**p != '"') {
-        basic_error = 1;
-        SHELL_PRINTF(SH_RED "? unterminated path\n" SH_RST);
+        basic_throw(TIKU_BASIC_ERR_IO, "unterminated path");
         return -1;
     }
     (*p)++;
@@ -1095,22 +1176,19 @@ exec_vfswrite(const char **p)
     if (parse_path_literal(p, path, sizeof(path)) != 0) return;
     skip_ws(p);
     if (**p != ',') {
-        basic_error = 1; SHELL_PRINTF(SH_RED "? ',' expected\n" SH_RST); return;
+        basic_throw(TIKU_BASIC_ERR_SYNTAX, "',' expected"); return;
     }
     (*p)++;
     val = parse_expr(p);
     if (basic_error) return;
     n = snprintf(render, sizeof(render), "%ld", val);
     if (n < 0 || (size_t)n >= sizeof(render)) {
-        basic_error = 1;
-        SHELL_PRINTF(SH_RED "? value render failed\n" SH_RST);
+        basic_throw(TIKU_BASIC_ERR_GENERAL, "value render failed");
         return;
     }
     n = tiku_vfs_write(path, render, (size_t)n);
     if (n < 0) {
-        basic_error = 1;
-        SHELL_PRINTF(SH_RED "? VFS write failed: %s (%s)\n" SH_RST,
-                     path, tiku_vfs_strerror(n));
+        basic_throwf(TIKU_BASIC_ERR_IO, "VFS write failed: %s (%s)", path, tiku_vfs_strerror(n));
     }
 }
 
@@ -1127,15 +1205,13 @@ exec_vfswrite_str(const char **p)
     if (parse_path_literal(p, path, sizeof(path)) != 0) return;
     skip_ws(p);
     if (**p != ',') {
-        basic_error = 1; SHELL_PRINTF(SH_RED "? ',' expected\n" SH_RST); return;
+        basic_throw(TIKU_BASIC_ERR_SYNTAX, "',' expected"); return;
     }
     (*p)++;
     if (parse_strexpr(p, val, sizeof(val)) != 0) return;
     rc = tiku_vfs_write(path, val, strlen(val));
     if (rc < 0) {
-        basic_error = 1;
-        SHELL_PRINTF(SH_RED "? VFS write failed: %s (%s)\n" SH_RST,
-                     path, tiku_vfs_strerror(rc));
+        basic_throwf(TIKU_BASIC_ERR_IO, "VFS write failed: %s (%s)", path, tiku_vfs_strerror(rc));
     }
 }
 
@@ -1153,9 +1229,7 @@ basic_vfsread(const char *path)
 
     n = tiku_vfs_read(path, buf, sizeof(buf) - 1);
     if (n < 0) {
-        basic_error = 1;
-        SHELL_PRINTF(SH_RED "? VFS read failed: %s (%s)\n" SH_RST,
-                     path, tiku_vfs_strerror(n));
+        basic_throwf(TIKU_BASIC_ERR_IO, "VFS read failed: %s (%s)", path, tiku_vfs_strerror(n));
         return 0;
     }
     if (n >= (int)sizeof(buf)) n = (int)sizeof(buf) - 1;
@@ -1185,8 +1259,7 @@ exec_settime(const char **p)
     long secs = parse_expr(p);
     if (basic_error) return;
     if (secs < 0) {
-        basic_error = 1;
-        SHELL_PRINTF(SH_RED "? SETTIME needs a non-negative epoch\n" SH_RST);
+        basic_throw(TIKU_BASIC_ERR_GENERAL, "SETTIME needs a non-negative epoch");
         return;
     }
     tiku_rtc_set_seconds((uint32_t)secs);
@@ -1215,7 +1288,7 @@ exec_append(const char **p)
     if (parse_path_literal(p, path, sizeof(path)) != 0) return;
     skip_ws(p);
     if (**p != ',') {
-        basic_error = 1; SHELL_PRINTF(SH_RED "? ',' expected\n" SH_RST); return;
+        basic_throw(TIKU_BASIC_ERR_SYNTAX, "',' expected"); return;
     }
     (*p)++;
     if (parse_strexpr(p, val, sizeof(val)) != 0) return;
@@ -1226,16 +1299,13 @@ exec_append(const char **p)
     vlen  = (int)strlen(val);
     total = have + vlen + 1;                       /* +1 for the newline */
     if (total > TIKU_BASIC_FILE_BUF) {
-        basic_error = 1;
-        SHELL_PRINTF(SH_RED "? file full (max %d bytes)\n" SH_RST,
-                     (int)TIKU_BASIC_FILE_BUF);
+        basic_throwf(TIKU_BASIC_ERR_IO, "file full (max %d bytes)", (int)TIKU_BASIC_FILE_BUF);
         return;
     }
     memcpy(basic_file_scratch + have, val, (size_t)vlen);
     basic_file_scratch[have + vlen] = '\n';
     if (tiku_vfs_write(path, basic_file_scratch, (size_t)total) < 0) {
-        basic_error = 1;
-        SHELL_PRINTF(SH_RED "? write failed: %s\n" SH_RST, path);
+        basic_throwf(TIKU_BASIC_ERR_IO, "write failed: %s", path);
     }
 }
 
@@ -1249,13 +1319,12 @@ exec_fwrite(const char **p)
     if (parse_path_literal(p, path, sizeof(path)) != 0) return;
     skip_ws(p);
     if (**p != ',') {
-        basic_error = 1; SHELL_PRINTF(SH_RED "? ',' expected\n" SH_RST); return;
+        basic_throw(TIKU_BASIC_ERR_SYNTAX, "',' expected"); return;
     }
     (*p)++;
     if (parse_strexpr(p, val, sizeof(val)) != 0) return;
     if (tiku_vfs_write(path, val, strlen(val)) < 0) {
-        basic_error = 1;
-        SHELL_PRINTF(SH_RED "? write failed: %s\n" SH_RST, path);
+        basic_throwf(TIKU_BASIC_ERR_IO, "write failed: %s", path);
     }
 }
 #endif
@@ -1269,8 +1338,7 @@ exec_poke(const char **p)
     if (basic_error) return;
     skip_ws(p);
     if (**p != ',') {
-        basic_error = 1;
-        SHELL_PRINTF(SH_RED "? ',' expected\n" SH_RST);
+        basic_throw(TIKU_BASIC_ERR_SYNTAX, "',' expected");
         return;
     }
     (*p)++;
@@ -1295,6 +1363,17 @@ exec_cls(void)
  * default 128 Hz). Negative or zero argument returns immediately.
  * Bounded by tiku_clock_time_t's 16-bit width: roughly 256 s safe
  * at 128 Hz; for longer waits, chain DELAYs. */
+/* Can the current wait yield (park the step machine) instead of spinning?
+ * Shell mode only, during RUN, from the MAIN line walker -- nested contexts
+ * (IF-THEN scratch, EVERY bodies via the reactive poll) keep the blocking
+ * path because their transient buffers cannot be resumed across ticks. */
+static int
+basic_wait_can_yield(void)
+{
+    return basic_run_shell_mode && basic_running &&
+           !basic_in_reactive && basic_stmt_depth == 1;
+}
+
 static void
 exec_delay_ms(long ms)
 {
@@ -1304,6 +1383,16 @@ exec_delay_ms(long ms)
     start = tiku_clock_time();
     ticks = TIKU_CLOCK_MS_TO_TICKS((unsigned long)ms);
     if (ticks == 0u) return;
+    if (basic_wait_can_yield()) {
+        /* Park the step machine instead of spinning: the shell loop keeps
+         * pumping (events dispatch, Ctrl-C arrives via feed_char), and the
+         * run resumes this line's remainder after the deadline. */
+        basic_wait_start   = start;
+        basic_wait_ticks   = ticks;
+        basic_wait_sleep_s = 0;
+        basic_wait_pending = 1;
+        return;
+    }
     while ((tiku_clock_time_t)(tiku_clock_time() - start) < ticks) {
 #if TIKU_SHELL_CMD_SLIP
         /* SLIP-aware break check: demux IP frames away so a 0x03 byte inside
@@ -1319,6 +1408,7 @@ exec_delay_ms(long ms)
             }
         }
 #else
+        tiku_watchdog_kick();   /* feed the hang detector; see read_line */
         if (tiku_shell_io_rx_ready()) {
             int ch = tiku_shell_io_getc();
             if (ch == BASIC_CTRL_C) {
@@ -1365,6 +1455,7 @@ basic_lp_wait_ticks(tiku_clock_time_t ticks)
             return;
         }
 #else
+        tiku_watchdog_kick();   /* feed the hang detector; see read_line */
         if (tiku_shell_io_rx_ready() &&
             tiku_shell_io_getc() == BASIC_CTRL_C) {
             basic_error = 1;
@@ -1389,6 +1480,19 @@ exec_sleep(const char **p)
      * "go dark for a while", not a precise busy pause.  Ctrl-C aborts;
      * the 24 h cap is a sanity bound, not a hardware limit. */
     if (s > 86400L) s = 86400L;
+    if (basic_wait_can_yield()) {
+        /* Park (first <=10 s chunk now, the step machine re-arms the rest):
+         * in mode the kernel idles the core between poll ticks, so the
+         * low-power goal is met by yielding rather than by spinning in the
+         * DEEP-idle loop below. */
+        long chunk = (s > 10L) ? 10L : s;
+        basic_wait_start   = tiku_clock_time();
+        basic_wait_ticks   =
+            (tiku_clock_time_t)((tiku_clock_time_t)chunk * TIKU_CLOCK_SECOND);
+        basic_wait_sleep_s = s - chunk;
+        basic_wait_pending = 1;
+        return;
+    }
     while (s > 0L && !basic_error) {
         long chunk = (s > 10L) ? 10L : s;
         basic_lp_wait_ticks(
@@ -1409,21 +1513,18 @@ exec_every(const char **p)
     long ms;
     int i, slot = -1;
     if (!basic_running) {
-        basic_error = 1;
-        SHELL_PRINTF(SH_RED "? EVERY outside RUN\n" SH_RST);
+        basic_throw(TIKU_BASIC_ERR_GENERAL, "EVERY outside RUN");
         return;
     }
     ms = parse_expr(p);
     if (basic_error) return;
     if (ms <= 0) {
-        basic_error = 1;
-        SHELL_PRINTF(SH_RED "? EVERY interval must be > 0\n" SH_RST);
+        basic_throw(TIKU_BASIC_ERR_GENERAL, "EVERY interval must be > 0");
         return;
     }
     skip_ws(p);
     if (**p != ':') {
-        basic_error = 1;
-        SHELL_PRINTF(SH_RED "? ':' expected\n" SH_RST);
+        basic_throw(TIKU_BASIC_ERR_SYNTAX, "':' expected");
         return;
     }
     (*p)++;
@@ -1432,8 +1533,7 @@ exec_every(const char **p)
         if (!basic_everys[i].active) { slot = i; break; }
     }
     if (slot < 0) {
-        basic_error = 1;
-        SHELL_PRINTF(SH_RED "? EVERY table full\n" SH_RST);
+        basic_throw(TIKU_BASIC_ERR_NOMEM, "EVERY table full");
         return;
     }
     {
@@ -1443,8 +1543,7 @@ exec_every(const char **p)
             (*p)++;
         }
         if (**p != '\0') {
-            basic_error = 1;
-            SHELL_PRINTF(SH_RED "? EVERY stmt too long\n" SH_RST);
+            basic_throw(TIKU_BASIC_ERR_GENERAL, "EVERY stmt too long");
             return;
         }
         basic_everys[slot].stmt[n] = '\0';
@@ -1455,11 +1554,36 @@ exec_every(const char **p)
     basic_everys[slot].active = 1;
 }
 
+#if TIKU_BASIC_ONCHG_EVENT
+/* F2: resolve an ON CHANGE slot's node and, if it is WRITABLE, subscribe the
+ * shell process so writes deliver TIKU_EVENT_VFS (event-driven; the poll tick
+ * then skips it).  Sensor/read-only or unresolved nodes stay polled.  This is
+ * idempotent -- tiku_vfs_watch dedups -- so the mode tick re-calls it every
+ * pass to self-heal after the rules engine's wholesale unwatch_all(). */
+static void
+basic_onchg_arm(basic_onchg_t *o)
+{
+    o->node = tiku_vfs_resolve(o->path);
+    /* Event-arm ONLY in shell mode: the synchronous exec_run driver blocks
+     * the shell loop, so TIKU_EVENT_VFS could never dispatch mid-run there
+     * -- an armed slot would gate on a pending mark that cannot arrive.
+     * The sync driver keeps the per-pass poll instead. */
+    if (basic_run_shell_mode &&
+        o->node != NULL && o->node->write != NULL) {
+        (void)tiku_vfs_watch(o->path, &tiku_shell_process);
+        o->armed = 1;
+    } else {
+        o->armed = 0;
+    }
+}
+#endif
+
 /* ON CHANGE "/path" GOTO line   or   ... GOSUB line
- * Registers a reactive watch. The RUN loop polls the path, and on
- * value change either jumps (GOTO) or pushes a return address (GOSUB)
- * to the handler. The "last value" baseline is captured at register
- * time, so a watch never fires on its own first read. */
+ * Registers a reactive watch. Writable nodes are event-armed via
+ * tiku_vfs_watch (F2); sensor/read-only nodes are polled by the RUN loop.
+ * On value change it either jumps (GOTO) or pushes a return address (GOSUB)
+ * to the handler. The "last value" baseline is captured at register time, so
+ * a watch never fires on its own first read. */
 static void
 exec_on_change(const char **p)
 {
@@ -1468,8 +1592,7 @@ exec_on_change(const char **p)
     int  is_gosub = 0;
     int  i, slot = -1;
     if (!basic_running) {
-        basic_error = 1;
-        SHELL_PRINTF(SH_RED "? ON CHANGE outside RUN\n" SH_RST);
+        basic_throw(TIKU_BASIC_ERR_GENERAL, "ON CHANGE outside RUN");
         return;
     }
     if (parse_path_literal(p, path, sizeof(path)) != 0) return;
@@ -1477,23 +1600,20 @@ exec_on_change(const char **p)
     if      (match_kw(p, "GOTO"))  is_gosub = 0;
     else if (match_kw(p, "GOSUB")) is_gosub = 1;
     else {
-        basic_error = 1;
-        SHELL_PRINTF(SH_RED "? GOTO or GOSUB expected\n" SH_RST);
+        basic_throw(TIKU_BASIC_ERR_SYNTAX, "GOTO or GOSUB expected");
         return;
     }
     line = parse_expr(p);
     if (basic_error) return;
     if (line <= 0 || line >= 0xFFFE) {
-        basic_error = 1;
-        SHELL_PRINTF(SH_RED "? bad handler line\n" SH_RST);
+        basic_throw(TIKU_BASIC_ERR_SYNTAX, "bad handler line");
         return;
     }
     for (i = 0; i < TIKU_BASIC_ONCHG_MAX; i++) {
         if (!basic_onchgs[i].active) { slot = i; break; }
     }
     if (slot < 0) {
-        basic_error = 1;
-        SHELL_PRINTF(SH_RED "? ON CHANGE table full\n" SH_RST);
+        basic_throw(TIKU_BASIC_ERR_NOMEM, "ON CHANGE table full");
         return;
     }
     strncpy(basic_onchgs[slot].path, path,
@@ -1507,7 +1627,39 @@ exec_on_change(const char **p)
      * if so, undo the registration. */
     if (basic_error) {
         basic_onchgs[slot].active = 0;
+        return;
     }
+#if TIKU_BASIC_ONCHG_EVENT
+    basic_onchgs[slot].pending = 0;         /* arena memory is not zeroed */
+    basic_onchg_arm(&basic_onchgs[slot]);   /* event-arm if writable */
+#endif
+}
+
+/* Re-read one ON CHANGE slot's value and, if it changed, fire its handler
+ * (GOTO jump / GOSUB push+jump); return 1 iff it fired.  Called only at a
+ * statement boundary, so the GOSUB return address (line_after(basic_pc)) is
+ * correct.  Shared by the poll tick and the event path (F2). */
+static int
+basic_onchg_check(basic_onchg_t *o)
+{
+    long v = basic_vfsread(o->path);
+    if (basic_error) {                 /* read failure -- silence and skip */
+        basic_error = 0;
+        return 0;
+    }
+    if (v == o->last_value) {
+        return 0;
+    }
+    o->last_value = v;
+    if (o->is_gosub) {
+        if (gosub_sp >= TIKU_BASIC_GOSUB_DEPTH) {
+            return 0;                  /* stack full -- no re-fire */
+        }
+        gosub_stack[gosub_sp++] = line_after(basic_pc);
+    }
+    basic_pc     = o->handler_line;
+    basic_pc_set = 1;
+    return 1;
 }
 
 /* Called from the RUN loop between program statements. Walks the
@@ -1541,25 +1693,17 @@ basic_poll_reactive(void)
 #endif
 #if TIKU_BASIC_ONCHG_MAX > 0
     for (i = 0; i < TIKU_BASIC_ONCHG_MAX; i++) {
-        long v;
         if (!basic_onchgs[i].active) continue;
-        v = basic_vfsread(basic_onchgs[i].path);
-        if (basic_error) {
-            /* Path-read failure -- silence and skip. */
-            basic_error = 0;
-            continue;
+#if TIKU_BASIC_ONCHG_EVENT
+        /* Event-armed (writable) node: only re-check when an event has marked
+         * it pending -- no VFSREAD every tick.  Firing still happens here, at
+         * a statement boundary, so the GOSUB return address is correct. */
+        if (basic_onchgs[i].armed) {
+            if (!basic_onchgs[i].pending) continue;
+            basic_onchgs[i].pending = 0;
         }
-        if (v != basic_onchgs[i].last_value) {
-            basic_onchgs[i].last_value = v;
-            if (basic_onchgs[i].is_gosub) {
-                if (gosub_sp >= TIKU_BASIC_GOSUB_DEPTH) {
-                    /* Return to where we were, no re-fire. */
-                    return;
-                }
-                gosub_stack[gosub_sp++] = line_after(basic_pc);
-            }
-            basic_pc     = basic_onchgs[i].handler_line;
-            basic_pc_set = 1;
+#endif
+        if (basic_onchg_check(&basic_onchgs[i])) {
             return;        /* one handler per poll */
         }
     }
@@ -1576,8 +1720,7 @@ exec_resume(const char **p)
 {
     long target;
     if (!basic_running) {
-        basic_error = 1;
-        SHELL_PRINTF(SH_RED "? RESUME outside RUN\n" SH_RST);
+        basic_throw(TIKU_BASIC_ERR_GENERAL, "RESUME outside RUN");
         return;
     }
     skip_ws(p);
@@ -1621,18 +1764,59 @@ exec_on(const char **p)
     if (match_kw(p, "ERROR")) {
         skip_ws(p);
         if (!match_kw(p, "GOTO")) {
-            basic_error = 1;
-            SHELL_PRINTF(SH_RED "? GOTO expected\n" SH_RST);
+            basic_throw(TIKU_BASIC_ERR_SYNTAX, "GOTO expected");
             return;
         }
         target = parse_expr(p);
         if (basic_error) return;
         if (target < 0 || target >= 0xFFFE) {
-            basic_error = 1;
-            SHELL_PRINTF(SH_RED "? bad handler line\n" SH_RST);
+            basic_throw(TIKU_BASIC_ERR_SYNTAX, "bad handler line");
             return;
         }
         basic_err_handler = (uint16_t)target;     /* 0 = disabled */
+        return;
+    }
+    /* ON TIMER n GOSUB L (or GOTO L) -- sugar for EVERY n : GOSUB L.  Reads
+     * better than EVERY for periodic tasks and reuses the EVERY registry. */
+    if (match_kw(p, "TIMER")) {
+        long ms, ln;
+        int  is_gsub, i, slot = -1;
+        if (!basic_running) {
+            basic_throw(TIKU_BASIC_ERR_GENERAL, "ON outside RUN");
+            return;
+        }
+        ms = parse_expr(p);
+        if (basic_error) return;
+        if (ms <= 0) {
+            basic_throw(TIKU_BASIC_ERR_GENERAL, "EVERY interval must be > 0");
+            return;
+        }
+        skip_ws(p);
+        if      (match_kw(p, "GOSUB")) is_gsub = 1;
+        else if (match_kw(p, "GOTO"))  is_gsub = 0;
+        else {
+            basic_throw(TIKU_BASIC_ERR_SYNTAX, "GOTO or GOSUB expected");
+            return;
+        }
+        ln = parse_expr(p);
+        if (basic_error) return;
+        if (ln < 0 || ln >= 0xFFFE) {
+            basic_throw(TIKU_BASIC_ERR_SYNTAX, "bad handler line");
+            return;
+        }
+        for (i = 0; i < TIKU_BASIC_EVERY_MAX; i++) {
+            if (!basic_everys[i].active) { slot = i; break; }
+        }
+        if (slot < 0) {
+            basic_throw(TIKU_BASIC_ERR_NOMEM, "EVERY table full");
+            return;
+        }
+        snprintf(basic_everys[slot].stmt, sizeof(basic_everys[slot].stmt),
+                 "%s %ld", is_gsub ? "GOSUB" : "GOTO", ln);
+        basic_everys[slot].interval_ms = ms;
+        basic_everys[slot].next_due_ms =
+            (long)tiku_clock_time() * 1000L / (long)TIKU_CLOCK_SECOND + ms;
+        basic_everys[slot].active = 1;
         return;
     }
 
@@ -1642,8 +1826,7 @@ exec_on(const char **p)
     if      (match_kw(p, "GOTO"))  is_gosub = 0;
     else if (match_kw(p, "GOSUB")) is_gosub = 1;
     else {
-        basic_error = 1;
-        SHELL_PRINTF(SH_RED "? GOTO or GOSUB expected\n" SH_RST);
+        basic_throw(TIKU_BASIC_ERR_SYNTAX, "GOTO or GOSUB expected");
         return;
     }
     /* Walk the comma-separated target list, recording the sel'th
@@ -1662,14 +1845,12 @@ exec_on(const char **p)
     if (target == 0) return;          /* sel out of range -> no-op */
 
     if (!basic_running) {
-        basic_error = 1;
-        SHELL_PRINTF(SH_RED "? ON outside RUN\n" SH_RST);
+        basic_throw(TIKU_BASIC_ERR_GENERAL, "ON outside RUN");
         return;
     }
     if (is_gosub) {
         if (gosub_sp >= TIKU_BASIC_GOSUB_DEPTH) {
-            basic_error = 1;
-            SHELL_PRINTF(SH_RED "? GOSUB stack overflow\n" SH_RST);
+            basic_throw(TIKU_BASIC_ERR_NOMEM, "GOSUB stack overflow");
             return;
         }
         gosub_stack[gosub_sp++] = line_after(basic_pc);
@@ -1686,9 +1867,30 @@ exec_trace(const char **p)
     if      (match_kw(p, "ON"))  basic_trace = 1;
     else if (match_kw(p, "OFF")) basic_trace = 0;
     else {
-        basic_error = 1;
-        SHELL_PRINTF(SH_RED "? ON or OFF expected\n" SH_RST);
+        basic_throw(TIKU_BASIC_ERR_SYNTAX, "ON or OFF expected");
     }
+}
+
+/* PERSIST ON / PERSIST OFF -- F1: arm/disarm execution-state checkpointing so a
+ * running program can survive a reset / power cut and be continued with RUN
+ * RESUME.  Distinct from SAVE (which persists the program text): PERSIST
+ * persists the running machine. */
+static void
+exec_persist(const char **p)
+{
+    skip_ws(p);
+#if TIKU_BASIC_PERSIST_RUN_ENABLE
+    if (match_kw(p, "ON")) {
+        basic_ckpt_arm(1);
+    } else if (match_kw(p, "OFF")) {
+        basic_ckpt_arm(0);
+    } else {
+        basic_throw(TIKU_BASIC_ERR_SYNTAX, "ON or OFF expected");
+    }
+#else
+    (void)p;
+    basic_throw(TIKU_BASIC_ERR_GENERAL, "PERSIST unsupported on this build");
+#endif
 }
 
 /* RESTORE -- reset the DATA read pointer to the start. Subsequent
@@ -1710,11 +1912,11 @@ data_find_next_line(uint16_t from_lineno, int *out_off)
     int n = prog_next_index(from_lineno);
     while (n >= 0) {
         const char *t = prog[n].text;
+        size_t      k;
         skip_ws(&t);
-        if ((to_upper(t[0]) == 'D') && (to_upper(t[1]) == 'A') &&
-            (to_upper(t[2]) == 'T') && (to_upper(t[3]) == 'A') &&
-            !is_word_cont(t[4])) {
-            *out_off = (int)((t + 4) - prog[n].text);
+        k = tok_kw_at(t, "DATA");            /* token byte or raw text (A2) */
+        if (k != 0) {
+            *out_off = (int)((t + k) - prog[n].text);
             return n;
         }
         if (prog[n].number == 0xFFFFu) break;
@@ -1773,16 +1975,14 @@ exec_read(const char **p)
     char c;
     int  is_string;
     if (!basic_running) {
-        basic_error = 1;
-        SHELL_PRINTF(SH_RED "? READ outside RUN\n" SH_RST);
+        basic_throw(TIKU_BASIC_ERR_GENERAL, "READ outside RUN");
         return;
     }
     while (1) {
         skip_ws(p);
         c = to_upper(**p);
         if (c < 'A' || c > 'Z') {
-            basic_error = 1;
-            SHELL_PRINTF(SH_RED "? variable expected\n" SH_RST);
+            basic_throw(TIKU_BASIC_ERR_SYNTAX, "variable expected");
             return;
         }
         idx = c - 'A';
@@ -1795,15 +1995,13 @@ exec_read(const char **p)
 #endif
         {
             if (is_word_cont(*(*p + 1))) {
-                basic_error = 1;
-                SHELL_PRINTF(SH_RED "? bad variable\n" SH_RST);
+                basic_throw(TIKU_BASIC_ERR_SYNTAX, "bad variable");
                 return;
             }
             (*p)++;
         }
         if (!data_seek_value()) {
-            basic_error = 1;
-            SHELL_PRINTF(SH_RED "? out of DATA\n" SH_RST);
+            basic_throw(TIKU_BASIC_ERR_RANGE, "out of DATA");
             return;
         }
         {
@@ -1839,8 +2037,7 @@ exec_read(const char **p)
                 basic_data_off = (int)(t - prog[basic_data_idx].text);
                 basic_strvars[idx] = basic_str_alloc(buf, strlen(buf));
                 if (basic_strvars[idx] == NULL) {
-                    basic_error = 1;
-                    SHELL_PRINTF(SH_RED "? out of string heap\n" SH_RST);
+                    basic_throw(TIKU_BASIC_ERR_NOMEM, "out of string heap");
                     return;
                 }
             } else
@@ -1900,8 +2097,7 @@ exec_dim(const char **p)
         skip_ws(p);
         c = to_upper(**p);
         if (c < 'A' || c > 'Z') {
-            basic_error = 1;
-            SHELL_PRINTF(SH_RED "? variable expected\n" SH_RST);
+            basic_throw(TIKU_BASIC_ERR_SYNTAX, "variable expected");
             return;
         }
         aidx = c - 'A';
@@ -1913,15 +2109,14 @@ exec_dim(const char **p)
 #endif
         {
             if (is_word_cont(*(*p + 1))) {
-                basic_error = 1;
-                SHELL_PRINTF(SH_RED "? bad variable\n" SH_RST);
+                basic_throw(TIKU_BASIC_ERR_SYNTAX, "bad variable");
                 return;
             }
             (*p)++;
         }
         skip_ws(p);
         if (**p != '(') {
-            basic_error = 1; SHELL_PRINTF(SH_RED "? '(' expected\n" SH_RST); return;
+            basic_throw(TIKU_BASIC_ERR_SYNTAX, "'(' expected"); return;
         }
         (*p)++;
         d1 = parse_expr(p);
@@ -1935,19 +2130,17 @@ exec_dim(const char **p)
             skip_ws(p);
         }
         if (**p != ')') {
-            basic_error = 1; SHELL_PRINTF(SH_RED "? ')' expected\n" SH_RST); return;
+            basic_throw(TIKU_BASIC_ERR_SYNTAX, "')' expected"); return;
         }
         (*p)++;
         if (d1 < 1 || d1 > TIKU_BASIC_ARRAY_MAX ||
             d2 < 0 || d2 > TIKU_BASIC_ARRAY_MAX) {
-            basic_error = 1;
-            SHELL_PRINTF(SH_RED "? bad array size\n" SH_RST);
+            basic_throw(TIKU_BASIC_ERR_SYNTAX, "bad array size");
             return;
         }
         total = (size_t)d1 * (size_t)(d2 == 0 ? 1 : d2);
         if (total > (size_t)TIKU_BASIC_ARRAY_MAX) {
-            basic_error = 1;
-            SHELL_PRINTF(SH_RED "? array too big\n" SH_RST);
+            basic_throw(TIKU_BASIC_ERR_GENERAL, "array too big");
             return;
         }
 #if TIKU_BASIC_STRVARS_ENABLE
@@ -1957,8 +2150,7 @@ exec_dim(const char **p)
         slot = &basic_arrays[aidx];
 #endif
         if (slot->data != NULL) {
-            basic_error = 1;
-            SHELL_PRINTF(SH_RED "? array %c already DIMmed\n" SH_RST, c);
+            basic_throwf(TIKU_BASIC_ERR_GENERAL, "array %c already DIMmed", c);
             return;
         }
         slot->dim1      = (uint16_t)d1;
@@ -1969,8 +2161,7 @@ exec_dim(const char **p)
             slot->data = (char **)tiku_arena_alloc(&basic_arena,
                 (tiku_mem_arch_size_t)(sizeof(char *) * total));
             if (slot->data == NULL) {
-                basic_error = 1;
-                SHELL_PRINTF(SH_RED "? out of memory for array\n" SH_RST);
+                basic_throw(TIKU_BASIC_ERR_NOMEM, "out of memory for array");
                 return;
             }
             {
@@ -1984,8 +2175,7 @@ exec_dim(const char **p)
             slot->data = (long *)tiku_arena_alloc(&basic_arena,
                 (tiku_mem_arch_size_t)(sizeof(long) * total));
             if (slot->data == NULL) {
-                basic_error = 1;
-                SHELL_PRINTF(SH_RED "? out of memory for array\n" SH_RST);
+                basic_throw(TIKU_BASIC_ERR_NOMEM, "out of memory for array");
                 return;
             }
             {
@@ -2020,38 +2210,31 @@ parse_array_index(const char **p, basic_array_t *slot, char letter)
         j = -1;
     }
     if (**p != ')') {
-        basic_error = 1; SHELL_PRINTF(SH_RED "? ')' expected\n" SH_RST); return -1;
+        basic_throw(TIKU_BASIC_ERR_SYNTAX, "')' expected"); return -1;
     }
     (*p)++;
     if (slot->data == NULL) {
-        basic_error = 1;
-        SHELL_PRINTF(SH_RED "? array %c not DIMmed\n" SH_RST, letter);
+        basic_throwf(TIKU_BASIC_ERR_GENERAL, "array %c not DIMmed", letter);
         return -1;
     }
     if (slot->dim2 == 0) {
         if (j >= 0) {
-            basic_error = 1;
-            SHELL_PRINTF(SH_RED "? array %c is 1D\n" SH_RST, letter);
+            basic_throwf(TIKU_BASIC_ERR_GENERAL, "array %c is 1D", letter);
             return -1;
         }
         if (i < 0 || i >= (long)slot->dim1) {
-            basic_error = 1;
-            basic_errcat = TIKU_BASIC_ERR_RANGE;
-            SHELL_PRINTF(SH_RED "? array index %ld out of range\n" SH_RST, i);
+            basic_throwf(TIKU_BASIC_ERR_RANGE, "array index %ld out of range", i);
             return -1;
         }
         off = i;
     } else {
         if (j < 0) {
-            basic_error = 1;
-            SHELL_PRINTF(SH_RED "? array %c needs 2 indices\n" SH_RST, letter);
+            basic_throwf(TIKU_BASIC_ERR_GENERAL, "array %c needs 2 indices", letter);
             return -1;
         }
         if (i < 0 || i >= (long)slot->dim1 ||
             j < 0 || j >= (long)slot->dim2) {
-            basic_error = 1;
-            basic_errcat = TIKU_BASIC_ERR_RANGE;
-            SHELL_PRINTF(SH_RED "? array index out of range\n" SH_RST);
+            basic_throw(TIKU_BASIC_ERR_RANGE, "array index out of range");
             return -1;
         }
         off = i * (long)slot->dim2 + j;
@@ -2080,8 +2263,7 @@ exec_def(const char **p)
 
     skip_ws(p);
     if (!match_kw(p, "FN")) {
-        basic_error = 1;
-        SHELL_PRINTF(SH_RED "? FN expected\n" SH_RST);
+        basic_throw(TIKU_BASIC_ERR_SYNTAX, "FN expected");
         return;
     }
     skip_ws(p);
@@ -2091,13 +2273,12 @@ exec_def(const char **p)
     }
     nm[nlen] = '\0';
     if (nlen < 2u) {
-        basic_error = 1;
-        SHELL_PRINTF(SH_RED "? function name >= 2 chars\n" SH_RST);
+        basic_throw(TIKU_BASIC_ERR_GENERAL, "function name >= 2 chars");
         return;
     }
     skip_ws(p);
     if (**p != '(') {
-        basic_error = 1; SHELL_PRINTF(SH_RED "? '(' expected\n" SH_RST); return;
+        basic_throw(TIKU_BASIC_ERR_SYNTAX, "'(' expected"); return;
     }
     (*p)++;
 
@@ -2107,13 +2288,11 @@ exec_def(const char **p)
         skip_ws(p);
         c = to_upper(**p);
         if (c < 'A' || c > 'Z' || is_word_cont(*(*p + 1))) {
-            basic_error = 1;
-            SHELL_PRINTF(SH_RED "? argument variable expected\n" SH_RST);
+            basic_throw(TIKU_BASIC_ERR_SYNTAX, "argument variable expected");
             return;
         }
         if (argc >= TIKU_BASIC_DEFN_ARGS) {
-            basic_error = 1;
-            SHELL_PRINTF(SH_RED "? too many DEF FN args\n" SH_RST);
+            basic_throw(TIKU_BASIC_ERR_NOMEM, "too many DEF FN args");
             return;
         }
         args[argc++] = (uint8_t)(c - 'A');
@@ -2123,12 +2302,12 @@ exec_def(const char **p)
         break;
     }
     if (**p != ')') {
-        basic_error = 1; SHELL_PRINTF(SH_RED "? ')' expected\n" SH_RST); return;
+        basic_throw(TIKU_BASIC_ERR_SYNTAX, "')' expected"); return;
     }
     (*p)++;
     skip_ws(p);
     if (**p != '=') {
-        basic_error = 1; SHELL_PRINTF(SH_RED "? '=' expected\n" SH_RST); return;
+        basic_throw(TIKU_BASIC_ERR_SYNTAX, "'=' expected"); return;
     }
     (*p)++;
     skip_ws(p);
@@ -2143,8 +2322,7 @@ exec_def(const char **p)
         }
     }
     if (slot < 0) {
-        basic_error = 1;
-        SHELL_PRINTF(SH_RED "? DEF FN table full\n" SH_RST);
+        basic_throw(TIKU_BASIC_ERR_NOMEM, "DEF FN table full");
         return;
     }
     blen = 0;
@@ -2154,8 +2332,7 @@ exec_def(const char **p)
         (*p)++;
     }
     if (**p != '\0' && **p != ':') {
-        basic_error = 1;
-        SHELL_PRINTF(SH_RED "? DEF body too long\n" SH_RST);
+        basic_throw(TIKU_BASIC_ERR_GENERAL, "DEF body too long");
         return;
     }
     while (blen > 0 &&
@@ -2204,8 +2381,7 @@ exec_while(const char **p)
 {
     long cond;
     if (!basic_running) {
-        basic_error = 1;
-        SHELL_PRINTF(SH_RED "? WHILE outside RUN\n" SH_RST);
+        basic_throw(TIKU_BASIC_ERR_GENERAL, "WHILE outside RUN");
         return;
     }
     cond = parse_cond(p);
@@ -2213,8 +2389,7 @@ exec_while(const char **p)
     if (cond == 0) {
         int idx = find_matching_wend(basic_pc);
         if (idx < 0) {
-            basic_error = 1;
-            SHELL_PRINTF(SH_RED "? WHILE without WEND\n" SH_RST);
+            basic_throw(TIKU_BASIC_ERR_GENERAL, "WHILE without WEND");
             return;
         }
         /* Jump to the line AFTER WEND. */
@@ -2233,8 +2408,7 @@ exec_while(const char **p)
         return;
     }
     if (loop_sp >= TIKU_BASIC_LOOP_DEPTH) {
-        basic_error = 1;
-        SHELL_PRINTF(SH_RED "? loop stack overflow\n" SH_RST);
+        basic_throw(TIKU_BASIC_ERR_NOMEM, "loop stack overflow");
         return;
     }
     loop_stack[loop_sp].back_line = basic_pc;
@@ -2250,13 +2424,11 @@ exec_wend(const char **p)
 {
     (void)p;
     if (!basic_running) {
-        basic_error = 1;
-        SHELL_PRINTF(SH_RED "? WEND outside RUN\n" SH_RST);
+        basic_throw(TIKU_BASIC_ERR_GENERAL, "WEND outside RUN");
         return;
     }
     if (loop_sp == 0) {
-        basic_error = 1;
-        SHELL_PRINTF(SH_RED "? WEND without WHILE\n" SH_RST);
+        basic_throw(TIKU_BASIC_ERR_GENERAL, "WEND without WHILE");
         return;
     }
     basic_pc     = loop_stack[loop_sp - 1].back_line;
@@ -2271,13 +2443,11 @@ exec_repeat(const char **p)
 {
     (void)p;
     if (!basic_running) {
-        basic_error = 1;
-        SHELL_PRINTF(SH_RED "? REPEAT outside RUN\n" SH_RST);
+        basic_throw(TIKU_BASIC_ERR_GENERAL, "REPEAT outside RUN");
         return;
     }
     if (loop_sp >= TIKU_BASIC_LOOP_DEPTH) {
-        basic_error = 1;
-        SHELL_PRINTF(SH_RED "? loop stack overflow\n" SH_RST);
+        basic_throw(TIKU_BASIC_ERR_NOMEM, "loop stack overflow");
         return;
     }
     /* back_line = REPEAT line itself; the loop runs starting at the
@@ -2293,13 +2463,11 @@ exec_until(const char **p)
 {
     long cond;
     if (!basic_running) {
-        basic_error = 1;
-        SHELL_PRINTF(SH_RED "? UNTIL outside RUN\n" SH_RST);
+        basic_throw(TIKU_BASIC_ERR_GENERAL, "UNTIL outside RUN");
         return;
     }
     if (loop_sp == 0) {
-        basic_error = 1;
-        SHELL_PRINTF(SH_RED "? UNTIL without REPEAT\n" SH_RST);
+        basic_throw(TIKU_BASIC_ERR_GENERAL, "UNTIL without REPEAT");
         return;
     }
     cond = parse_cond(p);
@@ -2334,28 +2502,24 @@ exec_swap(const char **p)
 
     if (!parse_var_full(p, &idx1, &is_str1)) {
         if (!basic_error) {
-            basic_error = 1;
-            SHELL_PRINTF(SH_RED "? variable expected\n" SH_RST);
+            basic_throw(TIKU_BASIC_ERR_SYNTAX, "variable expected");
         }
         return;
     }
     skip_ws(p);
     if (**p != ',') {
-        basic_error = 1;
-        SHELL_PRINTF(SH_RED "? ',' expected\n" SH_RST);
+        basic_throw(TIKU_BASIC_ERR_SYNTAX, "',' expected");
         return;
     }
     (*p)++;
     if (!parse_var_full(p, &idx2, &is_str2)) {
         if (!basic_error) {
-            basic_error = 1;
-            SHELL_PRINTF(SH_RED "? variable expected\n" SH_RST);
+            basic_throw(TIKU_BASIC_ERR_SYNTAX, "variable expected");
         }
         return;
     }
     if (is_str1 != is_str2) {
-        basic_error = 1;
-        SHELL_PRINTF(SH_RED "? SWAP type mismatch\n" SH_RST);
+        basic_throw(TIKU_BASIC_ERR_TYPE, "SWAP type mismatch");
         return;
     }
 #if TIKU_BASIC_STRVARS_ENABLE
@@ -2400,8 +2564,7 @@ exec_print_using(const char **p)
 
     skip_ws(p);
     if (**p != '"') {
-        basic_error = 1;
-        SHELL_PRINTF(SH_RED "? format string expected\n" SH_RST);
+        basic_throw(TIKU_BASIC_ERR_TYPE, "format string expected");
         return;
     }
     (*p)++;
@@ -2413,8 +2576,7 @@ exec_print_using(const char **p)
     if (**p == '"') (*p)++;
     skip_ws(p);
     if (**p != ';' && **p != ',') {
-        basic_error = 1;
-        SHELL_PRINTF(SH_RED "? ';' expected\n" SH_RST);
+        basic_throw(TIKU_BASIC_ERR_SYNTAX, "';' expected");
         return;
     }
     (*p)++;
@@ -2495,15 +2657,13 @@ exec_print_using(const char **p)
 #if TIKU_BASIC_STRVARS_ENABLE
             char buf[TIKU_BASIC_STR_BUF_CAP];
             if (!peek_string_expr(*p)) {
-                basic_error = 1;
-                SHELL_PRINTF(SH_RED "? string expected\n" SH_RST);
+                basic_throw(TIKU_BASIC_ERR_TYPE, "string expected");
                 return;
             }
             if (parse_strexpr(p, buf, sizeof(buf)) != 0) return;
             SHELL_PRINTF("%s", buf);
 #else
-            basic_error = 1;
-            SHELL_PRINTF(SH_RED "? & needs string support\n" SH_RST);
+            basic_throw(TIKU_BASIC_ERR_GENERAL, "& needs string support");
             return;
 #endif
             i++;

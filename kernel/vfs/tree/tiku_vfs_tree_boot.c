@@ -29,18 +29,6 @@
  * unlocks the MPU; only init and the lazy cold_boots save write to
  * FRAM, through the cell API.
  *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at:
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- *
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -74,8 +62,8 @@
  * On MSP430 reading the live SYSRSTIV register pops the highest pending
  * vector (hardware walks toward 0 on each read), so the cause must be
  * latched exactly once at boot and served from this copy ever after; the
- * HAL does that latching.  RP2350 maps WD_REASON; Ambiq is 0 ("none")
- * until its RSTGEN->STAT decode is implemented in the arch layer. 
+ * HAL does that latching.  RP2350 maps WD_REASON; Ambiq decodes
+ * RSTGEN->STAT (watchdog / reboot / power) in the arch layer.
  * On STM32F411, the raw RCC_CSR reset flags are
  * sampled here before any later code might clear them.
  */
@@ -171,8 +159,7 @@ boot_reason_read(char *buf, size_t max)
 #define BOOT_COUNT_MAGIC  0xB007C001UL
 
 /** FRAM cell: boots since first power-up (1 on the very first) */
-static uint32_t __attribute__((section(".persistent")))
-    boot_count_persist;
+static TIKU_DURABLE uint32_t boot_count_persist;
 
 /** Gate + descriptor: defaults to 0, then pre-increments each boot */
 TIKU_PERSIST_CELL(boot_count_cell, boot_count_persist,
@@ -300,8 +287,7 @@ tiku_vfs_tree_boot_last_reset_read(char *buf, size_t max)
 #define LIFETIME_MAGIC  0x4C494645UL /* 'LIFE' */
 
 /** FRAM cell: lifetime seconds persisted up to the last save */
-static uint32_t __attribute__((section(".persistent")))
-    lifetime_seconds_persist;
+static TIKU_DURABLE uint32_t lifetime_seconds_persist;
 
 /** Gate + descriptor: defaults to 0 on a virgin FRAM */
 TIKU_PERSIST_CELL(lifetime_cell, lifetime_seconds_persist,

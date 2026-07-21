@@ -1,5 +1,6 @@
 /*
- * Tiku Operating System
+ * Tiku Operating System v0.05
+ * Simple. Ubiquitous. Intelligence, Everywhere.
  * http://tiku-os.org
  *
  * Authors: Ambuj Varshney <ambuj@tiku-os.org>
@@ -10,12 +11,6 @@
  * when no events are pending. Modes are abstract (off / lpm0 /
  * lpm3 / lpm4) and resolved to the platform's real entry function
  * by the CPU HAL.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at:
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -39,6 +34,9 @@ static tiku_cpu_idle_mode_t current_idle = TIKU_CPU_IDLE_OFF;
 /* HELPERS                                                                   */
 /*---------------------------------------------------------------------------*/
 
+/**
+ * @brief Compare two NUL-terminated strings for equality.
+ */
 static uint8_t
 streq(const char *a, const char *b)
 {

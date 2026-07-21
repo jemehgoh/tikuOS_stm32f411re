@@ -1,5 +1,6 @@
 /*
- * Tiku Operating System
+ * Tiku Operating System v0.05
+ * Simple. Ubiquitous. Intelligence, Everywhere.
  * http://tiku-os.org
  *
  * Authors: Ambuj Varshney <ambuj@tiku-os.org>
@@ -15,18 +16,6 @@
  * BASIC sessions reset the arena and re-allocate, so the cost is
  * "fresh state per entry" without paying permanent BSS for the full
  * feature set.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at:
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
- * implied.  See the License for the specific language governing
- * permissions and limitations under the License.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -91,6 +80,7 @@
 #define BASIC_ARENA_BYTES                                                   \
     ((tiku_mem_arch_size_t)(                                                \
         sizeof(basic_line_t)       * TIKU_BASIC_PROGRAM_LINES +             \
+        sizeof(uint16_t)           * TIKU_BASIC_PROGRAM_LINES +   /* A3 line index */ \
         sizeof(long)               * BASIC_VAR_TABLE_LEN +                  \
         sizeof(uint16_t)           * TIKU_BASIC_GOSUB_DEPTH +               \
         sizeof(basic_for_frame_t)  * TIKU_BASIC_FOR_DEPTH +                 \
@@ -133,9 +123,15 @@ basic_clear_vars(void)
      * from the arena past the mark, so this rewind frees all of it at once. */
     basic_arena.offset = basic_arena_mark;
 
+#if TIKU_BASIC_SUBS_ENABLE
+    basic_sub_result = 0;                    /* SUB return register (F3) */
+#endif
+    basic_named_mru[0] = -1;                 /* named-slot MRU (A3 #3) */
+    basic_named_mru[1] = -1;
     for (i = 0; i < BASIC_VAR_TABLE_LEN; i++) basic_vars[i] = 0;
     for (i = 0; i < TIKU_BASIC_NAMEDVAR_MAX; i++) {
         basic_namedvar_names[i][0] = '\0';
+        basic_namedvar_const[i]    = 0;      /* CONST read-only flags (F4) */
     }
 #if TIKU_BASIC_STRVARS_ENABLE
     for (i = 0; i < BASIC_VAR_TABLE_LEN; i++) basic_strvars[i] = NULL;
@@ -218,6 +214,8 @@ basic_alloc_state(void)
 
     prog = (basic_line_t *)tiku_arena_alloc(&basic_arena,
         (tiku_mem_arch_size_t)(sizeof(basic_line_t) * TIKU_BASIC_PROGRAM_LINES));
+    basic_line_order = (uint16_t *)tiku_arena_alloc(&basic_arena,   /* A3 */
+        (tiku_mem_arch_size_t)(sizeof(uint16_t) * TIKU_BASIC_PROGRAM_LINES));
     basic_vars = (long *)tiku_arena_alloc(&basic_arena,
         (tiku_mem_arch_size_t)(sizeof(long) * BASIC_VAR_TABLE_LEN));
     basic_namedvar_names = (char (*)[TIKU_BASIC_NAMEDVAR_LEN])
@@ -267,7 +265,8 @@ basic_alloc_state(void)
 #endif
 #endif
 
-    if (prog == NULL || basic_vars == NULL || gosub_stack == NULL ||
+    if (prog == NULL || basic_line_order == NULL ||
+        basic_vars == NULL || gosub_stack == NULL ||
         for_stack == NULL || loop_stack == NULL ||
         basic_everys == NULL || basic_onchgs == NULL ||
         basic_namedvar_names == NULL
@@ -300,6 +299,8 @@ basic_alloc_state(void)
      * line table here, then reset every variable via the shared helper (which
      * also rewinds to the mark just captured -- a no-op on this first pass). */
     for (i = 0; i < TIKU_BASIC_PROGRAM_LINES; i++) prog[i].number = 0;
+    basic_line_index_ok = 0;                  /* A3: line index not built yet */
+    basic_symreg_ok     = 0;                  /* A3 #2: SUB/label registry too */
     basic_clear_vars();
     return 0;
 }

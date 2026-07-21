@@ -10,18 +10,6 @@
  * Top-level configuration header for the Tiku Operating System. Defines
  * platform selection, device configuration, debug flags, and test enables.
  *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at:
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- *
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -45,7 +33,8 @@
  * default working out-of-the-box for legacy targets.
  */
 
-#if !defined(PLATFORM_MSP430) && !defined(PLATFORM_RP2350) && !defined(PLATFORM_STM32F411) && !defined(PLATFORM_AMBIQ)
+#if !defined(PLATFORM_MSP430) && !defined(PLATFORM_RP2350) && !defined(PLATFORM_STM32F411) \
+    && !defined(PLATFORM_AMBIQ) && !defined(PLATFORM_NORDIC)
 #define PLATFORM_MSP430 1
 #endif
 
@@ -119,6 +108,20 @@
 #define TIKU_DEVICE_APOLLO510 1
 #endif
 
+#elif defined(PLATFORM_NORDIC)
+
+/*
+ * Nordic nRF54L silicon. The Makefile derives one TIKU_DEVICE_NRF54* macro
+ * from MCU=... and passes it on the command line, along with the matching
+ * board define. When no nordic device is selected we fall back to the
+ * nRF54L15 (the first-supported / primary part) so a bare PLATFORM_NORDIC
+ * build still resolves a device.
+ */
+#if !defined(TIKU_DEVICE_NRF54L15) && !defined(TIKU_DEVICE_NRF54LM20A) && \
+    !defined(TIKU_DEVICE_NRF54LM20B)
+#define TIKU_DEVICE_NRF54L15 1
+#endif
+
 #endif /* PLATFORM_* */
 
 /*---------------------------------------------------------------------------*/
@@ -168,6 +171,14 @@
 #ifndef MAIN_CPU_FREQ
 #define MAIN_CPU_FREQ 96
 #endif
+#elif defined(PLATFORM_NORDIC)
+/* nRF54L15-DK runs the core at 128 MHz (OSCILLATORS.PLL.CURRENTFREQ reads
+ * CK128M on hardware). The kernel tick is driven from GRTC/LFCLK (independent
+ * of the core clock); this value feeds the SysTick busy-delays, which must
+ * match the real core clock or delays run at the wrong rate. */
+#ifndef MAIN_CPU_FREQ
+#define MAIN_CPU_FREQ 128
+#endif
 #else
 #define MAIN_CPU_FREQ 7    /* MSP430: 8 MHz (maximum supported) */
 #endif
@@ -176,7 +187,7 @@
  *  and other subsystems that need the clock frequency as a compile-time
  *  constant.
  */
-#if defined(PLATFORM_RP2350) || defined(PLATFORM_STM32F411) || defined(PLATFORM_AMBIQ)
+#if defined(PLATFORM_RP2350) || defined(PLATFORM_STM32F411) || defined(PLATFORM_AMBIQ) || defined(PLATFORM_NORDIC)
 #define TIKU_MAIN_CPU_HZ  ((unsigned long)MAIN_CPU_FREQ * 1000000UL)
 #elif MAIN_CPU_FREQ == 1
 #define TIKU_MAIN_CPU_HZ  1000000UL
@@ -213,6 +224,8 @@
 #include <arch/st/stm32f411re/tiku_device_select.h>
 #elif defined(PLATFORM_AMBIQ)
 #include <arch/ambiq/tiku_device_select.h>
+#elif defined(PLATFORM_NORDIC)
+#include <arch/nordic/tiku_device_select.h>
 #endif
 
 /*---------------------------------------------------------------------------*/
@@ -255,6 +268,8 @@
 #include <arch/st/stm32f411re/tiku_timer_arch.h>
 #elif defined(PLATFORM_AMBIQ)
 #include <arch/ambiq/tiku_timer_arch.h>
+#elif defined(PLATFORM_NORDIC)
+#include <arch/nordic/tiku_timer_arch.h>
 #endif
 #include <kernel/timers/tiku_clock.h>
 #include <kernel/timers/tiku_htimer.h>
@@ -355,8 +370,10 @@
 /** Enable debug printing for clock architecture */
 #define DEBUG_CLOCK_ARCH 0
 
-/** Enable debug printing for test modules */
+/** Enable debug printing for test modules (#ifndef so -DDEBUG_TESTS=1 wins) */
+#ifndef DEBUG_TESTS
 #define DEBUG_TESTS 0
+#endif
 
 /** Enable debug printing for scheduler */
 #define DEBUG_SCHED 0

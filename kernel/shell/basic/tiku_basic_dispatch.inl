@@ -1,5 +1,6 @@
 /*
- * Tiku Operating System
+ * Tiku Operating System v0.05
+ * Simple. Ubiquitous. Intelligence, Everywhere.
  * http://tiku-os.org
  *
  * Authors: Ambuj Varshney <ambuj@tiku-os.org>
@@ -19,18 +20,6 @@
  * Defines the if_then_scratch buffer used by exec_if to NUL-
  * truncate the THEN branch at the ELSE keyword so the THEN body's
  * exec_stmt call doesn't keep walking past it.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at:
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
- * implied.  See the License for the specific language governing
- * permissions and limitations under the License.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -55,8 +44,7 @@ exec_if(const char **p)
     if (basic_error) return;
     skip_ws(p);
     if (!match_kw(p, "THEN")) {
-        basic_error = 1;
-        SHELL_PRINTF(SH_RED "? THEN expected\n" SH_RST);
+        basic_throw(TIKU_BASIC_ERR_SYNTAX, "THEN expected");
         return;
     }
     skip_ws(p);
@@ -73,28 +61,11 @@ exec_if(const char **p)
             while (**p) (*p)++;
             return;
         } else {
-            /* FALSE: scan forward to the matching ELSE or END IF. */
-            int else_idx, endif_idx;
-            int target_idx;
-            if (find_if_else_or_endif(basic_pc, &else_idx, &endif_idx) != 0) {
-                basic_error = 1;
-                SHELL_PRINTF(SH_RED "? IF without END IF\n" SH_RST);
-                return;
-            }
-            target_idx = (else_idx >= 0) ? else_idx : endif_idx;
-            {
-                int next = prog_next_index(
-                    (uint16_t)(prog[target_idx].number + 1));
-                if (next < 0) {
-                    basic_running = 0;
-                    basic_pc = 0;
-                    while (**p) (*p)++;
-                    return;
-                }
-                basic_pc = prog[next].number;
-                basic_pc_set = 1;
-            }
-            while (**p) (*p)++;
+            /* FALSE: walk the ELSEIF/ELSE chain -- enter the first ELSEIF
+             * whose condition holds, else the ELSE body, else fall past
+             * END IF.  (find_if_else_or_endif's plain-ELSE-only path is now
+             * subsumed by this chain walker.) */
+            multi_if_take_false(basic_pc, p);
             return;
         }
     }
@@ -119,8 +90,7 @@ exec_if(const char **p)
                     basic_pc = (uint16_t)target;
                     basic_pc_set = 1;
                 } else {
-                    basic_error = 1;
-                    SHELL_PRINTF(SH_RED "? line jump outside RUN\n" SH_RST);
+                    basic_throw(TIKU_BASIC_ERR_GENERAL, "line jump outside RUN");
                 }
                 return;
             }
@@ -154,7 +124,9 @@ exec_if(const char **p)
         /* Step past the ELSE keyword and run the ELSE body. The
          * ELSE body can itself be a bare line number (= GOTO) or a
          * colon-separated stmt list. */
-        const char *q = else_pos + 4;
+        /* Step past the ELSE keyword: one byte crunched, four spelled out. */
+        const char *q = else_pos +
+            (((uint8_t)*else_pos == BASIC_TOK_BYTE(ELSE)) ? 1 : 4);
         skip_ws(&q);
         save = q;
         if (parse_unum(&q, &target)) {
@@ -164,8 +136,7 @@ exec_if(const char **p)
                     basic_pc = (uint16_t)target;
                     basic_pc_set = 1;
                 } else {
-                    basic_error = 1;
-                    SHELL_PRINTF(SH_RED "? line jump outside RUN\n" SH_RST);
+                    basic_throw(TIKU_BASIC_ERR_GENERAL, "line jump outside RUN");
                 }
                 /* No need to advance *p -- bare-line set
                  * basic_pc_set, which short-circuits the outer
@@ -186,6 +157,112 @@ exec_stmt(const char **p)
 {
     skip_ws(p);
     if (**p == '\0') return;
+
+    /* A2: crunched statement dispatch.  Stored program lines lead with a
+     * token byte, so one switch replaces the keyword-compare chain below.
+     * Each case reproduces exactly what `match_kw(kw) + handler` does
+     * (consume the keyword, skip trailing whitespace, call the handler).
+     * Anything not switched -- rarely-stored statements, the MID$-slice
+     * special form, raw immediate-mode text -- falls through to the chain,
+     * which remains the single source of truth for statement semantics. */
+    {
+        uint8_t b = (uint8_t)**p;
+        if (b >= BASIC_TOK_BASE) {
+            switch (b) {
+            case BASIC_TOK_BYTE(REM):
+                while (**p) (*p)++;
+                return;
+            case BASIC_TOK_BYTE(PRINT): {
+                const char *post_print;
+                (*p)++; skip_ws(p);
+                post_print = *p;
+                if (match_kw(p, "USING")) { exec_print_using(p); return; }
+                *p = post_print;
+                exec_print(p);
+                return;
+            }
+            case BASIC_TOK_BYTE(LET):      (*p)++; skip_ws(p); exec_let(p, 0);  return;
+            case BASIC_TOK_BYTE(CONST):    (*p)++; skip_ws(p); exec_const(p);   return;
+            case BASIC_TOK_BYTE(INPUT):    (*p)++; skip_ws(p); exec_input(p);   return;
+            case BASIC_TOK_BYTE(GOTO):     (*p)++; skip_ws(p); exec_goto(p);    return;
+            case BASIC_TOK_BYTE(GOSUB):    (*p)++; skip_ws(p); exec_gosub(p);   return;
+            case BASIC_TOK_BYTE(RETURN):   (*p)++; skip_ws(p); exec_return();   return;
+            case BASIC_TOK_BYTE(END): {
+                const char *peek;
+                (*p)++; skip_ws(p);
+                peek = *p;
+                if (match_kw(&peek, "IF"))     { *p = peek; exec_endif(p);      return; }
+                if (match_kw(&peek, "SELECT")) { *p = peek; exec_end_select(p); return; }
+                basic_running = 0; basic_pc = 0;
+                return;
+            }
+            case BASIC_TOK_BYTE(ENDIF):    (*p)++; skip_ws(p); exec_endif(p);   return;
+            case BASIC_TOK_BYTE(ELSEIF):   (*p)++; skip_ws(p); exec_elseif(p);  return;
+            case BASIC_TOK_BYTE(ELSE):     (*p)++; skip_ws(p); exec_else_kw(p); return;
+            case BASIC_TOK_BYTE(SELECT):
+                (*p)++; skip_ws(p);
+                if (!match_kw(p, "CASE")) {
+                    basic_throw(TIKU_BASIC_ERR_SYNTAX, "SELECT CASE expected");
+                    return;
+                }
+                exec_select_case(p);
+                return;
+            case BASIC_TOK_BYTE(CASE):     (*p)++; skip_ws(p); exec_case(p);    return;
+            case BASIC_TOK_BYTE(STOP):
+                (*p)++; basic_running = 0; basic_pc = 0;
+                return;
+            case BASIC_TOK_BYTE(IF):       (*p)++; skip_ws(p); exec_if(p);      return;
+            case BASIC_TOK_BYTE(FOR):      (*p)++; skip_ws(p); exec_for(p);     return;
+            case BASIC_TOK_BYTE(NEXT):     (*p)++; skip_ws(p); exec_next(p);    return;
+            case BASIC_TOK_BYTE(EXIT):     (*p)++; skip_ws(p); exec_exit(p);    return;
+            case BASIC_TOK_BYTE(CONTINUE): (*p)++; skip_ws(p); exec_continue(p); return;
+            case BASIC_TOK_BYTE(CLS):      (*p)++; skip_ws(p); exec_cls();      return;
+            case BASIC_TOK_BYTE(DELAY):    (*p)++; skip_ws(p); exec_delay(p);   return;
+            case BASIC_TOK_BYTE(SLEEP):    (*p)++; skip_ws(p); exec_sleep(p);   return;
+#if TIKU_BASIC_PEEK_POKE_ENABLE
+            case BASIC_TOK_BYTE(POKE):     (*p)++; skip_ws(p); exec_poke(p);    return;
+#endif
+#if TIKU_BASIC_GPIO_ENABLE
+            case BASIC_TOK_BYTE(PIN):      (*p)++; skip_ws(p); exec_pin(p);     return;
+            case BASIC_TOK_BYTE(DIGWRITE): (*p)++; skip_ws(p); exec_digwrite(p); return;
+#endif
+#if TIKU_BASIC_LED_ENABLE
+            case BASIC_TOK_BYTE(LED):      (*p)++; skip_ws(p); exec_led(p);     return;
+#endif
+#if TIKU_BASIC_VFS_ENABLE
+            case BASIC_TOK_BYTE(VFSWRITE): (*p)++; skip_ws(p); exec_vfswrite(p); return;
+#endif
+#if TIKU_BASIC_SUBS_ENABLE
+            case BASIC_TOK_BYTE(ENDSUB):   (*p)++; skip_ws(p); exec_endsub();   return;
+            case BASIC_TOK_BYTE(SUB):      (*p)++; skip_ws(p); exec_sub(p);     return;
+            case BASIC_TOK_BYTE(CALL):     (*p)++; skip_ws(p); exec_call(p);    return;
+            case BASIC_TOK_BYTE(LOCAL):    (*p)++; skip_ws(p); exec_local(p);   return;
+            case BASIC_TOK_BYTE(RESULT):   (*p)++; skip_ws(p); exec_result(p);  return;
+#endif
+            case BASIC_TOK_BYTE(ON):       (*p)++; skip_ws(p); exec_on(p);      return;
+            case BASIC_TOK_BYTE(RESUME):   (*p)++; skip_ws(p); exec_resume(p);  return;
+            case BASIC_TOK_BYTE(EVERY):    (*p)++; skip_ws(p); exec_every(p);   return;
+            case BASIC_TOK_BYTE(TRACE):    (*p)++; skip_ws(p); exec_trace(p);   return;
+            case BASIC_TOK_BYTE(PERSIST):  (*p)++; skip_ws(p); exec_persist(p); return;
+            case BASIC_TOK_BYTE(READ):     (*p)++; skip_ws(p); exec_read(p);    return;
+            case BASIC_TOK_BYTE(DATA):     (*p)++; skip_ws(p); exec_data_noop(p); return;
+            case BASIC_TOK_BYTE(RESTORE):  (*p)++; skip_ws(p); exec_restore();  return;
+#if TIKU_BASIC_ARRAYS_ENABLE
+            case BASIC_TOK_BYTE(DIM):      (*p)++; skip_ws(p); exec_dim(p);     return;
+#endif
+#if TIKU_BASIC_DEFN_ENABLE
+            case BASIC_TOK_BYTE(DEF):      (*p)++; skip_ws(p); exec_def(p);     return;
+#endif
+            case BASIC_TOK_BYTE(SWAP):     (*p)++; skip_ws(p); exec_swap(p);    return;
+            case BASIC_TOK_BYTE(WHILE):    (*p)++; skip_ws(p); exec_while(p);   return;
+            case BASIC_TOK_BYTE(WEND):     (*p)++; skip_ws(p); exec_wend(p);    return;
+            case BASIC_TOK_BYTE(REPEAT):   (*p)++; skip_ws(p); exec_repeat(p);  return;
+            case BASIC_TOK_BYTE(UNTIL):    (*p)++; skip_ws(p); exec_until(p);   return;
+            default:
+                break;                     /* not switched: use the chain */
+            }
+        }
+    }
 
     if (match_kw(p, "REM") || **p == '\'') {
         /* Comment: drop the rest of the line, including any colons.
@@ -228,6 +305,7 @@ exec_stmt(const char **p)
     }
 #endif
     if (match_kw(p, "LET"))    { exec_let(p, 0); return; }
+    if (match_kw(p, "CONST"))  { exec_const(p);  return; }
     if (match_kw(p, "INPUT"))  { exec_input(p);  return; }
     if (match_kw(p, "GOTO"))   { exec_goto(p);   return; }
     if (match_kw(p, "GOSUB"))  { exec_gosub(p);  return; }
@@ -250,12 +328,12 @@ exec_stmt(const char **p)
         basic_running = 0; basic_pc = 0; return;
     }
     if (match_kw(p, "ENDIF"))  { exec_endif(p);    return; }
+    if (match_kw(p, "ELSEIF")) { exec_elseif(p);   return; }
     if (match_kw(p, "ELSE"))   { exec_else_kw(p);  return; }
     if (match_kw(p, "SELECT")) {
         skip_ws(p);
         if (!match_kw(p, "CASE")) {
-            basic_error = 1;
-            SHELL_PRINTF(SH_RED "? SELECT CASE expected\n" SH_RST);
+            basic_throw(TIKU_BASIC_ERR_SYNTAX, "SELECT CASE expected");
             return;
         }
         exec_select_case(p);
@@ -312,21 +390,28 @@ exec_stmt(const char **p)
 #endif
 #endif
 #if TIKU_BASIC_BLE_ENABLE
+#if TIKU_BLE_SERIAL_PRESENT
     if (match_kw(p, "BLEADV"))    { exec_bleadv(p);    return; }
-    if (match_kw(p, "BLEOFF"))    { exec_bleoff(p);    return; }
     if (match_kw(p, "BLESEND"))   { exec_blesend(p);   return; }
+#endif
+    if (match_kw(p, "BLEOFF"))    { exec_bleoff(p);    return; }
     if (match_kw(p, "BLEBEACON")) { exec_blebeacon(p); return; }
+#if TIKU_BLE_ADV_PRESENT
+    if (match_kw(p, "BLEOBSERVE")) { exec_bleobserve(p); return; }
+#endif
 #endif
 #if TIKU_BASIC_SUBS_ENABLE
     if (match_kw(p, "ENDSUB"))   { exec_endsub();    return; }
     if (match_kw(p, "SUB"))      { exec_sub(p);      return; }
     if (match_kw(p, "CALL"))     { exec_call(p);     return; }
     if (match_kw(p, "LOCAL"))    { exec_local(p);    return; }
+    if (match_kw(p, "RESULT"))   { exec_result(p);   return; }
 #endif
     if (match_kw(p, "ON"))       { exec_on(p);        return; }
     if (match_kw(p, "RESUME"))   { exec_resume(p);    return; }
     if (match_kw(p, "EVERY"))    { exec_every(p);     return; }
     if (match_kw(p, "TRACE"))    { exec_trace(p);     return; }
+    if (match_kw(p, "PERSIST"))  { exec_persist(p);   return; }
     if (match_kw(p, "READ"))     { exec_read(p);      return; }
     if (match_kw(p, "DATA"))     { exec_data_noop(p); return; }
     if (match_kw(p, "RESTORE"))  { exec_restore();    return; }
@@ -341,6 +426,24 @@ exec_stmt(const char **p)
     if (match_kw(p, "WEND"))     { exec_wend(p);      return; }
     if (match_kw(p, "REPEAT"))   { exec_repeat(p);    return; }
     if (match_kw(p, "UNTIL"))    { exec_until(p);     return; }
+
+#if TIKU_BASIC_EXT_MAX > 0
+    /* Registered extension statements (tiku_basic_ext.h): after every
+     * builtin, before variables -- registered names are reserved words.
+     * Names are never in the A2 token table, so match_kw's raw-text path
+     * reaches them from both stored (crunched) lines and immediate input. */
+    {
+        uint8_t i;
+        for (i = 0; i < TIKU_BASIC_EXT_MAX; i++) {
+            if (basic_ext_tab[i].name[0] != '\0' &&
+                basic_ext_tab[i].kind == 0u &&
+                match_kw(p, basic_ext_tab[i].name)) {
+                basic_ext_tab[i].u.stmt(p);
+                return;
+            }
+        }
+    }
+#endif
 
     /* Implicit LET: "A = expr" or "A$ = expr$" or "A(i) = expr".
      * The save / restore dance lets us back out cleanly when the
@@ -365,8 +468,7 @@ exec_stmt(const char **p)
             if (basic_error) return;
             skip_ws(p);
             if (**p != '=') {
-                basic_error = 1;
-                SHELL_PRINTF(SH_RED "? '=' expected\n" SH_RST);
+                basic_throw(TIKU_BASIC_ERR_SYNTAX, "'=' expected");
                 return;
             }
             (*p)++;
@@ -387,16 +489,14 @@ exec_stmt(const char **p)
             if (basic_error) return;
             skip_ws(p);
             if (**p != '=') {
-                basic_error = 1;
-                SHELL_PRINTF(SH_RED "? '=' expected\n" SH_RST);
+                basic_throw(TIKU_BASIC_ERR_SYNTAX, "'=' expected");
                 return;
             }
             (*p)++;
             if (parse_strexpr(p, buf, sizeof(buf)) != 0) return;
             copy = basic_str_alloc(buf, strlen(buf));
             if (copy == NULL) {
-                basic_error = 1;
-                SHELL_PRINTF(SH_RED "? out of string heap\n" SH_RST);
+                basic_throw(TIKU_BASIC_ERR_NOMEM, "out of string heap");
                 return;
             }
             ((char **)basic_str_arrays[idx].data)[off] = copy;
@@ -417,8 +517,7 @@ exec_stmt(const char **p)
                     if (parse_strexpr(p, buf, sizeof(buf)) != 0) return;
                     basic_strvars[idx] = basic_str_alloc(buf, strlen(buf));
                     if (basic_strvars[idx] == NULL) {
-                        basic_error = 1;
-                        SHELL_PRINTF(SH_RED "? out of string heap\n" SH_RST);
+                        basic_throw(TIKU_BASIC_ERR_NOMEM, "out of string heap");
                     }
                     return;
                 }
@@ -426,6 +525,11 @@ exec_stmt(const char **p)
                 (void)is_str;
                 v = parse_expr(p);
                 if (basic_error) return;
+                if (idx >= 26 && basic_namedvar_const[idx - 26]) {
+                    basic_throw(TIKU_BASIC_ERR_GENERAL,
+                                "cannot assign to CONST");
+                    return;
+                }
                 basic_vars[idx] = v;
                 return;
             }
@@ -437,8 +541,7 @@ exec_stmt(const char **p)
         }
     }
 
-    basic_error = 1;
-    SHELL_PRINTF(SH_RED "? syntax\n" SH_RST);
+    basic_throw(TIKU_BASIC_ERR_SYNTAX, "syntax");
 }
 
 /* Walk a colon-separated list of statements, executing each in turn.
@@ -455,21 +558,30 @@ static void
 exec_stmts(const char **p)
 {
     int was_running = basic_running;
+    basic_stmt_depth++;
     while (1) {
         skip_ws(p);
-        if (**p == '\0') return;
+        if (**p == '\0') break;
         /* Empty statement (e.g. `A=1 : : B=2`) -- skip the colon. */
         if (**p == ':') { (*p)++; continue; }
         exec_stmt(p);
-        if (basic_error)   return;
-        if (basic_pc_set)  return;
-        if (was_running && !basic_running) return;
+        if (basic_error)   break;
+        if (basic_pc_set)  break;
+        if (was_running && !basic_running) break;
+        if (basic_wait_pending) {
+            /* DELAY/SLEEP parked the machine: stop here with *p at the
+             * line's unconsumed remainder so the step machine can resume
+             * it after the deadline. */
+            skip_ws(p);
+            if (**p == ':') (*p)++;      /* resume past the separator */
+            break;
+        }
         skip_ws(p);
-        if (**p == '\0') return;
+        if (**p == '\0') break;
         if (**p == ':') { (*p)++; continue; }
         /* Anything else after a successful stmt is unexpected garbage. */
-        basic_error = 1;
-        SHELL_PRINTF(SH_RED "? trailing junk\n" SH_RST);
-        return;
+        basic_throw(TIKU_BASIC_ERR_SYNTAX, "trailing junk");
+        break;
     }
+    basic_stmt_depth--;
 }

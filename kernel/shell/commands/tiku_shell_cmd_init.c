@@ -1,5 +1,6 @@
 /*
- * Tiku Operating System
+ * Tiku Operating System v0.05
+ * Simple. Ubiquitous. Intelligence, Everywhere.
  * http://tiku-os.org
  *
  * Authors: Ambuj Varshney <ambuj@tiku-os.org>
@@ -9,18 +10,6 @@
  * Shell interface to the FRAM-backed init table.  Allows listing,
  * adding, removing, enabling/disabling, and re-running boot entries
  * without recompiling.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at:
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -104,6 +93,12 @@ cmd_join_args(char *buf, uint8_t bufsz,
 /* SUBCOMMAND: list                                                          */
 /*---------------------------------------------------------------------------*/
 
+/**
+ * @brief List all init-table entries to the shell.
+ *
+ * Prints each entry's sequence number, name, enabled/disabled flag, and
+ * command string; notes when the table is empty.
+ */
 static void
 cmd_init_list(void)
 {
@@ -210,6 +205,12 @@ cmd_init_set_enable(uint8_t argc, const char *argv[], uint8_t en)
 /* SUBCOMMAND: run                                                           */
 /*---------------------------------------------------------------------------*/
 
+/**
+ * @brief Execute every enabled init-table entry now.
+ *
+ * Runs the inittab via tiku_init_run_all() and reports how many entries
+ * were executed.
+ */
 static void
 cmd_init_run(void)
 {

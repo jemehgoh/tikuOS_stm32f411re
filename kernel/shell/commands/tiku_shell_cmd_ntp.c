@@ -1,5 +1,6 @@
 /*
- * Tiku Operating System
+ * Tiku Operating System v0.05
+ * Simple. Ubiquitous. Intelligence, Everywhere.
  * http://tiku-os.org
  *
  * Authors: Ambuj Varshney <ambuj@tiku-os.org>
@@ -18,18 +19,6 @@
  * a 3-strike timeout, so this command paces polling at ~1 Hz (the cadence the
  * libraries document) rather than once per shell tick.  All I/O flows through
  * the shell's shared RX demux, so the shell stays interactive throughout.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at:
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -60,12 +49,6 @@
 
 /* Overall per-phase backstop in case a state machine wedges. */
 #define NTP_DEADLINE    ((tiku_clock_time_t)(12u * TIKU_CLOCK_SECOND))
-
-/* Public DNS resolver used for hostname lookups, reached through the SLIP
- * host's relay/NAT.  Override at build time if needed. */
-#ifndef TIKU_SHELL_NTP_DNS_SERVER
-#define TIKU_SHELL_NTP_DNS_SERVER  {8, 8, 8, 8}
-#endif
 
 /* Default NTP server for a bare `ntp` (no argument).  The SLIP host (.1) only
  * answers NTP under the TikuBench test harness; for interactive use over a
@@ -180,7 +163,8 @@ tiku_shell_cmd_ntp(uint8_t argc, const char *argv[])
             ntp_begin_query();              /* dotted IPv4 -> query directly */
         } else {
             /* Hostname -> resolve via DNS first, then query. */
-            static const uint8_t resolver[4] = TIKU_SHELL_NTP_DNS_SERVER;
+            uint8_t resolver[4];
+            tiku_kits_net_dns_default_server(resolver);  /* DHCP dns, else 8.8.8.8 */
             tiku_kits_net_dns_init();
             tiku_kits_net_dns_set_server(resolver);
             if (tiku_kits_net_dns_resolve(argv[1]) != TIKU_KITS_NET_OK) {

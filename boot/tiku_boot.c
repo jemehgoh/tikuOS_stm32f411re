@@ -10,18 +10,6 @@
  * This file implements system boot sequence management and initialization
  * functions for the Tiku Operating System.
  *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at:
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- *
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -30,6 +18,7 @@
 /*---------------------------------------------------------------------------*/
 
 #include "tiku_boot.h"
+#include <kernel/cpu/tiku_stack.h>   /* stack-paint for /sys/mem/stack_free */
 #include "kernel/cpu/tiku_common.h"
 #include "kernel/memory/tiku_mem.h"
 #include "kernel/timers/tiku_clock.h"
@@ -96,6 +85,12 @@ tiku_cpu_full_init(unsigned int cpu_freq)
     current_boot_stage = TIKU_BOOT_STAGE_INIT;
 
     boot_complete = 0;
+
+    /* Paint the unused stack now, at the shallowest call depth, so
+     * /sys/mem/stack_free can report worst-case headroom.  Bounded by the
+     * arch stack bottom (above the MPU guard + heap); a no-op on an arch
+     * that has not declared its bounds. */
+    tiku_stack_paint();
 
     /* CPU initialization stage */
     current_boot_stage = TIKU_BOOT_STAGE_CPU;

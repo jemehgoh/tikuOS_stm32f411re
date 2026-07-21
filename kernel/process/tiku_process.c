@@ -11,18 +11,6 @@
  * linked in a singly-linked list and communicate through an event
  * queue that is safe to post to from interrupt context.
  *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at:
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- *
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -62,6 +50,7 @@
 struct event_item {
     tiku_event_data_t data;     /**< Opaque payload passed to the thread */
     struct tiku_process *p;     /**< Target process, or BROADCAST (NULL) */
+    uint8_t generation;         /**< Target generation when event was posted */
     tiku_event_t ev;            /**< Event identifier (TIKU_EVENT_*) */
 };
 
@@ -125,6 +114,108 @@ static volatile uint16_t q_dropped = 0;
 static inline uint8_t event_is_system(tiku_event_t ev)
 {
     return (ev < TIKU_EVENT_USER) || (ev >= TIKU_EVENT_TIMER);
+}
+
+/**
+ * @brief Return the event generation for a target process
+ *
+ * Broadcast events are expanded at dispatch time and do not name one
+ * process lifetime, so they carry generation 0.  Unicast events carry the
+ * target's current generation so a stale event posted for an old lifetime
+ * can be dropped after supervision restarts the same process structure.
+ */
+static inline uint8_t event_generation(const struct tiku_process *p)
+{
+    return (p != TIKU_PROCESS_BROADCAST) ? p->generation : 0u;
+}
+
+/**
+ * @brief Drop queued unicast events for @p p
+ *
+ * Must be called with the process queue atomic section already held.
+ * Broadcasts are kept because they are not private wakeups for @p p; the
+ * existing dispatch semantics deliver them to whichever processes are
+ * running when the broadcast reaches the head of the queue.
+ */
+static void queue_purge_process_locked(const struct tiku_process *p)
+{
+    uint8_t i;
+    uint8_t new_len = 0;
+    uint8_t old_len = q_len;
+
+    for (i = 0; i < old_len; i++) {
+        uint8_t old_idx = (uint8_t)((q_head + i) % TIKU_QUEUE_SIZE);
+
+        if (queue[old_idx].p != p) {
+            uint8_t new_idx = (uint8_t)((q_head + new_len) % TIKU_QUEUE_SIZE);
+            if (new_idx != old_idx) {
+                queue[new_idx] = queue[old_idx];
+            }
+            new_len++;
+        }
+    }
+
+    q_len = new_len;
+}
+
+/**
+ * @brief Remove the queued event at ring position @p pos, compacting the queue.
+ *
+ * Must run inside the atomic section (hence "_locked"): the caller brackets it
+ * with tiku_atomic_enter()/exit().  If @p out is non-NULL the removed slot is
+ * copied there first; the remaining tail entries are then shifted down by one
+ * and q_len is decremented.
+ *
+ * @param pos  Offset from q_head of the entry to remove (0 = oldest pending).
+ * @param out  Optional destination for the removed event (may be NULL).
+ */
+static void queue_remove_locked(uint8_t pos, struct event_item *out)
+{
+    uint8_t i;
+
+    if (out != NULL) {
+        *out = queue[(q_head + pos) % TIKU_QUEUE_SIZE];
+    }
+
+    for (i = pos; (uint8_t)(i + 1u) < q_len; i++) {
+        uint8_t dst = (uint8_t)((q_head + i) % TIKU_QUEUE_SIZE);
+        uint8_t src = (uint8_t)((q_head + i + 1u) % TIKU_QUEUE_SIZE);
+        queue[dst] = queue[src];
+    }
+    q_len--;
+}
+
+static inline uint8_t event_is_stale(const struct tiku_process *p,
+                                     uint8_t generation)
+{
+    return p != TIKU_PROCESS_BROADCAST && generation != p->generation;
+}
+
+static uint8_t queue_has_dispatchable_except_locked(
+    const struct tiku_process *skip)
+{
+    uint8_t i;
+
+    if (skip == NULL) {
+        return q_len != 0u;
+    }
+
+    for (i = 0; i < q_len; i++) {
+        const struct event_item *item =
+            &queue[(q_head + i) % TIKU_QUEUE_SIZE];
+
+        if (event_is_stale(item->p, item->generation)) {
+            return 1u;              /* stale work can be discarded */
+        }
+        if (item->p != skip) {
+            return 1u;              /* normal dispatch, incl. broadcast */
+        }
+        if (item->ev == TIKU_EVENT_POLL) {
+            return 1u;              /* skip is already awake; coalesce it */
+        }
+    }
+
+    return 0u;
 }
 
 /**
@@ -259,6 +350,10 @@ void tiku_process_start(struct tiku_process *p, tiku_event_data_t data)
     tiku_atomic_enter();
 
     PT_INIT(&p->pt);
+    p->generation++;
+    if (p->generation == 0u) {
+        p->generation = 1u;
+    }
 
     p->next = tiku_process_list_head;
     tiku_process_list_head = p;
@@ -340,6 +435,7 @@ void tiku_process_exit(struct tiku_process *p)
             }
         }
     }
+    queue_purge_process_locked(p);
 
     tiku_atomic_exit();
 
@@ -475,6 +571,7 @@ uint8_t tiku_process_post(struct tiku_process *p, tiku_event_t ev,
         queue[idx].ev = ev;
         queue[idx].data = data;
         queue[idx].p = p;
+        queue[idx].generation = event_generation(p);
         q_len++;
         ret = 1;
     } else {
@@ -537,6 +634,13 @@ struct tiku_timer *tiku_event_timer(tiku_event_t ev, tiku_event_data_t data)
                : NULL;
 }
 
+/**
+ * @brief Extract the packed 32-bit integer payload carried by an event.
+ *
+ * @param ev    Event identifier.
+ * @param data  Raw event payload word.
+ * @return The u32 value, or 0 if @p ev does not carry a U32 payload.
+ */
 uint32_t tiku_event_u32(tiku_event_t ev, tiku_event_data_t data)
 {
     return (tiku_event_payload_kind(ev) == TIKU_EVENT_PAYLOAD_U32)
@@ -544,6 +648,13 @@ uint32_t tiku_event_u32(tiku_event_t ev, tiku_event_data_t data)
                : 0u;
 }
 
+/**
+ * @brief Extract the opaque application pointer carried by an event.
+ *
+ * @param ev    Event identifier.
+ * @param data  Raw event payload word.
+ * @return The pointer, or NULL if @p ev does not carry a PTR payload.
+ */
 void *tiku_event_ptr(tiku_event_t ev, tiku_event_data_t data)
 {
     return (tiku_event_payload_kind(ev) == TIKU_EVENT_PAYLOAD_PTR) ? data : NULL;
@@ -591,6 +702,7 @@ uint8_t tiku_process_run(void)
     tiku_event_t ev;
     tiku_event_data_t data;
     struct tiku_process *receiver;
+    uint8_t generation;
 
     tiku_atomic_enter();
 
@@ -602,12 +714,16 @@ uint8_t tiku_process_run(void)
     ev = queue[q_head].ev;
     data = queue[q_head].data;
     receiver = queue[q_head].p;
+    generation = queue[q_head].generation;
     q_head = (q_head + 1) % TIKU_QUEUE_SIZE;
     q_len--;
 
     tiku_atomic_exit();
 
     /* Dispatch outside atomic section to avoid long interrupt latency */
+    if (event_is_stale(receiver, generation)) {
+        return 1;
+    }
     if (receiver == TIKU_PROCESS_BROADCAST) {
         struct tiku_process *p, *next;
         for (p = tiku_process_list_head; p != NULL; p = next) {
@@ -626,56 +742,84 @@ uint8_t tiku_process_run(void)
 /**
  * @brief Dispatch one queued event, but never re-enter @p skip.
  *
- * Identical to tiku_process_run() except events destined for @p skip are
- * consumed without dispatch (and @p skip is left out of a broadcast fan-out).
+ * Similar to tiku_process_run(), but it scans for one event that can be handled
+ * without re-entering @p skip.  Events for @p skip are preserved in FIFO order
+ * unless they are POLL, which is safe to coalesce because @p skip is already
+ * awake and running.  Broadcasts are still dispatched to every process except
+ * @p skip.
+ *
  * The one use is a synchronous, long-running op running INSIDE @p skip's own
  * dispatch (e.g. BASIC's blocking HTTPGET$ while it drives a crypto worker):
  * it may pump the rest of the kernel's processes so timers and rules keep
  * firing, but must not recursively re-enter its own protothread, whose saved
  * PT state points at the last yield, not the deep C call it is parked in.
- * Directed events to @p skip during that window are dropped (a POLL
- * regenerates; the caller is by definition already awake and running).
  *
  * @param skip Process not to dispatch (typically TIKU_THIS()); NULL == plain run
- * @return 1 if an event was dequeued (dispatched or skipped), 0 if queue empty
+ * @return 1 if an event was dispatched/discarded, 0 if no eligible work exists
  */
 uint8_t tiku_process_run_except(const struct tiku_process *skip)
 {
-    tiku_event_t ev;
-    tiku_event_data_t data;
-    struct tiku_process *receiver;
+    struct event_item item;
+    uint8_t i;
+    uint8_t found = 0u;
 
     tiku_atomic_enter();
 
-    if (q_len == 0) {
+    if (skip == NULL) {
         tiku_atomic_exit();
-        return 0;
+        return tiku_process_run();
     }
 
-    ev = queue[q_head].ev;
-    data = queue[q_head].data;
-    receiver = queue[q_head].p;
-    q_head = (q_head + 1) % TIKU_QUEUE_SIZE;
-    q_len--;
+    for (i = 0; i < q_len; i++) {
+        struct event_item *candidate =
+            &queue[(q_head + i) % TIKU_QUEUE_SIZE];
+
+        if (event_is_stale(candidate->p, candidate->generation) ||
+            candidate->p != skip ||
+            candidate->ev == TIKU_EVENT_POLL) {
+            queue_remove_locked(i, &item);
+            found = 1u;
+            break;
+        }
+    }
 
     tiku_atomic_exit();
 
-    if (receiver == skip) {
-        return 1;                        /* consume without re-entering skip */
+    if (!found) {
+        return 0;
     }
-    if (receiver == TIKU_PROCESS_BROADCAST) {
+    if (event_is_stale(item.p, item.generation)) {
+        return 1;                         /* stale unicast discarded */
+    }
+    if (item.p == skip) {
+        return 1;                         /* only POLL reaches this path */
+    }
+    if (item.p == TIKU_PROCESS_BROADCAST) {
         struct tiku_process *p, *next;
         for (p = tiku_process_list_head; p != NULL; p = next) {
             next = p->next;
             if (p != skip) {
-                call_process(p, ev, data);
+                call_process(p, item.ev, item.data);
             }
         }
     } else {
-        call_process(receiver, ev, data);
+        call_process(item.p, item.ev, item.data);
     }
 
     return 1;
+}
+
+/*---------------------------------------------------------------------------*/
+
+uint8_t tiku_process_queue_dispatchable_except(const struct tiku_process *skip)
+{
+    uint8_t ret;
+
+    tiku_atomic_enter();
+    ret = queue_has_dispatchable_except_locked(skip);
+    tiku_atomic_exit();
+
+    return ret;
 }
 
 /**
@@ -729,6 +873,7 @@ void tiku_process_poll(struct tiku_process *p)
         queue[idx].ev   = TIKU_EVENT_POLL;
         queue[idx].data = NULL;
         queue[idx].p    = p;
+        queue[idx].generation = event_generation(p);
         q_len++;
     } else {
         q_dropped++;
@@ -751,7 +896,8 @@ void tiku_process_poll(struct tiku_process *p)
  * @brief Dispatch an event to a single process
  *
  * Runs the process thread and handles automatic exit when the thread
- * returns PT_EXITED, PT_ENDED, or receives TIKU_EVENT_FORCE_EXIT.
+ * returns PT_EXITED or PT_ENDED.  TIKU_EVENT_FORCE_EXIT bypasses the thread
+ * body and exits the process immediately.
  *
  * The post-dispatch state is classified by the protothread return code
  * so /proc and `ps` show an accurate picture instead of collapsing
@@ -780,12 +926,20 @@ static void call_process(struct tiku_process *p, tiku_event_t ev,
     char ret;
 
     if (p->is_running && p->thread) {
+        if (ev == TIKU_EVENT_FORCE_EXIT) {
+            if (tiku_current_process == p) {
+                tiku_current_process = NULL;
+            }
+            p->exit_reason = (uint8_t)TIKU_EXIT_DONE;
+            tiku_process_exit(p);
+            return;
+        }
+
         tiku_current_process = p;
         p->state = TIKU_PROCESS_STATE_RUNNING;
         p->wake_count++;
         ret = p->thread(&p->pt, ev, data);
-        if (ret == PT_EXITED || ret == PT_ENDED ||
-            ev == TIKU_EVENT_FORCE_EXIT) {
+        if (ret == PT_EXITED || ret == PT_ENDED) {
             /* Record how it ended: a clean protothread end is DONE unless the
              * process flagged itself FAILED (tiku_process_fail).  This is the
              * signal ON_FAILURE supervision keys on in tiku_process_exit(). */
@@ -856,7 +1010,13 @@ void tiku_autostart_start(struct tiku_process * const processes[])
  */
 uint8_t tiku_process_queue_space(void)
 {
-    return TIKU_QUEUE_SIZE - q_len;
+    uint8_t ret;
+
+    tiku_atomic_enter();
+    ret = (uint8_t)(TIKU_QUEUE_SIZE - q_len);
+    tiku_atomic_exit();
+
+    return ret;
 }
 
 /**
@@ -866,7 +1026,13 @@ uint8_t tiku_process_queue_space(void)
  */
 uint8_t tiku_process_queue_full(void)
 {
-    return q_len == TIKU_QUEUE_SIZE;
+    uint8_t ret;
+
+    tiku_atomic_enter();
+    ret = (q_len == TIKU_QUEUE_SIZE);
+    tiku_atomic_exit();
+
+    return ret;
 }
 
 /**
@@ -876,7 +1042,13 @@ uint8_t tiku_process_queue_full(void)
  */
 uint8_t tiku_process_queue_empty(void)
 {
-    return q_len == 0;
+    uint8_t ret;
+
+    tiku_atomic_enter();
+    ret = (q_len == 0);
+    tiku_atomic_exit();
+
+    return ret;
 }
 
 /**
@@ -886,7 +1058,13 @@ uint8_t tiku_process_queue_empty(void)
  */
 uint8_t tiku_process_queue_length(void)
 {
-    return q_len;
+    uint8_t ret;
+
+    tiku_atomic_enter();
+    ret = q_len;
+    tiku_atomic_exit();
+
+    return ret;
 }
 
 /**
@@ -897,7 +1075,13 @@ uint8_t tiku_process_queue_length(void)
  */
 uint16_t tiku_process_queue_dropped(void)
 {
-    return q_dropped;
+    uint16_t ret;
+
+    tiku_atomic_enter();
+    ret = q_dropped;
+    tiku_atomic_exit();
+
+    return ret;
 }
 
 /**
@@ -915,16 +1099,24 @@ uint16_t tiku_process_queue_dropped(void)
 int8_t tiku_process_queue_peek(uint8_t index, tiku_event_t *ev,
                                struct tiku_process **target)
 {
+    uint8_t idx;
+
+    tiku_atomic_enter();
+
     if (index >= q_len) {
+        tiku_atomic_exit();
         return -1;
     }
-    uint8_t idx = (q_head + index) % TIKU_QUEUE_SIZE;
+    idx = (q_head + index) % TIKU_QUEUE_SIZE;
     if (ev != NULL) {
         *ev = queue[idx].ev;
     }
     if (target != NULL) {
         *target = queue[idx].p;
     }
+
+    tiku_atomic_exit();
+
     return 0;
 }
 
@@ -1489,7 +1681,13 @@ uint8_t tiku_channel_get(struct tiku_channel *ch, void *out)
  */
 uint8_t tiku_channel_is_empty(struct tiku_channel *ch)
 {
-    return ch->count == 0;
+    uint8_t ret;
+
+    tiku_atomic_enter();
+    ret = (ch->count == 0);
+    tiku_atomic_exit();
+
+    return ret;
 }
 
 /**
@@ -1500,5 +1698,11 @@ uint8_t tiku_channel_is_empty(struct tiku_channel *ch)
  */
 uint8_t tiku_channel_free(struct tiku_channel *ch)
 {
-    return ch->capacity - ch->count;
+    uint8_t ret;
+
+    tiku_atomic_enter();
+    ret = (uint8_t)(ch->capacity - ch->count);
+    tiku_atomic_exit();
+
+    return ret;
 }

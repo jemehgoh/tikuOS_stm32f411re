@@ -11,18 +11,6 @@
  * inter-process communication. Processes run cooperatively and communicate
  * via posted events.
  *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at:
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- *
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -205,6 +193,7 @@ typedef struct tiku_process {
         tiku_event_data_t));        /**< Process thread function */
     struct pt pt;                   /**< Protothread control state */
     uint8_t is_running;             /**< Non-zero if process is active */
+    uint8_t generation;             /**< Fresh-instance tag for queued events */
     void *local;                    /**< Per-process local storage pointer.
                                          NULL if no local state.
                                          Points to a user-defined static
@@ -264,22 +253,28 @@ struct tiku_msg {
 /*---------------------------------------------------------------------------*/
 
 /**
- * @def TIKU_PROCESS(name, strname)
+ * @def TIKU_PROCESS(proc, strname)
  * @brief Declare and define a process (no local storage)
  *
  * For processes that do not need persistent local state across yields.
  * The local pointer is initialized to NULL.
  */
-#define TIKU_PROCESS(name, strname)                                         \
-    TIKU_PROCESS_THREAD(name, ev, data);                                    \
-    struct tiku_process name = {                                             \
-        NULL, strname, tiku_process_thread_##name, {0}, 0,                   \
-        NULL, /* local = NULL */                                             \
-        TIKU_PROCESS_STATE_STOPPED, -1, 0, 0, 0, 0                          \
+#define TIKU_PROCESS(proc, strname)                                         \
+    TIKU_PROCESS_THREAD(proc, ev, data);                                    \
+    struct tiku_process proc = {                                             \
+        .next = NULL,                                                        \
+        .name = strname,                                                     \
+        .thread = tiku_process_thread_##proc,                                \
+        .pt = {0},                                                           \
+        .is_running = 0,                                                     \
+        .generation = 0,                                                     \
+        .local = NULL,                                                       \
+        .state = TIKU_PROCESS_STATE_STOPPED,                                 \
+        .pid = -1,                                                           \
     }
 
 /**
- * @def TIKU_PROCESS_WITH_LOCAL(name, strname, local_type)
+ * @def TIKU_PROCESS_WITH_LOCAL(proc, strname, local_type)
  * @brief Declare and define a process with typed local storage
  *
  * Allocates a static instance of local_type and wires the pointer
@@ -289,7 +284,7 @@ struct tiku_msg {
  * If the process is restarted, the storage retains its previous values.
  * Initialize explicitly in the thread body if clean-slate is needed.
  *
- * @param name       Process variable name
+ * @param proc       Process variable name
  * @param strname    Human-readable name string
  * @param local_type The struct type for local storage
  *
@@ -299,13 +294,19 @@ struct tiku_msg {
  *   TIKU_PROCESS_WITH_LOCAL(my_proc, "my process", struct my_state);
  * @endcode
  */
-#define TIKU_PROCESS_WITH_LOCAL(name, strname, local_type)                  \
-    TIKU_PROCESS_THREAD(name, ev, data);                                    \
-    static local_type tiku_local_##name;                                    \
-    struct tiku_process name = {                                             \
-        NULL, strname, tiku_process_thread_##name, {0}, 0,                   \
-        &tiku_local_##name, /* local wired at compile time */                \
-        TIKU_PROCESS_STATE_STOPPED, -1, 0, 0, 0, 0                          \
+#define TIKU_PROCESS_WITH_LOCAL(proc, strname, local_type)                  \
+    TIKU_PROCESS_THREAD(proc, ev, data);                                    \
+    static local_type tiku_local_##proc;                                    \
+    struct tiku_process proc = {                                             \
+        .next = NULL,                                                        \
+        .name = strname,                                                     \
+        .thread = tiku_process_thread_##proc,                                \
+        .pt = {0},                                                           \
+        .is_running = 0,                                                     \
+        .generation = 0,                                                     \
+        .local = &tiku_local_##proc,                                         \
+        .state = TIKU_PROCESS_STATE_STOPPED,                                 \
+        .pid = -1,                                                           \
     }
 
 /**
@@ -526,15 +527,31 @@ uint8_t tiku_process_run(void);
 /**
  * @brief Run the scheduler, but never re-enter @p skip.
  *
- * Like tiku_process_run() but events for @p skip are consumed without
- * dispatch — for a long synchronous op running inside @p skip's own dispatch
- * that wants to keep the rest of the kernel live without recursing into its
- * own protothread.  @p skip == NULL behaves like tiku_process_run().
+ * Like tiku_process_run() but it does not dispatch unicast events for @p skip.
+ * Non-POLL events for @p skip stay queued for the normal scheduler; skipped
+ * POLL events are coalesced because @p skip is already awake and running.
+ * Broadcast events still run for every process except @p skip.
+ *
+ * This is for a long synchronous op running inside @p skip's own dispatch that
+ * wants to keep the rest of the kernel live without recursing into its own
+ * protothread.  @p skip == NULL behaves like tiku_process_run().
  *
  * @param skip Process not to dispatch (typically TIKU_THIS())
- * @return 1 if an event was dequeued, 0 if idle
+ * @return 1 if an event was dispatched or discarded, 0 if no eligible work exists
  */
 uint8_t tiku_process_run_except(const struct tiku_process *skip);
+
+/**
+ * @brief Test whether run_except(@p skip) has work it can process.
+ *
+ * Safe to call inside or outside an existing tiku_atomic_enter()/exit() pair.
+ * Used by long synchronous offload loops to decide whether a non-empty queue
+ * contains useful work or only deferred events for the currently-running owner.
+ *
+ * @param skip Process excluded from dispatch; NULL means any queued event
+ * @return 1 if tiku_process_run_except(skip) could make progress, else 0
+ */
+uint8_t tiku_process_queue_dispatchable_except(const struct tiku_process *skip);
 
 /**
  * @brief Request a process to be polled

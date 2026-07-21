@@ -1,5 +1,6 @@
 /*
- * Tiku Operating System
+ * Tiku Operating System v0.05
+ * Simple. Ubiquitous. Intelligence, Everywhere.
  * http://tiku-os.org
  *
  * Authors: Ambuj Varshney <ambuj@tiku-os.org>
@@ -39,6 +40,9 @@ extern struct tiku_process tiku_kits_net_dhcp_process;
 
 /*---------------------------------------------------------------------------*/
 
+/**
+ * @brief Compare two C strings for exact equality (1 if equal, else 0).
+ */
 static int str_eq(const char *a, const char *b)
 {
     while (*a && *a == *b) { ++a; ++b; }
@@ -65,6 +69,9 @@ static void put_bssid(const uint8_t bssid[6])
 
 /*---------------------------------------------------------------------------*/
 
+/**
+ * @brief Print the "wifi" command usage summary.
+ */
 static void wifi_help(void)
 {
     SHELL_PRINTF("wifi status              Driver state + MAC + link\n");
@@ -81,6 +88,9 @@ static void wifi_help(void)
     SHELL_PRINTF("wifi help                This help\n");
 }
 
+/**
+ * @brief Map a TIKU_WIRELESS_LINK_* state code to a display string.
+ */
 static const char *link_str(uint8_t link_state)
 {
     switch (link_state) {
@@ -92,6 +102,13 @@ static const char *link_str(uint8_t link_state)
     }
 }
 
+/**
+ * @brief Handle "wifi status": print driver state, MAC, and link info.
+ *
+ * Queries tiku_wireless_status() and reports up/down state, MAC, last
+ * scan AP count and duration, scan-busy flag, IRQ count, link state
+ * (with joined SSID or failure code), and RSSI when joined.
+ */
 static void wifi_status(void)
 {
     tiku_wireless_status_t st;
@@ -159,6 +176,12 @@ static void wifi_connect(uint8_t argc, const char *argv[],
     }
 }
 
+/**
+ * @brief Handle "wifi disconnect": leave the current network.
+ *
+ * Calls tiku_wireless_disconnect() and reports whether the request was
+ * queued or failed.
+ */
 static void wifi_disconnect(void)
 {
     int rc = tiku_wireless_disconnect();
@@ -166,6 +189,12 @@ static void wifi_disconnect(void)
     else         SHELL_PRINTF("wifi: disconnect failed rc=%d\n", rc);
 }
 
+/**
+ * @brief Handle "wifi forget": clear stored WiFi credentials.
+ *
+ * Calls tiku_wireless_forget() so the next cold boot will not auto-rejoin,
+ * and reports success or the failure code.
+ */
 static void wifi_forget(void)
 {
     int rc = tiku_wireless_forget();
@@ -177,6 +206,13 @@ static void wifi_forget(void)
     }
 }
 
+/**
+ * @brief Handle "wifi scan": trigger an active scan for access points.
+ *
+ * Calls tiku_wireless_scan_start(); cached results are printed as the
+ * runner finds APs (see "wifi list"). Reports rejection if the radio is
+ * not up and idle.
+ */
 static void wifi_scan(void)
 {
     int rc = tiku_wireless_scan_start();
@@ -189,6 +225,13 @@ static void wifi_scan(void)
                  "      run 'wifi list' afterwards to see the cached table.\n");
 }
 
+/**
+ * @brief Handle "wifi list": print cached results from the last scan.
+ *
+ * Fetches up to TIKU_WIRELESS_MAX_SCAN_RESULTS entries via
+ * tiku_wireless_scan_results() and prints a table of BSSID, RSSI,
+ * channel, and SSID; notes when no results are cached.
+ */
 static void wifi_list(void)
 {
     tiku_wireless_ap_t aps[TIKU_WIRELESS_MAX_SCAN_RESULTS];

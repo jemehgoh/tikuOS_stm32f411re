@@ -1,5 +1,6 @@
 /*
- * Tiku Operating System
+ * Tiku Operating System v0.05
+ * Simple. Ubiquitous. Intelligence, Everywhere.
  * http://tiku-os.org
  *
  * Authors: Ambuj Varshney <ambuj@tiku-os.org>
@@ -22,12 +23,6 @@
  * loop can be aborted without waiting for the inner command to
  * finish.  The body command may itself be a built-in, an alias,
  * or another control-flow command (`if`, `every`, etc.).
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at:
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * SPDX-License-Identifier: Apache-2.0
  */

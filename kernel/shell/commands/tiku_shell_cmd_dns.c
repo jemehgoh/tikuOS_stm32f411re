@@ -1,5 +1,6 @@
 /*
- * Tiku Operating System
+ * Tiku Operating System v0.05
+ * Simple. Ubiquitous. Intelligence, Everywhere.
  * http://tiku-os.org
  *
  * Authors: Ambuj Varshney <ambuj@tiku-os.org>
@@ -13,18 +14,6 @@
  * toward a 3-strike timeout, so this command paces polling at ~1 Hz (the
  * cadence the library documents) rather than once per shell tick.  I/O flows
  * through the shell's shared RX demux, so the shell stays interactive.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at:
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -50,11 +39,6 @@
 
 /* Overall backstop in case the state machine wedges. */
 #define DNS_DEADLINE    ((tiku_clock_time_t)(8u * TIKU_CLOCK_SECOND))
-
-/* Default recursive resolver, reached through the SLIP host's relay/NAT. */
-#ifndef TIKU_SHELL_DNS_SERVER
-#define TIKU_SHELL_DNS_SERVER  {8, 8, 8, 8}
-#endif
 
 static uint8_t           dns_on;
 static tiku_clock_time_t dns_t0;
@@ -109,7 +93,12 @@ void
 tiku_shell_cmd_dns(uint8_t argc, const char *argv[])
 {
     static uint8_t udp_ready;
-    uint8_t server[4] = TIKU_SHELL_DNS_SERVER;
+    uint8_t server[4];
+
+    /* Default resolver: the DHCP lease's (option 6) when bound, else
+     * 8.8.8.8 -- campus networks often block external resolvers.  An
+     * explicit [resolver-ip] argument still overrides below. */
+    tiku_kits_net_dns_default_server(server);
 
     if (dns_on) {
         SHELL_PRINTF("dns already running\n");

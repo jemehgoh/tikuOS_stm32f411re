@@ -147,28 +147,30 @@ SECTIONS
         __mpu_diag_end = .;
     } > SRAM
 
-    /* -------- 6. Persistent warm-reset state (NOLOAD) ----------------
+    /* -------- 6. Persistent state (NOLOAD) ---------------------------
      *
      * The logical payload bounds remain __uninit_start/__uninit_end so
      * the persistence backend continues to restore/commit only the real
-     * .uninit/.persistent bytes.  A second symbol pair
-     * (__uninit_mpu_start/__uninit_mpu_end) reserves a dedicated 4 KB
-     * MPU-aligned envelope around that payload for future RO/RW
-     * protection. */
+     * .uninit/exact .persistent bytes.  The WARM grade
+     * (.persistent.warm*) is placed after the 4 KB MPU envelope: it is
+     * still NOLOAD SRAM and survives warm reset, but it is not mirrored
+     * to flash and is not covered by the persistent MPU window. */
     .uninit (NOLOAD) : ALIGN(4096)
     {
         __uninit_mpu_start = .;
         __uninit_start = .;
         *(.uninit*)
-        *(.persistent*)
+        *(.persistent)
         . = ALIGN(32);
         __uninit_end = .;
 
         ASSERT((__uninit_end - __uninit_start) <= 0x1000,
-               "ERROR: .uninit payload exceeds 4 KB MPU window");
+               "ERROR: durable .uninit/.persistent payload exceeds 4 KB MPU window");
 
         . = __uninit_mpu_start + 0x1000;
         __uninit_mpu_end = .;
+        *(.persistent.warm*)
+        . = ALIGN(32);
     } > SRAM
 
     /* Heap start aliases */
@@ -184,7 +186,7 @@ SECTIONS
            "ERROR: .uninit MPU window is not 4 KB aligned")
     ASSERT((__uninit_mpu_end - __uninit_mpu_start) == 0x1000,
            "ERROR: .uninit MPU window is not exactly 4 KB")
-    ASSERT(__data_load < ORIGIN(PERSIST_FLASH),
+    ASSERT(__data_load + (__data_end - __data_start) <= ORIGIN(PERSIST_FLASH),
            "ERROR: flash image spills into reserved persistence sector")
 
     /DISCARD/ :

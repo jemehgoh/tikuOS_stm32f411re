@@ -25,18 +25,6 @@
  * tree DFS (the per-slot path reverse-lookup, /sys/vfs); all are
  * cold, human-triggered paths.
  *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at:
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- *
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -223,6 +211,16 @@ vfs_cache_used_read(char *buf, size_t max)
     return snprintf(buf, max, "%u\n", (unsigned)used);
 }
 
+/**
+ * @brief Read handler for /sys/vfs/cache/hits.
+ *
+ * Renders the read-coalescing cache's cumulative hit count (each hit is
+ * one sensor/bus access avoided).
+ *
+ * @param buf  Output buffer
+ * @param max  Capacity of @p buf
+ * @return Bytes written (snprintf-style)
+ */
 static int
 vfs_cache_hits_read(char *buf, size_t max)
 {
@@ -231,6 +229,16 @@ vfs_cache_hits_read(char *buf, size_t max)
     return snprintf(buf, max, "%lu\n", (unsigned long)hits);
 }
 
+/**
+ * @brief Read handler for /sys/vfs/cache/misses.
+ *
+ * Renders the read-coalescing cache's cumulative miss count (each miss
+ * is a fresh sensor/bus access).
+ *
+ * @param buf  Output buffer
+ * @param max  Capacity of @p buf
+ * @return Bytes written (snprintf-style)
+ */
 static int
 vfs_cache_misses_read(char *buf, size_t max)
 {
@@ -277,11 +285,35 @@ _Static_assert(sizeof(tiku_vfs_tree_watch_children) /
  * /sys/vfs directory table.  Exported for tiku_vfs_tree_sys.c; the
  * entry count travels as TIKU_VFS_TREE_VFS_NCHILD.
  */
+/*
+ * Manifest schema version -- bump when the manifest LINE FORMAT changes so an
+ * external agent consuming /sys/vfs/manifest can pin or adapt instead of
+ * silently mis-parsing.  rev 2 = the five-column form (path type perms meta
+ * cap); rev 1 was the pre-capability four-column form.
+ */
+#define TIKU_VFS_MANIFEST_REV  2u
+
+/**
+ * @brief Read handler for /sys/vfs/manifest_rev.
+ *
+ * Renders the manifest schema version (TIKU_VFS_MANIFEST_REV) so an
+ * agent consuming /sys/vfs/manifest can pin or adapt to the line format.
+ *
+ * @param buf  Output buffer
+ * @param max  Capacity of @p buf
+ * @return Bytes written (snprintf-style)
+ */
+static int vfs_manifest_rev_read(char *buf, size_t max)
+{
+    return snprintf(buf, max, "%u\n", (unsigned)TIKU_VFS_MANIFEST_REV);
+}
+
 const tiku_vfs_node_t tiku_vfs_tree_vfs_children[] = {
-    { "nodes",    TIKU_VFS_FILE, vfs_nodes_read,    NULL, NULL, 0 },
-    { "depth",    TIKU_VFS_FILE, vfs_depth_read,    NULL, NULL, 0 },
-    { "manifest", TIKU_VFS_FILE, vfs_manifest_read, NULL, NULL, 0 },
-    { "cache",    TIKU_VFS_DIR,  NULL, NULL, vfs_cache_children,
+    { "nodes",        TIKU_VFS_FILE, vfs_nodes_read,        NULL, NULL, 0 },
+    { "depth",        TIKU_VFS_FILE, vfs_depth_read,        NULL, NULL, 0 },
+    { "manifest",     TIKU_VFS_FILE, vfs_manifest_read,     NULL, NULL, 0 },
+    { "manifest_rev", TIKU_VFS_FILE, vfs_manifest_rev_read, NULL, NULL, 0 },
+    { "cache",        TIKU_VFS_DIR,  NULL, NULL, vfs_cache_children,
       sizeof(vfs_cache_children) / sizeof(vfs_cache_children[0]) },
 };
 

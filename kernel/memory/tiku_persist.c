@@ -15,18 +15,6 @@
  * All NVM access is routed through the HAL (tiku_mem_arch_nvm_read/write)
  * so the kernel code stays platform-independent.
  *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at:
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- *
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -159,6 +147,18 @@ tiku_mem_err_t tiku_persist_register(tiku_persist_store_t *store,
     tiku_mem_arch_size_t i;
 
     if (store == NULL || key == NULL || fram_buf == NULL || capacity == 0) {
+        return TIKU_MEM_ERR_INVALID;
+    }
+
+    /* Reject keys that do not fit key[TIKU_PERSIST_MAX_KEY_LEN] including
+     * the NUL.  Silent truncation used to store a 7-char prefix that
+     * persist_find (which compares TIKU_PERSIST_MAX_KEY_LEN chars of the
+     * caller's FULL key) could never match again -- the entry registered
+     * fine and then every write/read/delete under the same key returned
+     * NOT_FOUND (bit on nRF54LM20A HW via the persist-reset-survival
+     * test's 9-char "tb.reboot", 2026-07-14).  The persist edge test
+     * documents reject-with-INVALID as sanctioned behavior. */
+    if (strlen(key) >= TIKU_PERSIST_MAX_KEY_LEN) {
         return TIKU_MEM_ERR_INVALID;
     }
 

@@ -1,5 +1,6 @@
 /*
- * Tiku Operating System
+ * Tiku Operating System v0.05
+ * Simple. Ubiquitous. Intelligence, Everywhere.
  * http://tiku-os.org
  *
  * Authors: Ambuj Varshney <ambuj@tiku-os.org>
@@ -20,18 +21,6 @@
  * The HELP body is feature-gated (PEEK / GPIO / ADC / I2C / REBOOT
  * / LED / VFS / strings / fixed-point) so the printed reference
  * list matches what was actually compiled in.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at:
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
- * implied.  See the License for the specific language governing
- * permissions and limitations under the License.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -54,14 +43,21 @@ process_line(const char *raw)
     if (is_digit(*p)) {
         const char *body;
         if (!parse_unum(&p, &ln) || ln <= 0 || ln >= 0xFFFE) {
-            SHELL_PRINTF(SH_RED "? bad line number\n" SH_RST);
+            basic_report(TIKU_BASIC_ERR_SYNTAX, "bad line number");
             return;
         }
         body = p;
         skip_ws(&body);
+        /* NOTE: deliberately NO basic_ckpt_invalidate() here.  This branch is
+         * also the LOAD/replay path (basic_load_from_persist and `basic load`
+         * replay every stored line through process_line), so invalidating
+         * per-line would destroy the checkpoint RUN RESUME is about to use --
+         * the exact F1 power-cut recovery flow.  A checkpoint made stale by an
+         * interactive edit is instead rejected at restore time by the
+         * program-identity CRC bound into the slot (basic_ckpt_read). */
         if (prog_store((uint16_t)ln, body) < 0) {
-            SHELL_PRINTF(SH_RED "? program full (%u lines)" SH_RST "\n",
-                         (unsigned)TIKU_BASIC_PROGRAM_LINES);
+            basic_reportf(TIKU_BASIC_ERR_NOMEM, "program full (%u lines)",
+                          (unsigned)TIKU_BASIC_PROGRAM_LINES);
         }
         return;
     }
@@ -77,9 +73,35 @@ process_line(const char *raw)
         q = p;
         if (match_kw(&q, "LIST"))  { prog_list();   return; }
         q = p;
-        if (match_kw(&q, "NEW"))   { prog_clear(); basic_clear_vars(); SHELL_PRINTF("ok\n"); return; }
+        if (match_kw(&q, "NEW"))   { prog_clear(); basic_clear_vars(); basic_ckpt_invalidate(); SHELL_PRINTF("ok\n"); return; }
         q = p;
-        if (match_kw(&q, "RUN"))   { exec_run();    return; }
+        if (match_kw(&q, "RUN")) {
+            /* `RUN RESUME` (F1): continue a checkpointed program mid-loop from
+             * the durable execution-state slot instead of starting over. Plain
+             * `RUN` starts fresh. In the interactive shell MODE, the step
+             * machine is started and the shell poll loop pumps it (non-blocking:
+             * the scheduler runs between batches); in synchronous contexts
+             * (embedded run_source) it is driven to completion inline. */
+            int resume;
+            skip_ws(&q);
+            resume = match_kw(&q, "RESUME") ? 1 : 0;
+            if (resume) {
+                if (basic_run_resume() != 0) {
+                    SHELL_PRINTF(SH_YELLOW "? no checkpoint to resume\n" SH_RST);
+                    return;
+                }
+                if (!basic_mode_on) {
+                    exec_run_drive();     /* sync: run the restored program */
+                }
+                return;                   /* mode: the poll loop takes over */
+            }
+            if (basic_mode_on) {
+                (void)basic_run_begin();
+            } else {
+                exec_run();
+            }
+            return;
+        }
         q = p;
         if (match_kw(&q, "SAVE")) {
 #if TIKU_BASIC_NAMED_SLOTS > 0
@@ -117,6 +139,8 @@ process_line(const char *raw)
             (void)basic_load_from_persist();
             return;
         }
+        q = p;
+        if (match_kw(&q, "IMPORT")) { exec_import(&q); return; }
 #if TIKU_BASIC_NAMED_SLOTS > 0
         q = p;
         if (match_kw(&q, "DIR")) {
@@ -154,11 +178,11 @@ process_line(const char *raw)
                 start = (idx < 0) ? 100L : (long)prog[idx].number + step;
             }
             if (start <= 0 || start >= 0xFFFE) {
-                SHELL_PRINTF(SH_RED "? bad AUTO start\n" SH_RST);
+                basic_report(TIKU_BASIC_ERR_SYNTAX, "bad AUTO start");
                 return;
             }
             if (step <= 0) {
-                SHELL_PRINTF(SH_RED "? bad AUTO step\n" SH_RST);
+                basic_report(TIKU_BASIC_ERR_SYNTAX, "bad AUTO step");
                 return;
             }
             basic_auto_next   = (uint16_t)start;
@@ -212,6 +236,13 @@ process_line(const char *raw)
 #define BASIC_HELP_VFS_STMT   ""
 #define BASIC_HELP_VFS_FN     ""
 #endif
+#if TIKU_BASIC_PERSIST_RUN_ENABLE
+#define BASIC_HELP_PERSIST_LINE \
+    "  " SH_CYAN "Persist:   " SH_RST \
+                 " PERSIST ON|OFF   RUN RESUME   (survive a power cut)\n"
+#else
+#define BASIC_HELP_PERSIST_LINE ""
+#endif
 #if TIKU_BASIC_STRVARS_ENABLE
 #define BASIC_HELP_STR_LINE \
     "  " SH_CYAN "Strings:   " SH_RST \
@@ -250,6 +281,7 @@ process_line(const char *raw)
                 "              SAVE [\"name\"]  LOAD [\"name\"]  DIR\n"
                 "              AUTO [start [, step]] | OFF\n"
                 "              RENUM [start [, step]]\n"
+                BASIC_HELP_PERSIST_LINE
                 "  " SH_CYAN "Variables: " SH_RST
                               " A..Z (32-bit signed)\n"
                 "  " SH_CYAN "Constants: " SH_RST
@@ -276,6 +308,7 @@ process_line(const char *raw)
                               " \\n \\t \\r \\\" \\\\ escapes inside \"...\".\n"
                 "  '?' is a PRINT alias; ' is a REM alias.\n"
                 "  SAVE/LOAD persist across reboots in FRAM.\n"
+                "  IMPORT \"/data/f\" merges a module of SUBs.\n"
                 "  Run `basic run` from the shell (or via `init add`)\n"
                 "    to autorun the saved program at boot.\n"
                 "  Ctrl-C interrupts a running program.\n");
@@ -283,34 +316,41 @@ process_line(const char *raw)
     TIKU_BASIC_MATHX_ENABLE || TIKU_BASIC_FILE_ENABLE ||                      \
     TIKU_BASIC_NET_ENABLE || TIKU_BASIC_BLE_ENABLE
             /* Full-profile words (RP2350 / Apollo). Each clause is gated, so
-             * the line lists exactly what was built in. */
-            SHELL_PRINTF(
-                "  " SH_CYAN "Full:      " SH_RST
+             * the line lists exactly what was built in.  Each fragment is its
+             * own SHELL_PRINTF so no #if sits inside a macro-call argument --
+             * that pattern is non-portable (ISO C) and -Wpedantic flags it. */
+            SHELL_PRINTF("  " SH_CYAN "Full:      " SH_RST);
 #if TIKU_BASIC_SUBS_ENABLE
-                " SUB(p) LOCAL CALL ENDSUB"
+            SHELL_PRINTF(" SUB(p) LOCAL CALL ENDSUB");
 #endif
 #if TIKU_BASIC_RTC_ENABLE
-                " NOW DATE$ TIME$ SETTIME"
+            SHELL_PRINTF(" NOW DATE$ TIME$ SETTIME");
 #endif
 #if TIKU_BASIC_MATHX_ENABLE
-                " LOG EXP POW ATAN"
+            SHELL_PRINTF(" LOG EXP POW ATAN");
 #endif
 #if TIKU_BASIC_FILE_ENABLE
-                " APPEND FWRITE FREAD$"
+            SHELL_PRINTF(" APPEND FWRITE FREAD$");
 #endif
 #if TIKU_BASIC_NET_ENABLE
-                " UDPSEND IPADDR$ NETUP"
+            SHELL_PRINTF(" UDPSEND IPADDR$ NETUP");
 #if (TIKU_KITS_NET_MQTT_ENABLE + 0)
-                " MQTTPUB"
+            SHELL_PRINTF(" MQTTPUB");
 #endif
 #if (TIKU_KITS_NET_HTTP_ENABLE + 0)
-                " HTTPGET$ HTTPPOST$ HTTPHEADER HTTPSTATUS"
+            SHELL_PRINTF(" HTTPGET$ HTTPPOST$ HTTPHEADER HTTPSTATUS");
 #endif
 #endif
 #if TIKU_BASIC_BLE_ENABLE
-                " BLEADV BLEOFF BLESEND BLEBEACON BLEUP BLEAVAIL BLEGET$"
+#if TIKU_BLE_SERIAL_PRESENT
+            SHELL_PRINTF(" BLEADV BLESEND BLEUP BLEAVAIL BLEGET$");
 #endif
-                "\n");
+#if TIKU_BLE_ADV_PRESENT
+            SHELL_PRINTF(" BLESCAN$ BLEOBSERVE BLESEEN BLESEEN$");
+#endif
+            SHELL_PRINTF(" BLEOFF BLEBEACON");
+#endif
+            SHELL_PRINTF("\n");
 #endif
 #undef BASIC_HELP_POKE_STMT
 #undef BASIC_HELP_PEEK_FN
@@ -323,6 +363,7 @@ process_line(const char *raw)
 #undef BASIC_HELP_LED
 #undef BASIC_HELP_VFS_STMT
 #undef BASIC_HELP_VFS_FN
+#undef BASIC_HELP_PERSIST_LINE
 #undef BASIC_HELP_STR_LINE
 #undef BASIC_HELP_FIXED_LINE
             return;

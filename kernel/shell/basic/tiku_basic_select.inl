@@ -1,5 +1,6 @@
 /*
- * Tiku Operating System
+ * Tiku Operating System v0.05
+ * Simple. Ubiquitous. Intelligence, Everywhere.
  * http://tiku-os.org
  *
  * Authors: Ambuj Varshney <ambuj@tiku-os.org>
@@ -27,18 +28,6 @@
  * CASE / CASE ELSE / END SELECT during normal flow means the
  * current arm has finished, so we jump past END SELECT.  Nested
  * SELECT CASE is supported via depth-aware scanning.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at:
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
- * implied.  See the License for the specific language governing
- * permissions and limitations under the License.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -214,16 +203,14 @@ exec_select_case(const char **p)
     int  idx;
 
     if (!basic_running) {
-        basic_error = 1;
-        SHELL_PRINTF(SH_RED "? SELECT CASE outside RUN\n" SH_RST);
+        basic_throw(TIKU_BASIC_ERR_GENERAL, "SELECT CASE outside RUN");
         return;
     }
     value = parse_expr(p);
     if (basic_error) return;
     idx = find_select_arm(basic_pc, value);
     if (idx < 0) {
-        basic_error = 1;
-        SHELL_PRINTF(SH_RED "? SELECT without END SELECT\n" SH_RST);
+        basic_throw(TIKU_BASIC_ERR_GENERAL, "SELECT without END SELECT");
         return;
     }
     /* Jump to the line AFTER the arm header (or after END SELECT
@@ -253,14 +240,12 @@ exec_case(const char **p)
 {
     int idx;
     if (!basic_running) {
-        basic_error = 1;
-        SHELL_PRINTF(SH_RED "? CASE outside RUN\n" SH_RST);
+        basic_throw(TIKU_BASIC_ERR_GENERAL, "CASE outside RUN");
         return;
     }
     idx = find_matching_end_select(basic_pc);
     if (idx < 0) {
-        basic_error = 1;
-        SHELL_PRINTF(SH_RED "? CASE without END SELECT\n" SH_RST);
+        basic_throw(TIKU_BASIC_ERR_GENERAL, "CASE without END SELECT");
         return;
     }
     {
