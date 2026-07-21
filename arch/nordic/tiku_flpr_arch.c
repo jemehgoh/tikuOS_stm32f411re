@@ -567,6 +567,40 @@ void tiku_flpr_arch_enc_iv(uint8_t iv[8])
     }
 }
 
+/* Phase F1: negotiated DLE max LL payload (0 until LL_LENGTH completes). */
+uint32_t tiku_flpr_arch_dle_max(void)
+{
+    return TIKU_FLPR_SHARED->dle_max;
+}
+
+/* Phase F2: current PHY (0 = 1M, 1 = 2M); @p at_evt = conn_events count when
+ * the FLPR switched, so the caller can measure survival on the new PHY. */
+uint32_t tiku_flpr_arch_conn_phy(uint32_t *at_evt)
+{
+    if (at_evt != (uint32_t *)0) {
+        *at_evt = TIKU_FLPR_SHARED->conn_phy_evt;
+    }
+    return TIKU_FLPR_SHARED->conn_phy;
+}
+
+/* F2 bisect telemetry (radioleft.md H1): the FLPR's RADIO->MODE readback at
+ * the switch plus its post-switch ADDRESS/CRCOK counts.  mode != 4 means the
+ * 2M write never latched; mode == 4 with addr == 0 means the receiver
+ * genuinely hears nothing on 2M. */
+void tiku_flpr_arch_conn_phy_diag(uint32_t *mode, uint32_t *addr,
+                                  uint32_t *crcok)
+{
+    if (mode != (uint32_t *)0) {
+        *mode = TIKU_FLPR_SHARED->conn_phy_mode;
+    }
+    if (addr != (uint32_t *)0) {
+        *addr = TIKU_FLPR_SHARED->conn_phy_addr;
+    }
+    if (crcok != (uint32_t *)0) {
+        *crcok = TIKU_FLPR_SHARED->conn_phy_crcok;
+    }
+}
+
 /* Phase A telemetry: LL updates the FLPR applied this connection. */
 uint32_t tiku_flpr_arch_conn_updates(uint32_t *chan_map, uint32_t *conn_upd)
 {

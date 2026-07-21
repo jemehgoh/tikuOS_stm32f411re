@@ -227,6 +227,22 @@ void tiku_radio_arch_central_updates(uint8_t on);
 void tiku_radio_arch_central_smp(uint8_t on);
 
 /**
+ * @brief Arm bonding for the next connection(s): pair + remember the LTK, and
+ *        on a reconnect to a known peer SKIP pairing and reuse the stored LTK.
+ */
+void tiku_radio_arch_central_bond(uint8_t on);
+
+/** @brief 1 if the last connection reused a stored bond (skipped pairing). */
+int tiku_radio_arch_central_bonded(void);
+
+/**
+ * @brief Scan-by-address: make the initiator connect to a specific peer AdvA
+ *        (6 bytes) instead of matching the "TIKU" device name.  NULL clears
+ *        the filter (default name matching).
+ */
+void tiku_radio_arch_central_target(const uint8_t *addr);
+
+/**
  * @brief Phase E3: the session key the central derived after LL encryption
  *        startup (LL_ENC_REQ/RSP -> SK = e(LTK, SKDm||SKDs)).
  * @param sk out: 16-byte session key (may be NULL to just query).
@@ -234,8 +250,25 @@ void tiku_radio_arch_central_smp(uint8_t on);
  */
 int tiku_radio_arch_central_enc(uint8_t sk[16]);
 
+/**
+ * @brief Phase F2: drive a PHY update on the next central() run (after the
+ *        ATT loopback: LL_PHY_REQ/RSP then LL_PHY_UPDATE_IND at an Instant).
+ * @param target 0 = off, 1 = 2M, 2 = Coded S8 (125 kbps long range).
+ */
+void tiku_radio_arch_central_phy(uint8_t target);
+
+/**
+ * @brief Phase F2 result.
+ * @param survived out: connection events serviced AFTER the 2M switch (a rising
+ *        count = the link survived the PHY change).
+ * @return 1 if the central applied the 2M switch, else 0.
+ */
+int tiku_radio_arch_central_phy_result(uint16_t *survived);
+
 /** Peripheral T_IFS measured by the central (us), ground truth for L3. */
 extern uint32_t tiku_radio_arch_dbg_cen_tifs;
+extern uint32_t tiku_radio_arch_dbg_phy;   /* F2 debug: stage|att<<8|rsp<<16 */
+extern uint32_t tiku_radio_arch_dbg_cen_aa; /* last per-conn random central AA */
 
 #define TIKU_RADIO_LL_NEWDATA  (1u << 0)  /**< rx payload is new, deliver */
 #define TIKU_RADIO_LL_ACKED    (1u << 1)  /**< my TX landed, advance      */
