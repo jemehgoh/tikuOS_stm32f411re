@@ -23,6 +23,14 @@
 
 #define TIKU_STM32_TICKLESS_NVIC_PRIO  1U
 
+#ifndef TIKU_STM32_TIM2_DEADLINE_EXPERIMENT
+#define TIKU_STM32_TIM2_DEADLINE_EXPERIMENT 0
+#endif
+
+#if TIKU_STM32_TIM2_DEADLINE_EXPERIMENT
+#define TIKU_STM32_UNUSED __attribute__((unused))
+#endif
+
 /*---------------------------------------------------------------------------*/
 /* State                                                                     */
 /*---------------------------------------------------------------------------*/
@@ -41,7 +49,7 @@ static volatile uint32_t       g_tickless_entry_counts = 0U;
 /* Internal helpers                                                          */
 /*---------------------------------------------------------------------------*/
 
-static unsigned long stm32f411_tickless_clock_hz(void)
+static unsigned long stm32f411_tim2_clock_hz(void)
 {
     unsigned long hclk = tiku_cpu_stm32f411_clock_get_hz();
     unsigned long pclk1 = tiku_cpu_stm32f411_pclk1_get_hz();
@@ -52,6 +60,88 @@ static unsigned long stm32f411_tickless_clock_hz(void)
     return (pclk1 == hclk) ? pclk1 : (pclk1 * 2UL);
 }
 
+#if TIKU_STM32_TIM2_DEADLINE_EXPERIMENT
+static uint32_t stm32f411_tim2_psc_for_128hz(unsigned long timclk)
+{
+    uint32_t psc;
+
+    psc = (uint32_t)(timclk / (unsigned long)TIKU_CLOCK_ARCH_SECOND);
+    if (psc == 0U) {
+        psc = 1U;
+    }
+
+    /*
+     * The event-driven experiment intentionally preserves the public
+     * 128 ticks/s resolution. If the APB1 timer clock is not an exact
+     * multiple of 128 Hz, this integer prescaler is the closest lower
+     * hardware divider and the final implementation should decide whether
+     * to reject that clock plan or account for the small rate error.
+     */
+    return psc;
+}
+
+static void stm32f411_tim2_freerun_init(void)
+{
+    unsigned long timclk = stm32f411_tim2_clock_hz();
+    uint32_t psc = stm32f411_tim2_psc_for_128hz(timclk);
+
+    RCC->APB1ENR |= RCC_APB1ENR_TIM2EN;
+    (void)RCC->APB1ENR;
+    RCC->APB1RSTR |= RCC_APB1RSTR_TIM2RST;
+    RCC->APB1RSTR &= ~RCC_APB1RSTR_TIM2RST;
+
+    TIM2->CR1 = 0U;
+    TIM2->PSC = psc - 1U;
+    TIM2->ARR = 0xFFFFFFFFUL;
+    TIM2->CNT = 0U;
+    TIM2->CCR1 = 0U;
+    TIM2->DIER = 0U;
+    TIM2->EGR = TIM_EGR_UG;
+    TIM2->SR = 0U;
+    TIM2->CR1 = TIM_CR1_CEN;
+
+    NVIC_SetPriority(TIM2_IRQn, TIKU_STM32_TICKLESS_NVIC_PRIO);
+    NVIC_ClearPendingIRQ(TIM2_IRQn);
+    NVIC_DisableIRQ(TIM2_IRQn);
+}
+
+static inline TIKU_STM32_UNUSED uint32_t stm32f411_tim2_now32(void)
+{
+    return TIM2->CNT;
+}
+
+static inline TIKU_STM32_UNUSED int
+stm32f411_tim2_reached(uint32_t now, uint32_t target)
+{
+    return ((int32_t)(now - target)) >= 0;
+}
+
+static inline TIKU_STM32_UNUSED int
+stm32f411_tim2_before(uint32_t a, uint32_t b)
+{
+    return ((int32_t)(a - b)) < 0;
+}
+
+static TIKU_STM32_UNUSED int stm32f411_tim2_arm_cc1(uint32_t target)
+{
+    uint32_t now;
+
+    TIM2->DIER &= ~TIM_DIER_CC1IE;
+    TIM2->CCR1 = target;
+    TIM2->SR = (uint32_t)~TIM_SR_CC1IF;
+    TIM2->DIER |= TIM_DIER_CC1IE;
+
+    now = stm32f411_tim2_now32();
+    if (stm32f411_tim2_reached(now, target)) {
+        TIM2->DIER &= ~TIM_DIER_CC1IE;
+        return 1;
+    }
+
+    return 0;
+}
+#endif
+
+#if !TIKU_STM32_TIM2_DEADLINE_EXPERIMENT
 static uint32_t stm32f411_tickless_counts_per_tick(unsigned long timclk)
 {
     uint32_t counts;
@@ -76,6 +166,7 @@ static uint32_t stm32f411_tickless_counts_per_tick(unsigned long timclk)
 
     return (uint32_t)base_hz;
 }
+#endif
 
 // Update the total tick count and sub-second ticks, and notify the scheduler of a tick event
 static void stm32f411_tick_advance_n(uint32_t n_ticks)
@@ -95,6 +186,7 @@ static void stm32f411_tick_advance_n(uint32_t n_ticks)
     tiku_sched_notify();
 }
 
+#if !TIKU_STM32_TIM2_DEADLINE_EXPERIMENT
 static uint32_t stm32f411_systick_partial_counts(void)
 {
     uint32_t elapsed_cycles;
@@ -161,6 +253,7 @@ static void stm32f411_tickless_reconcile(void)
         stm32f411_tick_advance_n(whole_ticks);
     }
 }
+#endif
 
 /*---------------------------------------------------------------------------*/
 /* HAL                                                                       */
@@ -169,9 +262,11 @@ static void stm32f411_tickless_reconcile(void)
 void tiku_clock_arch_init(void)
 {
     unsigned long hclk = tiku_cpu_stm32f411_clock_get_hz();
+#if !TIKU_STM32_TIM2_DEADLINE_EXPERIMENT
     unsigned long timclk;
-    uint32_t reload;
     uint32_t psc_div;
+#endif
+    uint32_t reload;
 
     g_tick_count = 0ULL;
     g_seconds = 0UL;
@@ -201,10 +296,15 @@ void tiku_clock_arch_init(void)
                   | SysTick_CTRL_TICKINT_Msk
                   | SysTick_CTRL_CLKSOURCE_Msk;
 
+#if TIKU_STM32_TIM2_DEADLINE_EXPERIMENT
+    stm32f411_tim2_freerun_init();
+
+    NVIC_SetPriority(SysTick_IRQn, TIKU_STM32_TICKLESS_NVIC_PRIO);
+#else
     // Compute tickless timer parameters - counts/tick and prescaler
     // This is necessary as the maximum tick interval for a 32-bit timer in the STM32F411 
     // is shorter than the system clock tick.
-    timclk = stm32f411_tickless_clock_hz();
+    timclk = stm32f411_tim2_clock_hz();
     g_tickless_counts_per_tick = stm32f411_tickless_counts_per_tick(timclk);
     psc_div = (uint32_t)(timclk /
               ((unsigned long)TIKU_CLOCK_ARCH_SECOND *
@@ -233,6 +333,7 @@ void tiku_clock_arch_init(void)
     NVIC_SetPriority(TIM2_IRQn, TIKU_STM32_TICKLESS_NVIC_PRIO);
     NVIC_ClearPendingIRQ(TIM2_IRQn);
     NVIC_EnableIRQ(TIM2_IRQn);
+#endif
 }
 
 tiku_clock_arch_time_t tiku_clock_arch_time(void)
@@ -308,6 +409,10 @@ unsigned char tiku_clock_arch_fault(void)
 
 int tiku_clock_tickless_begin(tiku_clock_time_t ticks_ahead)
 {
+#if TIKU_STM32_TIM2_DEADLINE_EXPERIMENT
+    (void)ticks_ahead;
+    return 0;
+#else
     uint32_t counts_needed;
 
     if (ticks_ahead <= 1u || g_tickless_counts_per_tick == 0U) {
@@ -329,16 +434,23 @@ int tiku_clock_tickless_begin(tiku_clock_time_t ticks_ahead)
     g_in_tickless_sleep = 1U;
     stm32f411_tickless_arm_tim2(counts_needed);
     return 1;
+#endif
 }
 
 void tiku_clock_tickless_end(void)
 {
+#if !TIKU_STM32_TIM2_DEADLINE_EXPERIMENT
     stm32f411_tickless_reconcile();
+#endif
 }
 
 int tiku_clock_tickless_available(void)
 {
+#if TIKU_STM32_TIM2_DEADLINE_EXPERIMENT
+    return 0;
+#else
     return 1;
+#endif
 }
 
 /*---------------------------------------------------------------------------*/
@@ -352,6 +464,10 @@ void tiku_stm32f411_systick_handler(void)
 
 void tiku_stm32f411_tim2_irq_handler(void)
 {
+#if TIKU_STM32_TIM2_DEADLINE_EXPERIMENT
+    TIM2->SR = 0U;
+#else
     TIM2->SR = 0U;
     stm32f411_tickless_reconcile();
+#endif
 }
