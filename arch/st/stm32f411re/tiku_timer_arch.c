@@ -12,6 +12,8 @@
 
 #include "tiku_timer_arch.h"
 #include "tiku_cpu_freq_boot_arch.h"
+#include <hal/tiku_cpu.h>
+#include <kernel/cpu/tiku_hang.h>
 #include <kernel/scheduler/tiku_sched.h>
 #include <kernel/timers/tiku_clock.h>
 #include <kernel/timers/tiku_timer.h>
@@ -30,6 +32,30 @@
 
 #if TIKU_STM32_TIM2_DEADLINE_EXPERIMENT
 #define TIKU_STM32_UNUSED __attribute__((unused))
+#define TIKU_STM32_CC_SRC_NONE   0U
+#define TIKU_STM32_CC_SRC_TIMER  1U
+#define TIKU_STM32_CC_SRC_HANG   2U
+#define TIKU_STM32_TIM2_RATE_HZ  TIKU_CLOCK_ARCH_SECOND
+#define TIKU_STM32_TIM2_FULL_WRAP_SECONDS \
+    (0x100000000ULL / (uint64_t)TIKU_STM32_TIM2_RATE_HZ)
+#define TIKU_STM32_DEADLINE16_SAFE_TICKS 0x8000U
+#define TIKU_STM32_DEADLINE16_SAFE_SECONDS \
+    (TIKU_STM32_DEADLINE16_SAFE_TICKS / TIKU_STM32_TIM2_RATE_HZ)
+
+#if TIKU_STM32_TIM2_RATE_HZ == 0
+#error "TIKU_CLOCK_ARCH_SECOND must be nonzero"
+#endif
+
+/*
+ * TIM2 free-runs at the configured public clock rate. At the default 128 Hz,
+ * its 32-bit counter wraps every 33,554,432 s (~388 days). Software timer
+ * deadlines remain the public 16-bit tiku_clock_time_t values, so modular
+ * ordering is only unambiguous across half that public range: 32768 ticks
+ * (256 s at 128 Hz). Longer single delays need a chained software timer or a
+ * wider public clock type.
+ */
+typedef char stm32f411_public_clock_must_be_16_bit[
+    (sizeof(tiku_clock_time_t) == sizeof(uint16_t)) ? 1 : -1];
 #endif
 
 /*---------------------------------------------------------------------------*/
@@ -48,8 +74,14 @@ static volatile uint32_t       g_tickless_entry_counts = 0U;
 
 #if TIKU_STM32_TIM2_DEADLINE_EXPERIMENT
 static volatile uint8_t        g_tim2_cc1_armed = 0U;
-static volatile tiku_clock_time_t g_tim2_cc1_deadline16 = 0U;
+static volatile uint8_t        g_tim2_cc1_source = TIKU_STM32_CC_SRC_NONE;
+static volatile uint8_t        g_tim2_timer_armed = 0U;
+static volatile uint8_t        g_tim2_timer_poll_pending = 0U;
+static volatile tiku_clock_time_t g_tim2_timer_deadline16 = 0U;
+static volatile uint8_t        g_tim2_hang_armed = 0U;
+static volatile tiku_clock_time_t g_tim2_hang_deadline16 = 0U;
 static volatile uint16_t       g_tim2_cc1_missed_writes = 0U;
+static volatile unsigned long  g_tim2_seconds_offset = 0UL;
 #endif
 
 /*---------------------------------------------------------------------------*/
@@ -68,7 +100,7 @@ static unsigned long stm32f411_tim2_clock_hz(void)
 }
 
 #if TIKU_STM32_TIM2_DEADLINE_EXPERIMENT
-static uint32_t stm32f411_tim2_psc_for_128hz(unsigned long timclk)
+static uint32_t stm32f411_tim2_psc_for_tick_hz(unsigned long timclk)
 {
     uint32_t psc;
 
@@ -78,11 +110,11 @@ static uint32_t stm32f411_tim2_psc_for_128hz(unsigned long timclk)
     }
 
     /*
-     * The event-driven experiment intentionally preserves the public
-     * 128 ticks/s resolution. If the APB1 timer clock is not an exact
-     * multiple of 128 Hz, this integer prescaler is the closest lower
-     * hardware divider and the final implementation should decide whether
-     * to reject that clock plan or account for the small rate error.
+     * The event-driven experiment intentionally preserves the configured
+     * public tick resolution. If the APB1 timer clock is not an exact
+     * multiple of that rate, this integer prescaler is the closest lower
+     * hardware divider and the final implementation should decide whether to
+     * reject that clock plan or account for the small rate error.
      */
     return psc;
 }
@@ -90,7 +122,7 @@ static uint32_t stm32f411_tim2_psc_for_128hz(unsigned long timclk)
 static void stm32f411_tim2_freerun_init(void)
 {
     unsigned long timclk = stm32f411_tim2_clock_hz();
-    uint32_t psc = stm32f411_tim2_psc_for_128hz(timclk);
+    uint32_t psc = stm32f411_tim2_psc_for_tick_hz(timclk);
 
     RCC->APB1ENR |= RCC_APB1ENR_TIM2EN;
     (void)RCC->APB1ENR;
@@ -101,9 +133,11 @@ static void stm32f411_tim2_freerun_init(void)
     TIM2->PSC = psc - 1U;
     TIM2->ARR = 0xFFFFFFFFUL;
     TIM2->CNT = 0U;
+    /* TIM2 CC1 is reserved here for the system deadline scheduler. */
     TIM2->CCR1 = 0U;
     TIM2->DIER = 0U;
     TIM2->EGR = TIM_EGR_UG;
+    /* Peripheral was just reset and CC interrupts are disabled. */
     TIM2->SR = 0U;
     TIM2->CR1 = TIM_CR1_CEN;
 
@@ -129,6 +163,18 @@ stm32f411_tim2_before(uint32_t a, uint32_t b)
     return ((int32_t)(a - b)) < 0;
 }
 
+static inline int
+stm32f411_clock16_before(tiku_clock_time_t a, tiku_clock_time_t b)
+{
+    return TIKU_CLOCK_LT(a, b);
+}
+
+static inline void
+stm32f411_tim2_clear_cc1if(void)
+{
+    TIM2->SR = (uint32_t)~TIM_SR_CC1IF;
+}
+
 static uint32_t stm32f411_tim2_expand_deadline16(tiku_clock_time_t deadline16)
 {
     uint32_t now32 = stm32f411_tim2_now32();
@@ -138,6 +184,11 @@ static uint32_t stm32f411_tim2_expand_deadline16(tiku_clock_time_t deadline16)
     return now32 + (uint32_t)delay16;
 }
 
+/*
+ * CC1 helpers run either from TIM2 ISR context or with tiku_atomic_enter()
+ * held by a public arch rearm hook. Do not call them from unlocked
+ * thread-mode code: the DIER/CCR/SR sequence is the critical compare update.
+ */
 static TIKU_STM32_UNUSED int stm32f411_tim2_arm_cc1(uint32_t target)
 {
     uint32_t now;
@@ -145,13 +196,13 @@ static TIKU_STM32_UNUSED int stm32f411_tim2_arm_cc1(uint32_t target)
     g_tim2_cc1_armed = 0U;
     TIM2->DIER &= ~TIM_DIER_CC1IE;
     TIM2->CCR1 = target;
-    TIM2->SR = (uint32_t)~TIM_SR_CC1IF;
+    stm32f411_tim2_clear_cc1if();
     TIM2->DIER |= TIM_DIER_CC1IE;
 
     now = stm32f411_tim2_now32();
     if (stm32f411_tim2_reached(now, target)) {
         TIM2->DIER &= ~TIM_DIER_CC1IE;
-        TIM2->SR = (uint32_t)~TIM_SR_CC1IF;
+        stm32f411_tim2_clear_cc1if();
         g_tim2_cc1_missed_writes++;
         return 1;
     }
@@ -163,12 +214,82 @@ static TIKU_STM32_UNUSED int stm32f411_tim2_arm_cc1(uint32_t target)
 static void stm32f411_tim2_disarm_cc1(void)
 {
     TIM2->DIER &= ~TIM_DIER_CC1IE;
-    TIM2->SR = (uint32_t)~TIM_SR_CC1IF;
+    stm32f411_tim2_clear_cc1if();
     g_tim2_cc1_armed = 0U;
+    g_tim2_cc1_source = TIKU_STM32_CC_SRC_NONE;
+}
+
+/*
+ * Pick the nearest logical deadline and program TIM2 CC1. Caller is serialized
+ * against thread-mode rearm hooks; service actions returned from here must run
+ * after leaving the critical section.
+ */
+static uint8_t stm32f411_tim2_rearm_cc1_mux_locked(void)
+{
+    uint8_t actions = 0U;
+
+    for (;;) {
+        uint8_t source = TIKU_STM32_CC_SRC_NONE;
+        tiku_clock_time_t deadline16 = 0U;
+        uint32_t target;
+
+        if (g_tim2_timer_armed && !g_tim2_timer_poll_pending) {
+            source = TIKU_STM32_CC_SRC_TIMER;
+            deadline16 = g_tim2_timer_deadline16;
+        }
+
+        if (g_tim2_hang_armed &&
+            (source == TIKU_STM32_CC_SRC_NONE ||
+             !stm32f411_clock16_before(deadline16,
+                                       g_tim2_hang_deadline16))) {
+            source = TIKU_STM32_CC_SRC_HANG;
+            deadline16 = g_tim2_hang_deadline16;
+        }
+
+        if (source == TIKU_STM32_CC_SRC_NONE) {
+            stm32f411_tim2_disarm_cc1();
+            return actions;
+        }
+
+        target = stm32f411_tim2_expand_deadline16(deadline16);
+        g_tim2_cc1_source = source;
+        if (!stm32f411_tim2_arm_cc1(target)) {
+            return actions;
+        }
+
+        actions |= source;
+        if (source == TIKU_STM32_CC_SRC_TIMER) {
+            g_tim2_timer_poll_pending = 1U;
+            continue;
+        }
+
+        g_tim2_hang_armed = 0U;
+        stm32f411_tim2_disarm_cc1();
+        return actions;
+    }
+}
+
+static void stm32f411_tim2_service_actions(uint8_t actions)
+{
+    /*
+     * Runs after the CC1 critical section. Timer deadlines only wake the timer
+     * process; software timer callbacks remain process-context dispatch.
+     */
+    if (actions & TIKU_STM32_CC_SRC_HANG) {
+        tiku_hang_deadline_expired();
+    }
+    if (actions & TIKU_STM32_CC_SRC_TIMER) {
+        tiku_timer_request_poll();
+    }
 }
 #endif
 
 #if !TIKU_STM32_TIM2_DEADLINE_EXPERIMENT
+static inline void stm32f411_tim2_clear_uif(void)
+{
+    TIM2->SR = (uint32_t)~TIM_SR_UIF;
+}
+
 static uint32_t stm32f411_tickless_counts_per_tick(unsigned long timclk)
 {
     uint32_t counts;
@@ -195,6 +316,7 @@ static uint32_t stm32f411_tickless_counts_per_tick(unsigned long timclk)
 }
 #endif
 
+#if !TIKU_STM32_TIM2_DEADLINE_EXPERIMENT
 // Update the total tick count and sub-second ticks, and notify the scheduler of a tick event
 static void stm32f411_tick_advance_n(uint32_t n_ticks)
 {
@@ -213,7 +335,6 @@ static void stm32f411_tick_advance_n(uint32_t n_ticks)
     tiku_sched_notify();
 }
 
-#if !TIKU_STM32_TIM2_DEADLINE_EXPERIMENT
 static uint32_t stm32f411_systick_partial_counts(void)
 {
     uint32_t elapsed_cycles;
@@ -240,9 +361,9 @@ static void stm32f411_tickless_arm_tim2(uint32_t counts_needed)
     TIM2->CR1 &= ~TIM_CR1_CEN;
     TIM2->CNT = 0U;
     TIM2->ARR = counts_needed;
-    TIM2->SR = 0U;
+    stm32f411_tim2_clear_uif();
     TIM2->EGR = TIM_EGR_UG;
-    TIM2->SR = 0U;
+    stm32f411_tim2_clear_uif();
     TIM2->CR1 = TIM_CR1_OPM | TIM_CR1_CEN;
 }
 
@@ -304,8 +425,14 @@ void tiku_clock_arch_init(void)
     g_tickless_entry_counts = 0U;
 #if TIKU_STM32_TIM2_DEADLINE_EXPERIMENT
     g_tim2_cc1_armed = 0U;
-    g_tim2_cc1_deadline16 = 0U;
+    g_tim2_cc1_source = TIKU_STM32_CC_SRC_NONE;
+    g_tim2_timer_armed = 0U;
+    g_tim2_timer_poll_pending = 0U;
+    g_tim2_timer_deadline16 = 0U;
+    g_tim2_hang_armed = 0U;
+    g_tim2_hang_deadline16 = 0U;
     g_tim2_cc1_missed_writes = 0U;
+    g_tim2_seconds_offset = 0UL;
 #endif
 
     if (hclk == 0UL) {
@@ -324,15 +451,17 @@ void tiku_clock_arch_init(void)
 
     SysTick->LOAD = reload;
     SysTick->VAL = 0U;
-    SysTick->CTRL = SysTick_CTRL_ENABLE_Msk
-                  | SysTick_CTRL_TICKINT_Msk
-                  | SysTick_CTRL_CLKSOURCE_Msk;
 
 #if TIKU_STM32_TIM2_DEADLINE_EXPERIMENT
+    SysTick->CTRL = 0U;
     stm32f411_tim2_freerun_init();
 
     NVIC_SetPriority(SysTick_IRQn, TIKU_STM32_TICKLESS_NVIC_PRIO);
 #else
+    SysTick->CTRL = SysTick_CTRL_ENABLE_Msk
+                  | SysTick_CTRL_TICKINT_Msk
+                  | SysTick_CTRL_CLKSOURCE_Msk;
+
     // Compute tickless timer parameters - counts/tick and prescaler
     // This is necessary as the maximum tick interval for a 32-bit timer in the STM32F411 
     // is shorter than the system clock tick.
@@ -359,6 +488,7 @@ void tiku_clock_arch_init(void)
     TIM2->CNT = 0U;
     TIM2->DIER = TIM_DIER_UIE;
     TIM2->EGR = TIM_EGR_UG;
+    /* Peripheral was just reset and only update interrupts are enabled. */
     TIM2->SR = 0U;
 
     NVIC_SetPriority(SysTick_IRQn, TIKU_STM32_TICKLESS_NVIC_PRIO);
@@ -370,17 +500,34 @@ void tiku_clock_arch_init(void)
 
 tiku_clock_arch_time_t tiku_clock_arch_time(void)
 {
+#if TIKU_STM32_TIM2_DEADLINE_EXPERIMENT
+    return (tiku_clock_arch_time_t)stm32f411_tim2_now32();
+#else
     return (tiku_clock_arch_time_t)g_tick_count;
+#endif
 }
 
 unsigned long tiku_clock_arch_seconds(void)
 {
+#if TIKU_STM32_TIM2_DEADLINE_EXPERIMENT
+    return g_tim2_seconds_offset
+         + (unsigned long)(stm32f411_tim2_now32()
+                         / (uint32_t)TIKU_CLOCK_ARCH_SECOND);
+#else
     return g_seconds;
+#endif
 }
 
 void tiku_clock_arch_set_seconds(unsigned long sec)
 {
+#if TIKU_STM32_TIM2_DEADLINE_EXPERIMENT
+    unsigned long now_sec =
+        (unsigned long)(stm32f411_tim2_now32()
+                      / (uint32_t)TIKU_CLOCK_ARCH_SECOND);
+    g_tim2_seconds_offset = sec - now_sec;
+#else
     g_seconds = sec;
+#endif
 }
 
 void tiku_clock_arch_wait(tiku_clock_arch_time_t t)
@@ -413,6 +560,9 @@ void tiku_clock_arch_delay(unsigned int us)
 
 unsigned short tiku_clock_arch_fine(void)
 {
+#if TIKU_STM32_TIM2_DEADLINE_EXPERIMENT
+    return 0U;
+#else
     uint32_t cvr = SysTick->VAL;
     uint32_t rvr = SysTick->LOAD;
     uint32_t fine;
@@ -423,6 +573,7 @@ unsigned short tiku_clock_arch_fine(void)
 
     fine = ((rvr - cvr) * 0xFFFFU) / rvr;
     return (unsigned short)fine;
+#endif
 }
 
 int tiku_clock_arch_fine_max(void)
@@ -438,19 +589,40 @@ unsigned char tiku_clock_arch_fault(void)
 #if TIKU_STM32_TIM2_DEADLINE_EXPERIMENT
 void tiku_timer_arch_rearm(tiku_clock_time_t next, uint8_t armed)
 {
-    uint32_t target;
+    uint8_t actions;
 
+    tiku_atomic_enter();
     if (!armed) {
-        g_tim2_cc1_deadline16 = 0U;
-        stm32f411_tim2_disarm_cc1();
-        return;
+        g_tim2_timer_armed = 0U;
+        g_tim2_timer_poll_pending = 0U;
+        g_tim2_timer_deadline16 = 0U;
+    } else {
+        g_tim2_timer_armed = 1U;
+        g_tim2_timer_poll_pending = 0U;
+        g_tim2_timer_deadline16 = next;
     }
 
-    g_tim2_cc1_deadline16 = next;
-    target = stm32f411_tim2_expand_deadline16(next);
-    if (stm32f411_tim2_arm_cc1(target)) {
-        tiku_timer_request_poll();
+    actions = stm32f411_tim2_rearm_cc1_mux_locked();
+    tiku_atomic_exit();
+    stm32f411_tim2_service_actions(actions);
+}
+
+void tiku_hang_arch_rearm(tiku_clock_time_t deadline, uint8_t armed)
+{
+    uint8_t actions;
+
+    tiku_atomic_enter();
+    if (!armed) {
+        g_tim2_hang_armed = 0U;
+        g_tim2_hang_deadline16 = 0U;
+    } else {
+        g_tim2_hang_armed = 1U;
+        g_tim2_hang_deadline16 = deadline;
     }
+
+    actions = stm32f411_tim2_rearm_cc1_mux_locked();
+    tiku_atomic_exit();
+    stm32f411_tim2_service_actions(actions);
 }
 #endif
 
@@ -510,20 +682,37 @@ int tiku_clock_tickless_available(void)
 
 void tiku_stm32f411_systick_handler(void)
 {
+#if TIKU_STM32_TIM2_DEADLINE_EXPERIMENT
+    /* SysTick is not the scheduler heartbeat in TIM2 deadline mode. */
+#else
     stm32f411_tick_advance_n(1U);
+#endif
 }
 
 void tiku_stm32f411_tim2_irq_handler(void)
 {
 #if TIKU_STM32_TIM2_DEADLINE_EXPERIMENT
     uint32_t sr = TIM2->SR;
+    uint8_t source;
+    uint8_t actions = 0U;
 
     if (sr & TIM_SR_CC1IF) {
+        source = g_tim2_cc1_source;
         stm32f411_tim2_disarm_cc1();
-        tiku_timer_request_poll();
+
+        if (source == TIKU_STM32_CC_SRC_TIMER) {
+            g_tim2_timer_poll_pending = 1U;
+            actions |= TIKU_STM32_CC_SRC_TIMER;
+        } else if (source == TIKU_STM32_CC_SRC_HANG) {
+            g_tim2_hang_armed = 0U;
+            actions |= TIKU_STM32_CC_SRC_HANG;
+        }
+
+        actions |= stm32f411_tim2_rearm_cc1_mux_locked();
+        stm32f411_tim2_service_actions(actions);
     }
 #else
-    TIM2->SR = 0U;
+    stm32f411_tim2_clear_uif();
     stm32f411_tickless_reconcile();
 #endif
 }

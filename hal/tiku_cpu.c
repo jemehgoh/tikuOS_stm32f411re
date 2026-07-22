@@ -172,6 +172,8 @@ void tiku_cpu_dcache_clean(const void *addr, unsigned long len) {
     (void)addr; (void)len;            /* no data cache */
 #elif defined(PLATFORM_RP2350)
     (void)addr; (void)len;            /* XIP cache: no D-side coherency op needed */
+#elif defined(PLATFORM_STM32F411)
+    (void)addr; (void)len;            /* Cortex-M4 build has no managed D-cache */
 #elif defined(PLATFORM_AMBIQ)
     tiku_cpu_ambiq_dcache_clean(addr, len);
 #elif defined(PLATFORM_NORDIC)
@@ -183,6 +185,8 @@ void tiku_cpu_dcache_invalidate(const void *addr, unsigned long len) {
 #if defined(PLATFORM_MSP430)
     (void)addr; (void)len;
 #elif defined(PLATFORM_RP2350)
+    (void)addr; (void)len;
+#elif defined(PLATFORM_STM32F411)
     (void)addr; (void)len;
 #elif defined(PLATFORM_AMBIQ)
     tiku_cpu_ambiq_dcache_invalidate(addr, len);
@@ -337,9 +341,9 @@ int tiku_cpu_idle_mode_wakes_on_tick(tiku_cpu_idle_mode_t mode) {
      * clears the LPM bits on exit.  LPM4 stops every clock, so the
      * tick can never fire, let alone wake us. */
     return mode != TIKU_CPU_IDLE_DEEPEST;
-#elif defined(PLATFORM_RP2350) || defined(PLATFORM_AMBIQ) || defined(PLATFORM_NORDIC)
+#elif defined(PLATFORM_RP2350) || defined(PLATFORM_STM32F411) || defined(PLATFORM_AMBIQ) || defined(PLATFORM_NORDIC)
     /* Every supported mode is a WFI variant; any enabled interrupt
-     * (SysTick / STIMER tick included) wakes the core. */
+     * (SysTick / deadline timer included) wakes the core. */
     (void)mode;
     return 1;
 #else

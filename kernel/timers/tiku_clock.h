@@ -21,6 +21,7 @@
 /*---------------------------------------------------------------------------*/
 
 #include <hal/tiku_clock_hal.h>
+#include <stdint.h>
 
 /*---------------------------------------------------------------------------*/
 /* TYPE DEFINITIONS                                                          */
@@ -55,14 +56,34 @@ typedef unsigned short tiku_clock_time_t;
 /**
  * @def TIKU_CLOCK_LT(a, b)
  * @brief Wraparound-safe less-than comparison
+ *
+ * tikuOS' public clock value is 16-bit by default. Modular ordering is
+ * therefore unambiguous only within half the range: deadlines compared this
+ * way must be less than 32768 ticks apart.
  */
-#define TIKU_CLOCK_LT(a, b) ((signed short)((a) - (b)) < 0)
+static inline int
+tiku_clock_lt(tiku_clock_time_t a, tiku_clock_time_t b)
+{
+    return ((int16_t)((uint16_t)(a - b))) < 0;
+}
 
 /**
  * @def TIKU_CLOCK_DIFF(a, b)
  * @brief Wraparound-safe difference (a - b)
  */
-#define TIKU_CLOCK_DIFF(a, b) ((signed short)((a) - (b)))
+static inline int16_t
+tiku_clock_diff(tiku_clock_time_t a, tiku_clock_time_t b)
+{
+    return (int16_t)((uint16_t)(a - b));
+}
+
+#define TIKU_CLOCK_LT(a, b) \
+    tiku_clock_lt((tiku_clock_time_t)(a), (tiku_clock_time_t)(b))
+
+#define TIKU_CLOCK_DIFF(a, b) \
+    tiku_clock_diff((tiku_clock_time_t)(a), (tiku_clock_time_t)(b))
+
+#define TIKU_CLOCK_SAFE_HALF_RANGE ((tiku_clock_time_t)0x8000U)
 
 /**
  * @def TIKU_CLOCK_MS_TO_TICKS(ms)

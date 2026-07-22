@@ -49,6 +49,21 @@ static volatile uint32_t tiku_hang_hb;      /* heartbeat, bumped by checkin  */
 static uint32_t          tiku_hang_seen;    /* last heartbeat the tick saw   */
 static uint16_t          tiku_hang_stall;   /* consecutive stalled ticks     */
 
+static void
+tiku_hang_rearm_dispatch_deadline(void)
+{
+    tiku_clock_time_t deadline;
+
+    if (!tiku_hang_armed || tiku_current_process == NULL) {
+        tiku_hang_arch_rearm(0, 0);
+        return;
+    }
+
+    deadline = (tiku_clock_time_t)(tiku_clock_time()
+             + (tiku_clock_time_t)TIKU_HANG_THRESHOLD_TICKS);
+    tiku_hang_arch_rearm(deadline, 1);
+}
+
 /*---------------------------------------------------------------------------*/
 /* DETECTION                                                                 */
 /*---------------------------------------------------------------------------*/
@@ -56,11 +71,26 @@ static uint16_t          tiku_hang_stall;   /* consecutive stalled ticks     */
 void tiku_hang_arm(void)
 {
     tiku_hang_armed = 1u;
+    tiku_hang_rearm_dispatch_deadline();
 }
 
 void tiku_hang_checkin(void)
 {
     tiku_hang_hb++;
+    tiku_hang_rearm_dispatch_deadline();
+}
+
+void tiku_hang_dispatch_begin(void)
+{
+    tiku_hang_seen = tiku_hang_hb;
+    tiku_hang_stall = 0;
+    tiku_hang_rearm_dispatch_deadline();
+}
+
+void tiku_hang_dispatch_end(void)
+{
+    tiku_hang_arch_rearm(0, 0);
+    tiku_hang_stall = 0;
 }
 
 int8_t tiku_hang_detect_step(void)
@@ -120,6 +150,16 @@ void tiku_hang_tick(void)
         tiku_hang_record(tiku_current_process);
         tiku_hang_arch_reset();               /* does not return */
     }
+}
+
+void tiku_hang_deadline_expired(void)
+{
+    if (!tiku_hang_armed || tiku_current_process == NULL) {
+        return;
+    }
+
+    tiku_hang_record(tiku_current_process);
+    tiku_hang_arch_reset();                   /* does not return */
 }
 
 /*---------------------------------------------------------------------------*/
@@ -193,4 +233,10 @@ TIKU_WEAK void tiku_hang_arch_reset(void)
     /* No arch reset wired: spin so the failure is contained (a real hardware
      * watchdog, where present, still catches it) rather than continuing. */
     for (;;) { }
+}
+
+TIKU_WEAK void tiku_hang_arch_rearm(tiku_clock_time_t deadline, uint8_t armed)
+{
+    (void)deadline;
+    (void)armed;
 }

@@ -15,6 +15,10 @@
 #include <stdint.h>
 #include <string.h>
 
+#ifndef TIKU_STM32_TIM2_DEADLINE_EXPERIMENT
+#define TIKU_STM32_TIM2_DEADLINE_EXPERIMENT 0
+#endif
+
 static int stm32f411_irq_enabled(uint32_t irq)
 {
     return (NVIC->ISER[irq / 32U] & (1UL << (irq & 31U))) ? 1 : 0;
@@ -31,9 +35,16 @@ void tiku_wake_arch_query(tiku_wake_sources_t *out)
 
     memset(out, 0, sizeof(*out));
 
+#if TIKU_STM32_TIM2_DEADLINE_EXPERIMENT
+    if (stm32f411_irq_enabled((uint32_t)TIM2_IRQn) &&
+        (TIM2->DIER & TIM_DIER_CC1IE)) {
+        out->sources |= TIKU_WAKE_SYSTICK;
+    }
+#else
     if (SysTick->CTRL & SysTick_CTRL_TICKINT_Msk) {
         out->sources |= TIKU_WAKE_SYSTICK;
     }
+#endif
     if (stm32f411_irq_enabled((uint32_t)TIM5_IRQn)) {
         out->sources |= TIKU_WAKE_HTIMER;
     }

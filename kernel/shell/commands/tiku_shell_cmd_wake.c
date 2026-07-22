@@ -72,6 +72,33 @@ tiku_shell_cmd_wake(uint8_t argc, const char *argv[])
 
     SHELL_PRINTF("\nNote: nRF54L idle = WFI at every LPM level;\n");
     SHELL_PRINTF("  any enabled source above wakes the core.\n");
+#elif defined(PLATFORM_STM32F411)
+    SHELL_PRINTF("  TIM2     (sys deadline) %s  wakes WFI\n",
+                 (w.sources & TIKU_WAKE_SYSTICK) ? "[on ]" : "[off]");
+
+    SHELL_PRINTF("  TIM5     (htimer)       %s  wakes WFI\n",
+                 (w.sources & TIKU_WAKE_HTIMER) ? "[on ]" : "[off]");
+
+    SHELL_PRINTF("  USART2 RX(console)      %s  wakes WFI\n",
+                 (w.sources & TIKU_WAKE_UART_RX) ? "[on ]" : "[off]");
+
+    SHELL_PRINTF("  Watchdog (interval)     %s  wakes WFI\n",
+                 (w.sources & TIKU_WAKE_WDT) ? "[on ]" : "[off]");
+
+    if (w.sources & TIKU_WAKE_GPIO) {
+        SHELL_PRINTF("  EXTI     (gpio irq)     [on ]  wakes WFI\n");
+        for (i = 0; i < TIKU_WAKE_MAX_GPIO_PORTS; i++) {
+            if (w.gpio_ie[i]) {
+                SHELL_PRINTF("    P%u armed pins = 0x%x\n",
+                             (unsigned)i, (unsigned)w.gpio_ie[i]);
+            }
+        }
+    } else {
+        SHELL_PRINTF("  EXTI     (gpio irq)     [off]  wakes WFI\n");
+    }
+
+    SHELL_PRINTF("\nNote: STM32F411 idle = plain WFI here;\n");
+    SHELL_PRINTF("  any enabled source above wakes the core.\n");
 #else
     SHELL_PRINTF("  Timer A0 (sys clock)  %s  wakes LPM0-3\n",
                  (w.sources & TIKU_WAKE_SYSTICK) ? "[on ]" : "[off]");

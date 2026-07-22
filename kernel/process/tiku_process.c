@@ -938,6 +938,7 @@ static void call_process(struct tiku_process *p, tiku_event_t ev,
         tiku_current_process = p;
         p->state = TIKU_PROCESS_STATE_RUNNING;
         p->wake_count++;
+        tiku_hang_dispatch_begin();
         ret = p->thread(&p->pt, ev, data);
         if (ret == PT_EXITED || ret == PT_ENDED) {
             /* Record how it ended: a clean protothread end is DONE unless the
@@ -946,6 +947,7 @@ static void call_process(struct tiku_process *p, tiku_event_t ev,
             if (p->exit_reason != (uint8_t)TIKU_EXIT_FAILED) {
                 p->exit_reason = (uint8_t)TIKU_EXIT_DONE;
             }
+            tiku_hang_dispatch_end();
             tiku_current_process = NULL;
             tiku_process_exit(p);
         } else {
@@ -964,6 +966,7 @@ static void call_process(struct tiku_process *p, tiku_event_t ev,
                            ? TIKU_PROCESS_STATE_SLEEPING
                            : TIKU_PROCESS_STATE_WAITING;
             }
+            tiku_hang_dispatch_end();
             tiku_current_process = NULL;
         }
     }

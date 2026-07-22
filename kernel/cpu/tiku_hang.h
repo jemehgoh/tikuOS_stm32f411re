@@ -30,6 +30,7 @@
 #define TIKU_HANG_H_
 
 #include <stdint.h>
+#include <kernel/timers/tiku_clock.h>
 
 struct tiku_process;
 
@@ -67,12 +68,36 @@ void tiku_hang_arm(void);
 void tiku_hang_checkin(void);
 
 /**
+ * @brief Mark the start of one process dispatch.
+ *
+ * Event-driven hang backends arm their watchdog deadline here. Periodic
+ * backends may ignore it and keep using tiku_hang_tick().
+ */
+void tiku_hang_dispatch_begin(void);
+
+/**
+ * @brief Mark the end of one process dispatch.
+ *
+ * Event-driven hang backends disarm their watchdog deadline here because the
+ * scheduler has regained control.
+ */
+void tiku_hang_dispatch_end(void);
+
+/**
  * @brief Per-tick detector, called from the system-tick ISR.
  *
  * On a confirmed hang it records the culprit and resets the chip (never
  * returns in that case).  A no-op until the stall threshold is crossed.
  */
 void tiku_hang_tick(void);
+
+/**
+ * @brief Event-driven detector, called by an arch deadline ISR.
+ *
+ * If a process is still on the CPU when the armed hang deadline expires, this
+ * records the culprit and resets the chip.
+ */
+void tiku_hang_deadline_expired(void);
 
 /**
  * @brief One detection step (NO reset): the culprit pid once the stall has
@@ -116,5 +141,13 @@ void tiku_hang_clear(void);
  * failure rather than silently continuing.
  */
 void tiku_hang_arch_reset(void);
+
+/**
+ * @brief Arm/disarm an arch hang deadline.
+ *
+ * Event-driven ports override this to program a compare deadline. Periodic
+ * ports use the weak no-op default and continue calling tiku_hang_tick().
+ */
+void tiku_hang_arch_rearm(tiku_clock_time_t deadline, uint8_t armed);
 
 #endif /* TIKU_HANG_H_ */
