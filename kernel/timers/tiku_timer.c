@@ -7,7 +7,8 @@
  *
  * tiku_timer.c - Unified software timer implementation
  *
- * Single process, single linked list, handles both callback and event timers.
+ * Single process, single deadline-sorted linked list, handles both callback
+ * and event timers.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -19,33 +20,78 @@
 #include "tiku_timer.h"
 #include "tiku_crit.h"
 #include "tiku.h"
+#include <hal/tiku_compiler.h>
 #include <stddef.h>
 
 /*---------------------------------------------------------------------------*/
 /* MODULE STATE                                                              */
 /*---------------------------------------------------------------------------*/
 
-/** Head of the active timer singly-linked list */
+/** Head of the active timer singly-linked list, sorted by nearest deadline. */
 static struct tiku_timer *timer_list = NULL;
 
-/** Running count of timer expirations (wraps at 65535) */
+/** Running count of timer expirations (wraps at 65535). */
 static uint16_t timer_fire_count;
+
+/*---------------------------------------------------------------------------*/
+/* ARCH HOOKS                                                                */
+/*---------------------------------------------------------------------------*/
+
+/**
+ * @brief Weak default for platform deadline reprogramming.
+ *
+ * Event-driven ports override this to arm/disarm a hardware compare for the
+ * nearest software-timer deadline. The default keeps periodic-tick ports
+ * unchanged.
+ */
+TIKU_WEAK void
+tiku_timer_arch_rearm(tiku_clock_time_t next, uint8_t armed)
+{
+  (void)next;
+  (void)armed;
+}
 
 /*---------------------------------------------------------------------------*/
 /* INTERNAL HELPERS                                                          */
 /*---------------------------------------------------------------------------*/
 
 /**
- * @brief Check if clock time `now` is past the timer's expiration
+ * @brief Check if clock time @p now is past the timer's expiration.
  */
-static inline int timer_is_due(struct tiku_timer *t, tiku_clock_time_t now) {
+static inline int
+timer_is_due(struct tiku_timer *t, tiku_clock_time_t now)
+{
   return (tiku_clock_time_t)(now - t->start) >= t->interval;
 }
 
 /**
- * @brief Remove a timer from the active list (if present)
+ * @brief Return a timer's absolute expiration tick.
  */
-static void timer_remove(struct tiku_timer *t) {
+static inline tiku_clock_time_t
+timer_expiration(struct tiku_timer *t)
+{
+  return (tiku_clock_time_t)(t->start + t->interval);
+}
+
+/**
+ * @brief Re-arm the platform backend at the current list head.
+ */
+static void
+timer_rearm_head(void)
+{
+  if (timer_list != NULL) {
+    tiku_timer_arch_rearm(timer_expiration(timer_list), 1);
+  } else {
+    tiku_timer_arch_rearm(0, 0);
+  }
+}
+
+/**
+ * @brief Remove a timer from the active list without rearming.
+ */
+static int
+timer_unlink(struct tiku_timer *t)
+{
   struct tiku_timer **pp;
 
   for (pp = &timer_list; *pp != NULL; pp = &(*pp)->next) {
@@ -53,31 +99,91 @@ static void timer_remove(struct tiku_timer *t) {
       *pp = t->next;
       t->next = NULL;
       t->active = 0;
-      return;
+      return 1;
     }
   }
+
+  return 0;
 }
 
 /**
- * @brief Insert a timer into the active list
- *
- * Removes first if already present (prevents duplicates),
- * then prepends to head. O(n) removal but the list is
- * typically short on embedded systems.
+ * @brief Remove a timer from the active list.
  */
-static void timer_insert(struct tiku_timer *t) {
-  /* Remove if already in list */
+static void
+timer_remove(struct tiku_timer *t)
+{
+  tiku_atomic_enter();
+  if (timer_unlink(t)) {
+    timer_rearm_head();
+  }
+  tiku_atomic_exit();
+}
+
+/**
+ * @brief Insert a timer into the active list by nearest deadline.
+ *
+ * Due timers sort before future timers so the head-only work-pending fast path
+ * remains correct even for immediate timers and late periodic resets.
+ */
+static void
+timer_insert(struct tiku_timer *t)
+{
+  struct tiku_timer **pp;
+  tiku_clock_time_t now;
+  tiku_clock_time_t dist;
+  int due;
+
+  tiku_atomic_enter();
+
   if (t->active) {
-    timer_remove(t);
+    (void)timer_unlink(t);
   }
 
-  /* Prepend */
-  t->next = timer_list;
-  timer_list = t;
+  now = tiku_clock_time();
+  dist = (tiku_clock_time_t)(timer_expiration(t) - now);
+  due = timer_is_due(t, now);
+
+  for (pp = &timer_list; *pp != NULL; pp = &(*pp)->next) {
+    int other_due = timer_is_due(*pp, now);
+
+    if (due && !other_due) {
+      break;
+    }
+    if (!due && other_due) {
+      continue;
+    }
+
+    if (dist < (tiku_clock_time_t)(timer_expiration(*pp) - now)) {
+      break;
+    }
+  }
+
+  t->next = *pp;
+  *pp = t;
   t->active = 1;
 
-  /* Wake the timer process to re-evaluate next expiration */
+  timer_rearm_head();
+  tiku_atomic_exit();
+
+  /* Wake the timer process to catch immediate/due insertions. */
   tiku_process_poll(&tiku_timer_process);
+}
+
+/**
+ * @brief Pop the head timer from the active list.
+ */
+static struct tiku_timer *
+timer_pop_head(void)
+{
+  struct tiku_timer *t = timer_list;
+
+  if (t != NULL) {
+    timer_list = t->next;
+    t->next = NULL;
+    t->active = 0;
+  }
+
+  return t;
 }
 
 /*---------------------------------------------------------------------------*/
@@ -86,9 +192,9 @@ static void timer_insert(struct tiku_timer *t) {
 
 TIKU_PROCESS(tiku_timer_process, "Timer");
 
-TIKU_PROCESS_THREAD(tiku_timer_process, ev, data) {
+TIKU_PROCESS_THREAD(tiku_timer_process, ev, data)
+{
   struct tiku_timer *t;
-  struct tiku_timer *prev;
 
   TIKU_PROCESS_BEGIN();
 
@@ -96,13 +202,14 @@ TIKU_PROCESS_THREAD(tiku_timer_process, ev, data) {
     TIKU_PROCESS_YIELD();
 
     /*
-     * Handle process exit: remove all timers belonging to
-     * the exited process.
+     * Handle process exit: remove all timers belonging to the exited process.
      */
     if (ev == TIKU_EVENT_EXITED) {
       struct tiku_process *dead = tiku_event_proc(ev, data);
       struct tiku_timer **pp = &timer_list;
+      uint8_t changed = 0;
 
+      tiku_atomic_enter();
       while (*pp != NULL) {
         if ((*pp)->p == dead) {
           struct tiku_timer *victim = *pp;
@@ -110,10 +217,15 @@ TIKU_PROCESS_THREAD(tiku_timer_process, ev, data) {
           *pp = victim->next;
           victim->next = NULL;
           victim->active = 0;
+          changed = 1;
         } else {
           pp = &(*pp)->next;
         }
       }
+      if (changed) {
+        timer_rearm_head();
+      }
+      tiku_atomic_exit();
       continue;
     }
 
@@ -122,53 +234,41 @@ TIKU_PROCESS_THREAD(tiku_timer_process, ev, data) {
     }
 
     /*
-     * If a critical-execution window is held, defer the scan.
-     * The poll re-issued from tiku_crit_end() will pick up any
-     * expirations that came due while the window was held.
-     * (The clock ISR also suppresses poll requests during a
-     * window, but check here too since other code can call
-     * tiku_timer_request_poll directly.)
+     * If a critical-execution window is held, defer the scan. The poll
+     * re-issued from tiku_crit_end() will pick up any expirations that came due
+     * while the window was held.
      */
     if (tiku_crit_active()) {
       continue;
     }
 
-    /*
-     * Scan for expired timers. We restart the scan after
-     * each dispatch because the callback or event handler
-     * might modify the list (set/stop/reset timers).
-     */
-  rescan:
-    prev = NULL;
-    for (t = timer_list; t != NULL; t = t->next) {
-      if (timer_is_due(t, tiku_clock_time())) {
-
-        /* Remove from list before dispatching */
-        if (prev != NULL) {
-          prev->next = t->next;
-        } else {
-          timer_list = t->next;
-        }
-        t->next = NULL;
-        t->active = 0;
-        timer_fire_count++;
-
-        /* Dispatch based on mode */
-        if (t->mode == TIKU_TIMER_MODE_CALLBACK && t->func != NULL) {
-          TIMER_PRINTF("Expired: callback dispatched\n");
-          TIKU_PROCESS_CONTEXT_BEGIN(t->p);
-          t->func(t->ptr);
-          TIKU_PROCESS_CONTEXT_END(t->p);
-        } else if (t->mode == TIKU_TIMER_MODE_EVENT && t->p != NULL) {
-          TIMER_PRINTF("Expired: event posted to %s\n", t->p->name);
-          tiku_process_post(t->p, TIKU_EVENT_TIMER, t);
-        }
-
-        /* Restart scan — list may have changed */
-        goto rescan;
+    while (timer_list != NULL && timer_is_due(timer_list, tiku_clock_time())) {
+      tiku_atomic_enter();
+      if (timer_list == NULL || !timer_is_due(timer_list, tiku_clock_time())) {
+        tiku_atomic_exit();
+        break;
       }
-      prev = t;
+      t = timer_pop_head();
+      timer_rearm_head();
+      tiku_atomic_exit();
+
+      timer_fire_count++;
+
+      /* Dispatch outside the atomic section: callbacks may reset timers. */
+      if (t->mode == TIKU_TIMER_MODE_CALLBACK && t->func != NULL) {
+        TIMER_PRINTF("Expired: callback dispatched\n");
+        TIKU_PROCESS_CONTEXT_BEGIN(t->p);
+        t->func(t->ptr);
+        TIKU_PROCESS_CONTEXT_END(t->p);
+      } else if (t->mode == TIKU_TIMER_MODE_EVENT && t->p != NULL) {
+        TIMER_PRINTF("Expired: event posted to %s\n", t->p->name);
+        tiku_process_post(t->p, TIKU_EVENT_TIMER, t);
+      }
     }
+
+    tiku_atomic_enter();
+    timer_rearm_head();
+    tiku_atomic_exit();
   }
 
   TIKU_PROCESS_END();
@@ -178,16 +278,23 @@ TIKU_PROCESS_THREAD(tiku_timer_process, ev, data) {
 /* PUBLIC API                                                                */
 /*---------------------------------------------------------------------------*/
 
-void tiku_timer_init(void) {
+void
+tiku_timer_init(void)
+{
   timer_list = NULL;
+  timer_fire_count = 0;
+  tiku_timer_arch_rearm(0, 0);
   tiku_process_start(&tiku_timer_process, NULL);
   TIMER_PRINTF("Init complete\n");
 }
 
 /*---------------------------------------------------------------------------*/
 
-void tiku_timer_set_callback(struct tiku_timer *t, tiku_clock_time_t ticks,
-                             tiku_timer_callback_t func, void *ptr) {
+void
+tiku_timer_set_callback(struct tiku_timer *t, tiku_clock_time_t ticks,
+                        tiku_timer_callback_t func, void *ptr)
+{
+  tiku_atomic_enter();
   t->start = tiku_clock_time();
   t->interval = ticks;
   t->mode = TIKU_TIMER_MODE_CALLBACK;
@@ -197,11 +304,15 @@ void tiku_timer_set_callback(struct tiku_timer *t, tiku_clock_time_t ticks,
 
   TIMER_PRINTF("Set callback: interval=%u ticks\n", ticks);
   timer_insert(t);
+  tiku_atomic_exit();
 }
 
 /*---------------------------------------------------------------------------*/
 
-void tiku_timer_set_event(struct tiku_timer *t, tiku_clock_time_t ticks) {
+void
+tiku_timer_set_event(struct tiku_timer *t, tiku_clock_time_t ticks)
+{
+  tiku_atomic_enter();
   t->start = tiku_clock_time();
   t->interval = ticks;
   t->mode = TIKU_TIMER_MODE_EVENT;
@@ -211,37 +322,54 @@ void tiku_timer_set_event(struct tiku_timer *t, tiku_clock_time_t ticks) {
 
   TIMER_PRINTF("Set event: interval=%u ticks\n", ticks);
   timer_insert(t);
+  tiku_atomic_exit();
 }
 
 /*---------------------------------------------------------------------------*/
 
-void tiku_timer_reset(struct tiku_timer *t) {
-  /* Drift-free: advance start by one interval from last start */
+void
+tiku_timer_reset(struct tiku_timer *t)
+{
+  tiku_atomic_enter();
+  /* Drift-free: advance start by one interval from last start. */
   t->start += t->interval;
   timer_insert(t);
+  tiku_atomic_exit();
 }
 
 /*---------------------------------------------------------------------------*/
 
-void tiku_timer_restart(struct tiku_timer *t) {
+void
+tiku_timer_restart(struct tiku_timer *t)
+{
+  tiku_atomic_enter();
   t->start = tiku_clock_time();
   timer_insert(t);
+  tiku_atomic_exit();
 }
 
 /*---------------------------------------------------------------------------*/
 
-void tiku_timer_stop(struct tiku_timer *t) {
+void
+tiku_timer_stop(struct tiku_timer *t)
+{
   TIMER_PRINTF("Stopped timer\n");
   timer_remove(t);
 }
 
 /*---------------------------------------------------------------------------*/
 
-int tiku_timer_expired(struct tiku_timer *t) { return !t->active; }
+int
+tiku_timer_expired(struct tiku_timer *t)
+{
+  return !t->active;
+}
 
 /*---------------------------------------------------------------------------*/
 
-tiku_clock_time_t tiku_timer_remaining(struct tiku_timer *t) {
+tiku_clock_time_t
+tiku_timer_remaining(struct tiku_timer *t)
+{
   tiku_clock_time_t elapsed;
 
   if (!t->active) {
@@ -257,35 +385,41 @@ tiku_clock_time_t tiku_timer_remaining(struct tiku_timer *t) {
 
 /*---------------------------------------------------------------------------*/
 
-tiku_clock_time_t tiku_timer_expiration_time(struct tiku_timer *t) {
-  return t->start + t->interval;
+tiku_clock_time_t
+tiku_timer_expiration_time(struct tiku_timer *t)
+{
+  return timer_expiration(t);
 }
 
 /*---------------------------------------------------------------------------*/
 
-void tiku_timer_request_poll(void) { tiku_process_poll(&tiku_timer_process); }
-
-/*---------------------------------------------------------------------------*/
-
-int tiku_timer_any_pending(void) { return timer_list != NULL; }
-
-/*---------------------------------------------------------------------------*/
-
-int tiku_timer_work_pending(void) {
-  struct tiku_timer *t;
-  tiku_clock_time_t now = tiku_clock_time();
-
-  for (t = timer_list; t != NULL; t = t->next) {
-    if (timer_is_due(t, now)) {
-      return 1;
-    }
-  }
-  return 0;
+void
+tiku_timer_request_poll(void)
+{
+  tiku_process_poll(&tiku_timer_process);
 }
 
 /*---------------------------------------------------------------------------*/
 
-int tiku_timer_owner_armed(const struct tiku_process *p) {
+int
+tiku_timer_any_pending(void)
+{
+  return timer_list != NULL;
+}
+
+/*---------------------------------------------------------------------------*/
+
+int
+tiku_timer_work_pending(void)
+{
+  return (timer_list != NULL && timer_is_due(timer_list, tiku_clock_time()));
+}
+
+/*---------------------------------------------------------------------------*/
+
+int
+tiku_timer_owner_armed(const struct tiku_process *p)
+{
   struct tiku_timer *t;
 
   for (t = timer_list; t != NULL; t = t->next) {
@@ -298,83 +432,68 @@ int tiku_timer_owner_armed(const struct tiku_process *p) {
 
 /*---------------------------------------------------------------------------*/
 
-uint8_t tiku_timer_count(void) {
-    struct tiku_timer *t;
-    uint8_t n = 0;
-    for (t = timer_list; t != NULL; t = t->next) { n++; }
-    return n;
-}
-
-uint16_t tiku_timer_fired(void) { return timer_fire_count; }
-
-struct tiku_timer *tiku_timer_get(uint8_t idx) {
-    struct tiku_timer *t;
-    uint8_t n = 0;
-    for (t = timer_list; t != NULL; t = t->next) {
-        if (n == idx) { return t; }
-        n++;
-    }
-    return (struct tiku_timer *)0;
-}
-
-/*---------------------------------------------------------------------------*/
-
-tiku_clock_time_t tiku_timer_next_expiration(void) {
+uint8_t
+tiku_timer_count(void)
+{
   struct tiku_timer *t;
-  tiku_clock_time_t now, nearest, dist;
-
-  if (timer_list == NULL) {
-    return 0;
-  }
-
-  now = tiku_clock_time();
-  nearest = timer_list->start + timer_list->interval;
-  dist = nearest - now;
-
-  for (t = timer_list->next; t != NULL; t = t->next) {
-    tiku_clock_time_t exp = t->start + t->interval;
-    tiku_clock_time_t d = exp - now;
-    if (d < dist) {
-      dist = d;
-      nearest = exp;
-    }
-  }
-
-  return nearest;
-}
-
-/*---------------------------------------------------------------------------*/
-
-tiku_clock_time_t tiku_timer_next_delay(void) {
-  struct tiku_timer *t;
-  tiku_clock_time_t now;
-  tiku_clock_time_t best = 0;
-  uint8_t have_best = 0;
-
-  if (timer_list == NULL) {
-    return 0;
-  }
-
-  now = tiku_clock_time();
+  uint8_t n = 0;
 
   for (t = timer_list; t != NULL; t = t->next) {
-    tiku_clock_time_t elapsed;
-    tiku_clock_time_t remaining;
+    n++;
+  }
+  return n;
+}
 
-    if (timer_is_due(t, now)) {
-      return 0;
+uint16_t
+tiku_timer_fired(void)
+{
+  return timer_fire_count;
+}
+
+struct tiku_timer *
+tiku_timer_get(uint8_t idx)
+{
+  struct tiku_timer *t;
+  uint8_t n = 0;
+
+  for (t = timer_list; t != NULL; t = t->next) {
+    if (n == idx) {
+      return t;
     }
+    n++;
+  }
+  return (struct tiku_timer *)0;
+}
 
-    elapsed = now - t->start;
-    remaining = t->interval - elapsed;
+/*---------------------------------------------------------------------------*/
 
-    if (!have_best || remaining < best) {
-      best = remaining;
-      have_best = 1;
-    }
+tiku_clock_time_t
+tiku_timer_next_expiration(void)
+{
+  if (timer_list == NULL) {
+    return 0;
   }
 
-  return best;
+  return timer_expiration(timer_list);
+}
+
+/*---------------------------------------------------------------------------*/
+
+tiku_clock_time_t
+tiku_timer_next_delay(void)
+{
+  tiku_clock_time_t now;
+
+  if (timer_list == NULL) {
+    return 0;
+  }
+
+  now = tiku_clock_time();
+  if (timer_is_due(timer_list, now)) {
+    return 0;
+  }
+
+  return (tiku_clock_time_t)(timer_expiration(timer_list) - now);
 }
 
 /*---------------------------------------------------------------------------*/
