@@ -287,6 +287,9 @@ tiku_spi_arch_close(void)
     cr1 &= ~SPI_CR1_SPE;
     SPI1->CR1 = cr1;
 
+    // Disable peripheral clock
+    RCC->APB2ENR &= ~RCC_APB2ENR_SPI1EN;
+    
     g_spi_ready = 0U;
     SPI_PRINTF("close\n");
 }
