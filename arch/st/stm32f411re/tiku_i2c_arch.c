@@ -669,7 +669,9 @@ tiku_i2c_arch_init(const tiku_i2c_config_t *config)
 void
 tiku_i2c_arch_close(void)
 {
+    // Disable peripheral and peripheral clock
     I2C1->CR1 = 0U;
+    RCC->APB1ENR &= ~RCC_APB1ENR_I2C1EN;
     g_i2c_ready = 0U;
 }
 
