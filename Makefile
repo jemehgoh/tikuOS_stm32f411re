@@ -1288,6 +1288,7 @@ SRCS += arch/st/stm32f411re/tiku_htimer_arch.c
 SRCS += arch/st/stm32f411re/tiku_i2c_arch.c
 SRCS += arch/st/stm32f411re/tiku_adc_arch.c
 SRCS += arch/st/stm32f411re/tiku_onewire_arch.c
+SRCS += arch/st/stm32f411re/tiku_rtc_arch.c
 SRCS += arch/st/stm32f411re/tiku_timer_arch.c
 SRCS += arch/st/stm32f411re/tiku_crit_arch.c
 SRCS += arch/st/stm32f411re/tiku_wake_arch.c
