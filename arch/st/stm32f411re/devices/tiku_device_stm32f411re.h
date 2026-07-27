@@ -69,6 +69,7 @@
 #define TIKU_DEVICE_FRAM_SIZE       (512UL * 1024UL)
 #define TIKU_DEVICE_FRAM_START      FLASH_BASE
 #define TIKU_DEVICE_FRAM_END        (FLASH_BASE + TIKU_DEVICE_FRAM_SIZE - 1UL)
+#define TIKU_DEVICE_NVM_LABEL       "Flash"   /**< NVM technology (UI label). */
 
 /*
  * Internal-flash sector geometry (STM32F411RE, 512 KB total):
