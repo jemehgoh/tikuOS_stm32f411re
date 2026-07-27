@@ -1,5 +1,5 @@
 /*
- * Tiku Operating System v0.05
+ * Tiku Operating System v0.06
  * Simple. Ubiquitous. Intelligence, Everywhere.
  * http://tiku-os.org
  *
@@ -85,6 +85,19 @@ void tiku_cpu_ambiq_dcache_clean(const void *addr, unsigned long len) {
 
 void tiku_cpu_ambiq_dcache_invalidate(const void *addr, unsigned long len) {
     (void)addr; (void)len;
+    CPU->CACHECTRL_b.INVALIDATE = 1u;
+    __DSB();
+    __ISB();
+}
+
+/**
+ * @brief Apollo4 Lite instruction-cache invalidate.
+ *
+ * The CACHECTRL cache is unified over MRAM (it serves instruction fetches
+ * too), so the I-side invalidate is the same whole-cache flush as the
+ * D-side one. Routed from the portable tiku_cpu_icache_invalidate() HAL.
+ */
+void tiku_cpu_ambiq_icache_invalidate(void) {
     CPU->CACHECTRL_b.INVALIDATE = 1u;
     __DSB();
     __ISB();

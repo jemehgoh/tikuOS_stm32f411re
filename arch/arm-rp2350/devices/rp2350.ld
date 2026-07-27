@@ -60,28 +60,42 @@ __flash_end   = ORIGIN(FLASH) + LENGTH(FLASH);
  * helpers use the flash OFFSET (from start of QSPI), not the absolute
  * XIP address; __tiku_nvm_flash_offset is that offset for convenience.
  *
- * Size matches one QSPI erase granule (4 KB).  The current .uninit
- * region is ~3 KB; growing past 4 KB will require multi-sector
- * backup which the arch driver does NOT support today. */
-__tiku_nvm_flash_size   = 0x1000;             /* 4 KB = one sector */
-__tiku_nvm_flash_offset = LENGTH(FLASH) - __tiku_nvm_flash_size;
-__tiku_nvm_flash_start  = ORIGIN(FLASH) + __tiku_nvm_flash_offset;
-__tiku_nvm_flash_end    = ORIGIN(FLASH) + LENGTH(FLASH);
+ * Size is one QSPI erase granule (4 KB) today; the arch driver commits
+ * the mirror sector-by-sector, so growing it really is the one-number
+ * change: raise __tiku_layout_durable_size below (in whole 4 KB
+ * sectors) and flush, restore and the .uninit budget ASSERT follow. */
+/* Canonical NVM layout: inputs + shared derivation (arch/common). */
+__tiku_layout_top          = ORIGIN(FLASH) + LENGTH(FLASH);
+__tiku_layout_code_cap     = ORIGIN(FLASH) + 0x60000;      /* 384 KB code */
+__tiku_layout_module_size  = 0x8000;                       /* 32 KB slot  */
+__tiku_layout_durable_size = 0x1000;                       /* 4 KB sector */
+INCLUDE arch/common/tiku_nvm_layout.ld
 
-/* Carved NVM region (substrate B): a ~3 MB slice of QSPI flash just below the
+__tiku_nvm_flash_size   = __tiku_layout_durable_size;
+__tiku_nvm_flash_start  = __tiku_layout_durable_start;
+__tiku_nvm_flash_end    = __tiku_layout_top;
+__tiku_nvm_flash_offset = __tiku_layout_durable_start - ORIGIN(FLASH);
+
+/* Carved NVM region (substrate B): a ~3.7 MB slice of QSPI flash just below the
  * 4 KB .uninit backup sector, owned by the /data file store + NVM tier via the
  * Flash region backend (arch/arm-rp2350/tiku_nvm_region_rp2350.c).  Sub-layout
- * (front->top): NVM tier extent (~124 KB, durable TIKU_MEM_NVM) | /data FS
- * extent (TIKU_NVMFS_FS_BYTES, 2.75 MB) | reserved tail (TIKU_NVM_RESERVED_BYTES,
- * 128 KB durable named data).  4 KB-sector aligned (the flash erase granule).
- * Code grows up from ORIGIN(FLASH) into the remaining 1 MB; an ASSERT in
- * SECTIONS guards the flash image against overrunning it.
+ * (front->top): NVM tier extent (32 KB, durable TIKU_MEM_NVM) | /data FS
+ * extent (all the rest, TIKU_NVMFS_FS_BYTES -- durable named data lives in it
+ * as files, not in a carved tail).  4 KB-sector aligned (the erase granule).
+ * Code grows up from ORIGIN(FLASH) into a 384 KB window -- the fleet-wide
+ * contract (P4); an ASSERT in SECTIONS guards the flash image against
+ * overrunning it.  The CYW43439 firmware blob does not fit that window and is
+ * not supposed to: it is data, bound for /data (P3a).
  *   __tiku_nvmfs_base   : XIP address (read in place by pointer); == 0x10100000
  *   __tiku_nvmfs_offset : byte offset from flash start (for the boot-ROM)
  *   __tiku_nvmfs_size   : ABSOLUTE symbol -- its ADDRESS is the size */
-__tiku_nvmfs_size   = 0x2FF000;     /* 3068 KB; leaves a 1 MB code budget */
-__tiku_nvmfs_offset = __tiku_nvm_flash_offset - __tiku_nvmfs_size;
-__tiku_nvmfs_base   = ORIGIN(FLASH) + __tiku_nvmfs_offset;
+/* Module slot: TOP 32 KB (8 erase sectors) of the code window, installed
+ * sector-by-sector via the boot-ROM path (header page programmed last).
+ * Symbols come from the shared derivation above. */
+
+/* __tiku_nvmfs_base/size come from the shared derivation; only the
+ * boot-ROM byte offset is platform-local. */
+__tiku_nvmfs_offset = __tiku_nvmfs_base - ORIGIN(FLASH);
 
 /* The Cortex-M loads the initial SP from the first vector entry.
  * Place it at the very top of SRAM and let the stack grow downward. */
@@ -245,7 +259,7 @@ SECTIONS
 
     /* The flash image (code + rodata + the .data load copy) must not grow up
      * into the carved NVM region below the backup sector. */
-    ASSERT(__data_load + (__data_end - __data_start) <= __tiku_nvmfs_base,
+    ASSERT(__data_load + (__data_end - __data_start) <= __tiku_module_slot,
            "ERROR: flash image overruns the carved NVM region")
 
     /DISCARD/ :

@@ -1,5 +1,5 @@
 /*
- * Tiku Operating System v0.05
+ * Tiku Operating System v0.06
  * Simple. Ubiquitous. Intelligence, Everywhere.
  * http://tiku-os.org
  *
@@ -141,6 +141,20 @@ process_line(const char *raw)
         }
         q = p;
         if (match_kw(&q, "IMPORT")) { exec_import(&q); return; }
+#if TIKU_BASIC_MODULE_ENABLE
+        q = p;
+        if (match_kw(&q, "MODLOAD")) {            /* Tier 3: install + run   */
+            SHELL_PRINTF(tiku_basic_module_load() == 0
+                         ? "module loaded\n" : "? module load failed\n");
+            return;
+        }
+        q = p;
+        if (match_kw(&q, "MODACT")) {             /* re-run resident module  */
+            SHELL_PRINTF(tiku_basic_module_activate() == 0
+                         ? "module activated\n" : "? no resident module\n");
+            return;
+        }
+#endif
 #if TIKU_BASIC_NAMED_SLOTS > 0
         q = p;
         if (match_kw(&q, "DIR")) {
@@ -307,7 +321,7 @@ process_line(const char *raw)
                 "  " SH_CYAN "Literals:  " SH_RST
                               " \\n \\t \\r \\\" \\\\ escapes inside \"...\".\n"
                 "  '?' is a PRINT alias; ' is a REM alias.\n"
-                "  SAVE/LOAD persist across reboots in FRAM.\n"
+                "  SAVE/LOAD persist across reboots in " TIKU_DEVICE_NVM_LABEL ".\n"
                 "  IMPORT \"/data/f\" merges a module of SUBs.\n"
                 "  Run `basic run` from the shell (or via `init add`)\n"
                 "    to autorun the saved program at boot.\n"
