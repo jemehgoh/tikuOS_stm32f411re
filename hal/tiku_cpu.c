@@ -1,5 +1,5 @@
 /*
- * Tiku Operating System v0.05
+ * Tiku Operating System v0.06
  * Simple. Ubiquitous. Intelligence, Everywhere.
  * http://tiku-os.org
  *
@@ -189,6 +189,13 @@ void tiku_cpu_dcache_invalidate(const void *addr, unsigned long len) {
 #elif defined(PLATFORM_NORDIC)
     (void)addr; (void)len;            /* nRF54L M33: no data cache */
 #endif
+}
+
+void tiku_cpu_icache_invalidate(void) {
+#if defined(PLATFORM_AMBIQ)
+    tiku_cpu_ambiq_icache_invalidate();
+#endif
+    /* MSP430 / RP2350 / nRF54L M33: no instruction cache -- no-op. */
 }
 
 /*---------------------------------------------------------------------------*/

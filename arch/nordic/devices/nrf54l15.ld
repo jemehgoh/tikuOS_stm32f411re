@@ -65,21 +65,33 @@ __sram_end    = ORIGIN(SRAM) + LENGTH(SRAM);
  * NOTE (2026-07-15 Ambiq-parity layout, kintsugi/memoryfix.md B.0): growing
  * these carves MOVES every cell/TFS address -- established DKs re-prime once
  * (primed != 0, /data empty).  Expected, one-time. */
-__tiku_nvm_rram_size  = 0x4000;                             /* 16 KB */
-__tiku_nvm_rram_start = ORIGIN(RRAM) + LENGTH(RRAM) - __tiku_nvm_rram_size;
-__tiku_nvm_rram_end   = ORIGIN(RRAM) + LENGTH(RRAM);
+/* Canonical NVM layout: inputs + shared derivation (arch/common). */
+__tiku_layout_top          = ORIGIN(RRAM) + LENGTH(RRAM);
+__tiku_layout_code_cap     = 0x60000;                       /* 384 KB code */
+/* 256 KB is the shared Nordic budget and the fleet-wide contract (P4); the LM20
+ * uses the same figure, so the module slot is at the same address on both parts.
+ * The L15 has no NPU and its largest measured image is 123 KB. */
+__tiku_layout_module_size  = 0x8000;                        /* 32 KB slot  */
+__tiku_layout_durable_size = 0x4000;                        /* 16 KB persist */
+INCLUDE arch/common/tiku_nvm_layout.ld
+
+__tiku_nvm_rram_size  = __tiku_layout_durable_size;
+__tiku_nvm_rram_start = __tiku_layout_durable_start;
+__tiku_nvm_rram_end   = __tiku_layout_top;
 
 /* Carved NVM region (the tiku_nvm_region backend), Ambiq-style layout:
- * NVM tier at the front | TFS FS extent (256 KB, TIKU_NVMFS_FS_BYTES) |
- * reserved named-slot tail (64 KB, TIKU_NVM_RESERVED_BYTES: BASIC saved
- * program + F1 run-state checkpoint).  A byte-writable RRAM span just BELOW
+ * NVM tier at the front (32 KB) | TFS FS extent (all the rest,
+ * TIKU_NVMFS_FS_BYTES -- BASIC's saved program and run-state checkpoint are
+ * files in it, not a carved tail).  A byte-writable RRAM span just BELOW
  * the durable-persist region; written in place behind the WEN gate (no
- * erase).  740 KB leaves a 768 KB code window below (image today ~110 KB;
- * the ASSERT at the bottom is the hard cap).  __tiku_nvmfs_size is an
+ * erase).  1092 KB of region sits below a 384 KB code window (largest measured
+ * image 123 KB; the ASSERT at the bottom is the hard cap).  __tiku_nvmfs_size is an
  * absolute symbol whose ADDRESS is the size (matches rp2350/ambiq). */
-__tiku_nvmfs_size = 0xB9000;                                /* 740 KB */
-__tiku_nvmfs_base = __tiku_nvm_rram_start - __tiku_nvmfs_size;
-__tiku_nvmfs_end  = __tiku_nvm_rram_start;
+/* Loadable-native-module slot (Tier 3, tiku_basic_module.h): 32 KB of
+ * byte-writable, EXECUTABLE RRAM at the TOP OF THE CODE WINDOW -- canonical
+ * layout order (2026-07): code | module | NVM region | persist.  Keep in
+ * sync with TIKU_MODULE_CARVE_ADDR (0x0C8000). */
+/* (module slot + NVM region symbols come from the shared derivation.) */
 
 /* The Cortex-M loads the initial SP from vector[0]; place it at the top of
  * SRAM and let the stack grow down toward .bss. */
@@ -190,7 +202,7 @@ SECTIONS
      * into the reserved NVM regions at the top of RRAM -- the filestore sits
      * just below the durable-persist region, so guard against the lower of
      * the two bases. */
-    ASSERT(__data_load + (__data_end - __data_start) <= __tiku_nvmfs_base,
+    ASSERT(__data_load + (__data_end - __data_start) <= __tiku_module_slot,
            "ERROR: RRAM image overruns the reserved NVM/persist regions")
 
     /* The durable persist data must fit inside the reserved region. */

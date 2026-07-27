@@ -1,5 +1,5 @@
 /*
- * Tiku Operating System v0.05
+ * Tiku Operating System v0.06
  * Simple. Ubiquitous. Intelligence, Everywhere.
  * http://tiku-os.org
  *
@@ -21,7 +21,7 @@
  *   - Ambiq : the FS extent of the memory-mapped NVM region -- read in place
  *             (no SRAM shadow), written via the region backend (MRAM bootrom),
  *             so files survive a power cut.  Sized in megabytes (see
- *             TIKU_NVMFS_FS_BYTES / TIKU_TFS_MAX_FILES), between the NVM tier's
+ *             derived from the carve at mount), above the NVM tier's
  *             bump extent (front) and the reserved durable tail.
  *   - else  : plain `.bss` (functional but volatile) until a backend lands.
  * When BASIC is built, the legacy /data/basic bridge to the interpreter's
@@ -37,17 +37,29 @@
 #include "tiku_vfs_tree_data.h"
 #include "tiku.h"
 
-#if defined(TIKU_SHELL_ENABLE)
+/*
+ * THE STORE IS NOT A SHELL FEATURE.
+ *
+ * This whole file used to sit inside `#if defined(TIKU_SHELL_ENABLE)`, because
+ * /data began life as the place BASIC kept its saved program.  That was fine
+ * while every tenant was a shell feature, and wrong as soon as one was not:
+ * loadable modules and radio firmware are kernel-level tenants that must mount
+ * and read the store in a build with no shell at all.
+ *
+ * So the file is now in two halves.  Everything down to the DYNAMIC-DIRECTORY
+ * OPS banner -- the backing memory, the backend, the mount, and the
+ * tiku_vfs_tree_data_store() accessor -- is always compiled.  The VFS
+ * presentation above it (the /data node, its dynamic ops, and the df snapshot)
+ * stays behind the shell gate, because a namespace entry with no shell to type
+ * at it is genuinely shell-shaped.
+ */
 
 #include <string.h>
 
 #include "kernel/fs/tiku_tfs.h"
 #include <kernel/memory/tiku_mem.h>      /* tiku_mpu_(un)lock_nvm, tiku_tier_nvm_write */
 #include "kernel/memory/tiku_nvm_region.h"
-
-#if TIKU_SHELL_CMD_BASIC
-#include "kernel/shell/basic/tiku_basic.h"
-#endif
+#include <kernel/memory/tiku_nvm_map.h>  /* TIKU_DEVICE_NVM_LABEL fallback */
 
 /*---------------------------------------------------------------------------*/
 /* NVM-BACKED FILE STORE FOR /data                                           */
@@ -62,8 +74,18 @@
  * Other parts: plain `.bss` (volatile) until a backend lands. */
 #if defined(PLATFORM_AMBIQ) || defined(PLATFORM_RP2350) || defined(PLATFORM_NORDIC)
 
-_Static_assert(TIKU_TFS_REGION_BYTES <= TIKU_NVMFS_FS_BYTES,
-               "TFS store larger than the region FS extent");
+/*
+ * The fit/fill assertions that stood here are GONE, not relaxed.
+ *
+ * They existed because TIKU_TFS_MAX_FILES was a hand-tuned number that had to
+ * be kept in step with the extent by hand: one caught a store too big for its
+ * extent, the other a store that left more than a file's worth of it idle.
+ * Capacity is now derived from the extent at mount, so "too big" cannot be
+ * expressed and "leaves space idle" is false by construction -- the derivation
+ * returns the largest count that fits, and the host suite asserts that adding
+ * one more file would not.  What remains worth checking is the FLOOR, which
+ * mount enforces at runtime because only the linker knows the real carve.
+ */
 
 static tiku_tfs_t          data_fs;
 static tiku_nvm_backend_t  data_be;
@@ -82,8 +104,8 @@ data_be_write(tiku_nvm_backend_t *be, size_t off, const void *src, size_t len)
  * @brief Lazily mount the /data file store over the carved NVM region.
  *
  * Idempotent: returns immediately once mounted.  Locates the region backend
- * (MRAM), places the FS extent between the tier extent (front) and the
- * reserved tail, and mounts the TFS over it.
+ * (MRAM), places the FS extent above the tier extent, and mounts the TFS over
+ * it.
  *
  * @return 0 once the store is ready; -1 if the region is absent or too small
  *         to hold the FS extent, or the TFS mount fails.
@@ -98,13 +120,21 @@ data_tfs_ensure(void)
     }
     rgn = tiku_nvm_backend_get();
     if (rgn == NULL || rgn->base == NULL ||
-        rgn->size < (size_t)TIKU_NVMFS_FS_BYTES + TIKU_NVM_RESERVED_BYTES) {
+        rgn->size <= (size_t)TIKU_NVM_TIER_BYTES) {
         return -1;
     }
-    /* FS extent: between the tier extent (front) and the reserved tail. */
-    data_be.base  = rgn->base +
-        (rgn->size - TIKU_NVMFS_FS_BYTES - TIKU_NVM_RESERVED_BYTES);
-    data_be.size  = TIKU_NVMFS_FS_BYTES;
+    /* FS extent: EVERYTHING above the tier, measured from the region the linker
+     * actually carved rather than from a constant describing it.
+     *
+     * The old form anchored the store to the top of the region and took a
+     * compile-time length, so a carve that disagreed with the C mirror silently
+     * lost the difference -- the failure that left 676 KB idle on an nRF54LM20.
+     * Now the only fixed number is the tier, which IS a platform contract, and
+     * the store takes the remainder: a bigger carve becomes more files (the
+     * store derives its capacity from this size), and a smaller one is caught by
+     * the floor check inside the mount rather than by arithmetic here. */
+    data_be.base  = rgn->base + TIKU_NVM_TIER_BYTES;
+    data_be.size  = rgn->size - TIKU_NVM_TIER_BYTES;
     data_be.write = data_be_write;
     data_be.erase = NULL;
     data_be.ctx   = NULL;
@@ -115,6 +145,34 @@ data_tfs_ensure(void)
     return 0;
 }
 
+/**
+ * @brief Report how the carved region is divided, for `df`.
+ *
+ * The two extents are compile-time constants; the region size is whatever the
+ * linker carved.  Publishing both, plus the difference, is what keeps the split
+ * honest at run time: `idle_bytes` is the number that was quietly 676 KB on the
+ * nRF54LM20 before v0.06, and it must read 0.  A non-zero value means
+ * TIKU_NVM_REGION_BYTES has fallen out of step with the device linker script.
+ *
+ * @param out  Snapshot to fill in (extent fields only).
+ */
+static void
+data_fill_extents(tiku_data_df_t *out)
+{
+    const tiku_nvm_backend_t *rgn = tiku_nvm_backend_get();
+
+    out->region_bytes = (rgn != NULL) ? (uint32_t)rgn->size : 0u;
+    out->tier_bytes   = (uint32_t)TIKU_NVM_TIER_BYTES;
+    out->fs_bytes     = (out->region_bytes > (uint32_t)TIKU_NVM_TIER_BYTES)
+                        ? (out->region_bytes - (uint32_t)TIKU_NVM_TIER_BYTES)
+                        : 0u;
+    /* Idle space is now STRUCTURALLY zero -- the two extents are the tier and
+     * "everything else", so they tile the carve by construction rather than by
+     * a table being kept in step.  The field stays because df prints it and a
+     * non-zero value would mean this arithmetic broke. */
+    out->idle_bytes   = 0u;
+}
+
 #else  /* MSP430 FRAM / host: a static backing array */
 
 #if defined(PLATFORM_MSP430)
@@ -123,7 +181,18 @@ data_tfs_ensure(void)
 #define DATA_TFS_SECTION                /* host: volatile test backing */
 #endif
 
-static DATA_TFS_SECTION uint8_t data_tfs_region[TIKU_TFS_REGION_BYTES];
+/*
+ * MSP430 and host have no carved extent to derive from -- the store's backing
+ * IS this array -- so here the geometry is stated rather than derived, and the
+ * array is sized from it.  Mount then derives the same count straight back,
+ * because TIKU_TFS_EXTENT_FOR_SLOTS is the exact inverse of the fit it does, so
+ * these platforms take the identical code path rather than a special case.
+ */
+#ifndef DATA_TFS_SLOTS
+#define DATA_TFS_SLOTS  TIKU_TFS_MIN_SLOTS
+#endif
+static DATA_TFS_SECTION uint8_t
+    data_tfs_region[TIKU_TFS_EXTENT_FOR_SLOTS(DATA_TFS_SLOTS)];
 static tiku_tfs_t          data_fs;
 static tiku_nvm_backend_t  data_be;
 static uint8_t             data_fs_ready;
@@ -176,6 +245,42 @@ data_tfs_ensure(void)
     return 0;
 }
 
+/**
+ * @brief Report the store's extent, for `df` (no carved region here).
+ *
+ * MSP430 and host builds size the backing array FROM the store's geometry, so
+ * the extent always fits exactly and there is no region to divide -- reporting
+ * a zero region tells `df` to omit the region breakdown entirely.
+ *
+ * @param out  Snapshot to fill in (extent fields only).
+ */
+static void
+data_fill_extents(tiku_data_df_t *out)
+{
+    out->region_bytes = 0u;
+    out->tier_bytes   = 0u;
+    out->fs_bytes     = (uint32_t)sizeof data_tfs_region;
+    out->idle_bytes   = 0u;
+}
+
+#endif
+
+/*===========================================================================*/
+/* VFS PRESENTATION -- shell-gated.  Everything ABOVE this line is the store   */
+/* itself and is always compiled; everything below turns it into a namespace   */
+/* entry, which is what needs a shell.                                        */
+/*
+ * NOTE ON THE TEST: `#if TIKU_SHELL_ENABLE`, on the VALUE, not
+ * `#if defined(TIKU_SHELL_ENABLE)`.  tiku.h:265 defines the macro
+ * UNCONDITIONALLY (to 0 when the shell is off), so the `defined()` form is
+ * always true -- which is why the gate this file used to carry never actually
+ * excluded anything, and why the rest of kernel/vfs/tree/ spells it this way.
+ */
+/*===========================================================================*/
+#if TIKU_SHELL_ENABLE
+
+#if TIKU_SHELL_CMD_BASIC
+#include "kernel/shell/basic/tiku_basic.h"
 #endif
 
 /*---------------------------------------------------------------------------*/
@@ -396,20 +501,14 @@ tiku_vfs_tree_data_df(tiku_data_df_t *out)
     (void)tiku_tfs_list(&data_fs, data_df_thunk, &acc);
     out->used_files = acc.files;
     out->used_bytes = acc.bytes;
-    out->max_files  = (uint16_t)TIKU_TFS_MAX_FILES;
+    out->max_files  = data_fs.nfiles;          /* derived at mount */
     out->slot_bytes = (uint16_t)TIKU_TFS_SLOT_DATA;
-    out->cap_bytes  = (uint32_t)TIKU_TFS_MAX_FILES * (uint32_t)TIKU_TFS_SLOT_DATA;
-#if defined(PLATFORM_AMBIQ)
-    out->backing = "MRAM";
-#elif defined(PLATFORM_MSP430)
-    out->backing = "FRAM";
-#elif defined(PLATFORM_RP2350)
-    out->backing = "Flash";  /* carved QSPI region, erase+program backend */
-#elif defined(PLATFORM_NORDIC)
-    out->backing = "RRAM";   /* carved byte-writable RRAM region, WEN-gated */
-#else
-    out->backing = "RAM*";   /* volatile until a backend lands */
-#endif
+    out->cap_bytes  = (uint32_t)data_fs.nfiles * (uint32_t)TIKU_TFS_SLOT_DATA;
+    /* One source of truth for what to CALL the NVM: the device header's
+     * TIKU_DEVICE_NVM_LABEL (FRAM / RRAM / MRAM / Flash).  This used to be a
+     * per-platform ladder here, which is exactly how a second copy drifts. */
+    out->backing = TIKU_DEVICE_NVM_LABEL;
+    data_fill_extents(out);
     return 0;
 }
 
@@ -423,4 +522,15 @@ tiku_vfs_tree_data_get(void)
     return &data_node;
 }
 
-#endif /* TIKU_SHELL_ENABLE */
+#endif /* TIKU_SHELL_ENABLE -- VFS presentation ends here */
+
+tiku_tfs_t *
+tiku_vfs_tree_data_store(void)
+{
+    /* Same lazy mount the VFS nodes use; callers that want whole objects
+     * (tiku_blob) work against the store rather than through path reads. */
+    if (data_tfs_ensure() != 0) {
+        return NULL;
+    }
+    return &data_fs;
+}

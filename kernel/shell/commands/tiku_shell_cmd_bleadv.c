@@ -1,5 +1,5 @@
 /*
- * Tiku Operating System v0.05
+ * Tiku Operating System v0.06
  * Simple. Ubiquitous. Intelligence, Everywhere.
  * http://tiku-os.org
  *
@@ -67,13 +67,16 @@
 #include <arch/nordic/tiku_nordic_core.h>    /* wfe (ext pacing)                */
 #include <kernel/cpu/tiku_common.h>          /* unique id -> AdvA (ext)         */
 #include <interfaces/bluetooth/tiku_ble_smp_pair.h> /* Phase E: SMP LTK readout */
+#include <interfaces/bluetooth/tiku_ble_bond.h>      /* durable LTK bond store   */
 #if (TIKU_FLPR_ENABLE + 0)
 #include <arch/nordic/tiku_flpr_arch.h>      /* L6: FLPR-as-controller (F-L6.1) */
 #include <interfaces/bluetooth/tiku_ble_serial.h> /* facade (B3 auto-reconnect) */
 #include <interfaces/bluetooth/tiku_ble_host.h>   /* Phase B: M33 ATT/GATT host */
 #include <interfaces/bluetooth/tiku_ble_smp.h>     /* Phase E: SMP LESC crypto  */
 #include <arch/nordic/tiku_crypto_arch.h>          /* E3c: AES-CCM decrypt      */
+#include <arch/nordic/tiku_ble_ccm_arch.h>         /* CCM00 hardware CCM KAT    */
 #include <interfaces/bluetooth/tiku_ble_enc.h>     /* E3c: demo params + nonce  */
+#include <arch/nordic/flpr/tiku_flpr_ipc.h>        /* F1: DLE frag buffer size  */
 #endif
 #include <kernel/cpu/tiku_watchdog.h>        /* kick across the ext loop        */
 #include <stdlib.h>
@@ -81,6 +84,31 @@
 
 /* SHELL_PRINTF has no %02X, so format an address (host order: MSB first)
  * into "AA:BB:CC:DD:EE:FF" ourselves. */
+/* Parse "AA:BB:CC:DD:EE:FF" (as bleadv_fmt_addr prints, MSB first) into the
+ * packet byte order out[0..5] (LSB first).  Returns 1 on a clean parse. */
+static int bleadv_parse_addr(const char *s, uint8_t out[6])
+{
+    int i, hi, lo;
+    for (i = 5; i >= 0; i--) {
+        hi = (int)*s++;
+        lo = (int)*s++;
+        hi = (hi >= '0' && hi <= '9') ? hi - '0'
+           : (hi >= 'A' && hi <= 'F') ? hi - 'A' + 10
+           : (hi >= 'a' && hi <= 'f') ? hi - 'a' + 10 : -1;
+        lo = (lo >= '0' && lo <= '9') ? lo - '0'
+           : (lo >= 'A' && lo <= 'F') ? lo - 'A' + 10
+           : (lo >= 'a' && lo <= 'f') ? lo - 'a' + 10 : -1;
+        if (hi < 0 || lo < 0) {
+            return 0;
+        }
+        out[i] = (uint8_t)((hi << 4) | lo);      /* MSB token -> out[5..0]   */
+        if (i && *s == ':') {
+            s++;
+        }
+    }
+    return 1;
+}
+
 static void bleadv_fmt_addr(char *out, const uint8_t addr[6])
 {
     static const char hex[] = "0123456789ABCDEF";
@@ -247,12 +275,16 @@ static void bleadv_phytx(uint8_t argc, const char *argv[])
     const char *pn = (argc > 2u) ? argv[2] : "1m";
     tiku_radio_arch_phy_t phy = bleadv_phy_of(pn);
     long n = (argc > 3u) ? (long)strtoul(argv[3], (char **)0, 10) : 100;
-    uint8_t pdu[8];
+    long plen = (argc > 4u) ? (long)strtoul(argv[4], (char **)0, 10) : 4;
+    uint8_t pdu[40];
     uint16_t i;
     uint32_t sent = 0u;
 
     if (n <= 0 || n > 5000) {
         n = 100;
+    }
+    if (plen < 4 || plen > 36) {
+        plen = 4;
     }
     if (tiku_ble_adv_active()) {
         SHELL_PRINTF(SH_RED "stop the beacon first (bleadv off)\n" SH_RST);
@@ -260,8 +292,11 @@ static void bleadv_phytx(uint8_t argc, const char *argv[])
     }
     tiku_radio_arch_init();
     pdu[0] = 0x42u;                              /* S0: ADV_NONCONN_IND head   */
-    pdu[1] = 4u;                                 /* LEN: 4-byte payload        */
+    pdu[1] = (uint8_t)plen;                      /* LEN                        */
     pdu[3] = 'P'; pdu[4] = 'H'; pdu[5] = 'Y';    /* magic tag                  */
+    for (i = 6u; i < (uint16_t)(3 + plen); i++) {
+        pdu[i] = (uint8_t)(0xA5u ^ i);           /* deterministic filler       */
+    }
     SHELL_PRINTF("PHY TX %s ch37: %ld pkts...\n", pn, n);
     tiku_radio_arch_constlat_hold(1);            /* erratum 20 across the run  */
     for (i = 0u; i < (uint16_t)n; i++) {
@@ -598,6 +633,114 @@ static void bleadv_censmp(unsigned secs)
     }
 }
 
+/* Bonding: central + durable LTK.  First run to a peer pairs (LE-SC) and
+ * stores {AdvA -> LTK}; a reconnect finds the bond, SKIPS pairing, and
+ * encrypts with the stored LTK.  Survives reboot (RRAM persist cell). */
+static void bleadv_cenbond(unsigned secs, const char *target)
+{
+    uint8_t addr[6], sk[16], taddr[6];
+    tiku_radio_ll_conn_stats_t st;
+    char addrstr[18];
+    int bonded, by_addr = 0;
+
+    if (tiku_ble_adv_owner() != TIKU_BLE_ADV_OWNER_IDLE) {
+        SHELL_PRINTF(SH_RED "radio busy (%s)\n" SH_RST,
+                     tiku_ble_adv_owner_str());
+        return;
+    }
+    tiku_common_unique_id(addr, 6u);
+    addr[5] |= 0xC0u;
+    bleadv_fmt_addr(addrstr, addr);
+    tiku_ble_smp_pair_reset();
+    tiku_radio_arch_central_bond(1u);             /* arm pair+remember/reuse  */
+    /* Optional scan-BY-ADDRESS: connect to a specific AdvA instead of the
+     * "TIKU" name (central hardening). */
+    if (target != (const char *)0 && bleadv_parse_addr(target, taddr)) {
+        tiku_radio_arch_central_target(taddr);
+        by_addr = 1;
+    } else {
+        tiku_radio_arch_central_target((const uint8_t *)0);
+    }
+    SHELL_PRINTF("CENTRAL %s: %s, bonding (bonds=%u) up to %u s...\n", addrstr,
+                 by_addr ? "connecting by ADDRESS" : "scanning for TIKU-PAIR",
+                 (unsigned)tiku_ble_bond_count(), secs);
+    (void)tiku_radio_arch_central(addr, secs, &st);
+    bonded = tiku_radio_arch_central_bonded();
+    tiku_radio_arch_central_bond(0u);
+    tiku_radio_arch_central_target((const uint8_t *)0);   /* clear filter    */
+
+    SHELL_PRINTF("  events=%lu rx_ok=%lu (%lu%% responded) AA=%08lx\n",
+                 (unsigned long)st.events, (unsigned long)st.rx_ok,
+                 st.events ? (unsigned long)(st.rx_ok * 100u / st.events)
+                           : 0ul,
+                 (unsigned long)tiku_radio_arch_dbg_cen_aa);
+    if (tiku_radio_arch_central_enc(sk)) {
+        char hx[40];
+        bleadv_fmt_hex(hx, sk, 16, 0);
+        if (bonded) {
+            SHELL_PRINTF(SH_GREEN "  BOND OK: reused stored LTK (skipped "
+                         "pairing), SK=%s\n" SH_RST, hx);
+        } else {
+            SHELL_PRINTF(SH_GREEN "  PAIRED+STORED: fresh LTK bonded, SK=%s\n"
+                         SH_RST, hx);
+        }
+        SHELL_PRINTF("  bonds=%u\n", (unsigned)tiku_ble_bond_count());
+    } else {
+        SHELL_PRINTF(SH_RED "  encryption did not complete (bonded=%d)\n" SH_RST,
+                     bonded);
+    }
+}
+
+/* Phase F2: central + PHY update.  Connects to TIKU-CONN, runs the NUS
+ * loopback, then drives a PHY update (LL_PHY_REQ/RSP -> UPDATE_IND at an
+ * Instant) and keeps servicing on the new PHY.  Survival = it worked.
+ * @p target 1 = 2M, 2 = Coded S8. */
+static void bleadv_cenphy(unsigned secs, uint8_t target)
+{
+    uint8_t addr[6];
+    tiku_radio_ll_conn_stats_t st;
+    char addrstr[18];
+    const char *pn = (target == 2u) ? "CODED-S8" : "2M";
+    int rc;
+
+    if (tiku_ble_adv_owner() != TIKU_BLE_ADV_OWNER_IDLE) {
+        SHELL_PRINTF(SH_RED "radio busy (%s)\n" SH_RST,
+                     tiku_ble_adv_owner_str());
+        return;
+    }
+    tiku_common_unique_id(addr, 6u);
+    addr[5] |= 0xC0u;
+    bleadv_fmt_addr(addrstr, addr);
+    tiku_radio_arch_central_phy(target);          /* arm the PHY update       */
+    SHELL_PRINTF("CENTRAL %s: scanning for TIKU-CONN, will update PHY -> %s"
+                 " up to %u s...\n", addrstr, pn, secs);
+    rc = tiku_radio_arch_central(addr, secs, &st);
+    tiku_radio_arch_central_phy(0u);
+    if (rc != 0) {
+        SHELL_PRINTF("no TIKU-CONN peripheral found in %u s\n", secs);
+        return;
+    }
+    SHELL_PRINTF("  events=%lu rx_ok=%lu (%lu%% responded)\n",
+                 (unsigned long)st.events, (unsigned long)st.rx_ok,
+                 st.events ? (unsigned long)(st.rx_ok * 100u / st.events)
+                           : 0ul);
+    {
+        uint16_t survived = 0u;
+        if (tiku_radio_arch_central_phy_result(&survived) && survived > 20u) {
+            SHELL_PRINTF(SH_GREEN "  PHY OK: switched to %s, survived %u events"
+                         " on %s\n" SH_RST, pn, (unsigned)survived, pn);
+        } else {
+            uint32_t dbg = tiku_radio_arch_dbg_phy;
+            SHELL_PRINTF(SH_RED "  PHY: did not survive (survived=%u; stage=%lu"
+                         " att=%lu rsp=%lu mode=%lu)\n" SH_RST,
+                         (unsigned)survived, (unsigned long)(dbg & 0xFFu),
+                         (unsigned long)((dbg >> 8) & 0xFFu),
+                         (unsigned long)((dbg >> 16) & 0xFFu),
+                         (unsigned long)((dbg >> 24) & 0xFFu));
+        }
+    }
+}
+
 /* L3: advertise connectably, accept a central, HOLD the link.  Blocking
  * (parks the shell while connected); a real central (nRF Connect on a
  * phone) is the oracle.  Exit: link held for many events / minutes. */
@@ -822,6 +965,24 @@ static void bleadv_flpradv(void)
  * exercising the tiku_ble_serial recv/send primitives end to end. */
 /* Drain the host's pending TX PDU as data-PDU-sized fragments, each tagged
  * with its LLID (2 start / 1 continuation), flow-controlled by the mailbox. */
+/* CCM00-inline foundation: hardware AES-CCM KAT vs the two-board-proven
+ * software path (encrypt match + decrypt round-trip + tamper reject). */
+static void bleadv_ccmhw(void)
+{
+    int r = tiku_ble_ccm_arch_selftest();
+    SHELL_PRINTF("CCM00 hardware AES-CCM self-test:\n");
+    SHELL_PRINTF("  encrypt == software CCM:   %s\n",
+                 (r & 1) ? SH_GREEN "PASS" SH_RST : SH_RED "FAIL" SH_RST);
+    SHELL_PRINTF("  decrypt + MIC verified:    %s\n",
+                 (r & 2) ? SH_GREEN "PASS" SH_RST : SH_RED "FAIL" SH_RST);
+    SHELL_PRINTF("  tampered MIC rejected:     %s\n",
+                 (r & 4) ? SH_GREEN "PASS" SH_RST : SH_RED "FAIL" SH_RST);
+    if (r == 7) {
+        SHELL_PRINTF(SH_GREEN "  CCM00 OK: typed job lists + reversed "
+                     "KEY/NONCE -- inline LL crypt buildable\n" SH_RST);
+    }
+}
+
 /* Phase E foundation: SMP LESC crypto self-test (AES-CMAC RFC-4493 KAT +
  * P-256 ECDH round-trip) -- the primitives pairing is built on. */
 static void bleadv_smp(void)
@@ -901,7 +1062,8 @@ static void bleadv_flprnus(uint8_t req_cpu)
     SHELL_PRINTF("  connected; M33 NUS host live (ATT on M33), echoing"
                  " RX->TX ~15 s...\n");
     {
-        uint8_t frame[40], nus[TIKU_BLE_HOST_MTU];
+        uint8_t frame[TIKU_FLPR_DLE_MAX_OCTETS];  /* F1: hold a DLE LL PDU    */
+        uint8_t nus[TIKU_BLE_HOST_MTU];
         char hx[50];
         uint32_t total = 0u;
         tiku_clock_time_t start = tiku_clock_time();
@@ -913,6 +1075,10 @@ static void bleadv_flprnus(uint8_t req_cpu)
              * write surfaces bytes we echo back as a notification. */
             uint8_t llid_in;
             int n;
+            uint32_t dm = tiku_flpr_arch_dle_max();   /* F1: DLE negotiated?  */
+            if (dm > 27u) {
+                tiku_ble_host_set_frag_max((uint8_t)dm);
+            }
             bleadv_flpr_drain_tx();               /* flush pending TX first   */
             n = tiku_flpr_arch_conn_recv(frame, sizeof(frame), &llid_in);
             if (n > 0) {
@@ -998,14 +1164,59 @@ static void bleadv_flprnus(uint8_t req_cpu)
         } else {
             SHELL_PRINTF("  no NUS bytes received (client didn't write?)\n");
         }
+        {   /* Phase F1: DLE negotiated + proof a whole L2CAP PDU rode one LL
+             * PDU (single-fragment RX > the 31-byte legacy L2CAP max). */
+            uint32_t dm = tiku_flpr_arch_dle_max();
+            uint16_t single = tiku_ble_host_max_single_frag();
+            if (dm > 27u && single > 31u) {
+                SHELL_PRINTF(SH_GREEN "  DLE OK: max=%lu octets, a %u-byte "
+                             "L2CAP PDU rode ONE LL PDU\n" SH_RST,
+                             (unsigned long)dm, (unsigned)single);
+            } else {
+                SHELL_PRINTF("  DLE: max=%lu single-frag=%u (not exercised)\n",
+                             (unsigned long)dm, (unsigned)single);
+            }
+        }
+        {   /* Phase F2: PHY update applied by the FLPR at its Instant?  Survival
+             * = events serviced since the switch (a rising count = link held). */
+            uint32_t phy_at = 0u;
+            uint32_t phy = tiku_flpr_arch_conn_phy(&phy_at);
+            uint32_t ev  = tiku_flpr_arch_conn_events();
+            uint32_t pm = 0u, pa = 0u, pc = 0u;
+            const char *pn = (phy == 2u) ? "CODED-S8" : "2M";
+            tiku_flpr_arch_conn_phy_diag(&pm, &pa, &pc);
+            if (phy != 0u && ev > phy_at + 20u) {
+                SHELL_PRINTF(SH_GREEN "  PHY OK: switched to %s, survived %lu"
+                             " events on %s\n" SH_RST, pn,
+                             (unsigned long)(ev - phy_at), pn);
+            } else if (phy != 0u) {
+                SHELL_PRINTF("  PHY: switched to %s, survived %lu events\n",
+                             pn, (unsigned long)(ev - phy_at));
+            }
+            if (phy != 0u) {                /* F2 diag (radioleft.md) */
+                SHELL_PRINTF("  PHY diag: mode=%lu addr=%lu crcok=%lu\n",
+                             (unsigned long)pm, (unsigned long)pa,
+                             (unsigned long)pc);
+            }
+        }
     }
+    /* Leave NOTHING behind: park the FLPR's hold loop, reclaim the secure
+     * RADIO alias, release constlat.  Without this the FLPR keeps chasing
+     * the dead link and owns the NS RADIO -- the next run's re-init writes
+     * to the secure alias are blocked, so residual link config (after F2,
+     * 2M MODE) leaks into the next advertising session and the central
+     * scans 1M in vain (the old "rerun without reboot flakes" gotcha). */
+    tiku_flpr_arch_conn_stop();
+    tiku_radio_arch_constlat_hold(0);
 }
 
 /* Phase E: SMP pairing RESPONDER.  Advertise, hold the link, and let the
  * M33 host drive LE Secure Connections "Just Works" on CID 0x0006 to a shared
  * LTK.  Prints the derived LTK (the peer central prints its own; a two-board
- * suite asserts they match). */
-static void bleadv_flprpair(void)
+ * suite asserts they match).  @p bond_mode: remember the LTK against the
+ * central's address and, on a reconnect from a known central, SKIP pairing
+ * and encrypt with the stored LTK. */
+static void bleadv_flprpair(uint8_t bond_mode)
 {
     uint8_t addr[6], ad[31], adv[48];
     uint8_t adlen = 0u, advlen;
@@ -1032,8 +1243,12 @@ static void bleadv_flprpair(void)
     advlen = tiku_radio_arch_adv_build(adv, addr, ad, adlen);
     adv[0] = 0x40u;                               /* ADV_IND, random TxAdd    */
 
-    SHELL_PRINTF("FLPR SMP pair: advertising 'TIKU-PAIR' -- run 'bleadv censmp'"
-                 " on the peer...\n");
+    {   /* Print our AdvA so a peer can connect scan-BY-ADDRESS to it. */
+        char astr[18];
+        bleadv_fmt_addr(astr, addr);
+        SHELL_PRINTF("FLPR SMP pair: advertising 'TIKU-PAIR' as %s -- run "
+                     "'bleadv censmp' on the peer...\n", astr);
+    }
     tiku_radio_arch_init();
     NRF_RADIO_S->TIFS = 150u;
     tiku_radio_arch_constlat_hold(1);
@@ -1044,23 +1259,38 @@ static void bleadv_flprpair(void)
         return;
     }
     {
-        uint8_t frame[40], inita[6], adva[6], types;
+        uint8_t frame[TIKU_FLPR_DLE_MAX_OCTETS];  /* F1: hold a DLE LL PDU    */
+        uint8_t inita[6], adva[6], types;
         uint8_t ltk[16], sk[16], iv[8];
-        int paired = 0, enc_done = 0, dec_ok = 0;
+        int paired = 0, enc_done = 0, dec_ok = 0, bonded = 0, bond_saved = 0;
         tiku_clock_time_t start = tiku_clock_time();
 
         tiku_ble_host_reset();
         types = tiku_flpr_arch_conn_addrs(inita, adva);   /* A=InitA, B=AdvA  */
-        tiku_ble_host_smp_start(inita, (uint8_t)(types & 1u),
-                                adva, (uint8_t)((types >> 1) & 1u));
-        SHELL_PRINTF("  connected; responder armed (central %02x%02x%02x%02x"
-                     "%02x%02x) -- pairing...\n", inita[5], inita[4], inita[3],
-                     inita[2], inita[1], inita[0]);
+        /* Bonding: a known central skips pairing -- load its stored LTK and
+         * go straight to the LL-encryption wait (no SMP responder armed). */
+        if (bond_mode &&
+            tiku_ble_bond_find(inita, (uint8_t)(types & 1u), ltk)) {
+            bonded = 1; paired = 1;
+            SHELL_PRINTF("  connected; BONDED central %02x%02x%02x%02x%02x%02x"
+                         " -- skipping pairing\n", inita[5], inita[4], inita[3],
+                         inita[2], inita[1], inita[0]);
+        } else {
+            tiku_ble_host_smp_start(inita, (uint8_t)(types & 1u),
+                                    adva, (uint8_t)((types >> 1) & 1u));
+            SHELL_PRINTF("  connected; responder armed (central %02x%02x%02x%02x"
+                         "%02x%02x) -- pairing...\n", inita[5], inita[4],
+                         inita[3], inita[2], inita[1], inita[0]);
+        }
 
         while ((tiku_clock_time_t)(tiku_clock_time() - start) <
                (tiku_clock_time_t)(TIKU_CLOCK_SECOND * 15u)) {
             uint8_t llid_in;
             int n;
+            uint32_t dm = tiku_flpr_arch_dle_max();   /* F1: DLE negotiated?  */
+            if (dm > 27u) {
+                tiku_ble_host_set_frag_max((uint8_t)dm);
+            }
             bleadv_flpr_drain_tx();                /* flush any staged reply   */
             n = tiku_flpr_arch_conn_recv(frame, sizeof(frame), &llid_in);
             if (n > 0) {
@@ -1074,6 +1304,12 @@ static void bleadv_flprpair(void)
             if (tiku_ble_host_smp_state() >= 2 && !paired) {
                 paired = 1;
                 (void)tiku_ble_host_smp_ltk(ltk);
+            }
+            /* Fresh pairing done: remember the LTK so the NEXT reconnect from
+             * this central skips SMP (bonding).  Store once, durably. */
+            if (bond_mode && paired && !bonded && !bond_saved) {
+                (void)tiku_ble_bond_store(inita, (uint8_t)(types & 1u), ltk);
+                bond_saved = 1;
             }
             /* Phase E3: once paired, derive the session key when the central
              * starts LL encryption (the FLPR forwards SKDm/IVm to us). */
@@ -1091,12 +1327,14 @@ static void bleadv_flprpair(void)
                     static const uint8_t want[TIKU_BLE_ENC_DEMO_PT_LEN] =
                         TIKU_BLE_ENC_DEMO_PT;
                     uint8_t nonce[13], aad = TIKU_BLE_ENC_DEMO_AAD;
-                    uint8_t pt[TIKU_BLE_ENC_DEMO_PT_LEN], rmic[4];
+                    uint8_t pt[TIKU_BLE_ENC_DEMO_PT_LEN];
                     tiku_ble_enc_nonce(nonce, 0u, 1u, iv);   /* central->us    */
-                    if (tiku_crypto_arch_aes_ccm_star(
-                            1, sk, 16u, nonce, &aad, 1u, cbuf,
-                            TIKU_BLE_ENC_DEMO_PT_LEN, 4u, pt, rmic) == 0 &&
-                        memcmp(rmic, &cbuf[TIKU_BLE_ENC_DEMO_PT_LEN], 4) == 0 &&
+                    /* Decrypt + MIC-verify on CCM00 (the RADIO-companion
+                     * hardware engine) -- the same over-the-air ciphertext
+                     * the software path proved, now through CCM00 end to
+                     * end (CCM00-inline foundation over real traffic). */
+                    if (tiku_ble_ccm_arch_crypt(1, sk, nonce, aad, cbuf,
+                            TIKU_BLE_ENC_DEMO_PT_LEN, pt) == 0 &&
                         memcmp(pt, want, TIKU_BLE_ENC_DEMO_PT_LEN) == 0) {
                         dec_ok = 1;
                     }
@@ -1109,10 +1347,15 @@ static void bleadv_flprpair(void)
         }
         tiku_flpr_arch_conn_stop();
         tiku_radio_arch_constlat_hold(0);
-        if (paired && tiku_ble_host_smp_state() == 2) {
+        if (bonded || (paired && tiku_ble_host_smp_state() == 2)) {
             char hx[40];
             bleadv_fmt_hex(hx, ltk, 16, 0);
-            SHELL_PRINTF(SH_GREEN "  SMP OK: LTK=%s\n" SH_RST, hx);
+            if (bonded) {
+                SHELL_PRINTF(SH_GREEN "  BOND OK: reused stored LTK=%s "
+                             "(skipped pairing)\n" SH_RST, hx);
+            } else {
+                SHELL_PRINTF(SH_GREEN "  SMP OK: LTK=%s\n" SH_RST, hx);
+            }
             if (enc_done) {
                 bleadv_fmt_hex(hx, sk, 16, 0);
                 SHELL_PRINTF(SH_GREEN "  ENC OK: SK=%s\n" SH_RST, hx);
@@ -1124,6 +1367,9 @@ static void bleadv_flprpair(void)
                 }
             } else {
                 SHELL_PRINTF("  ENC: no LL_ENC_REQ from central\n");
+            }
+            if (bond_mode) {
+                SHELL_PRINTF("  bonds=%u\n", (unsigned)tiku_ble_bond_count());
             }
         } else {
             SHELL_PRINTF(SH_RED "  SMP pairing did not complete (state=%d)\n"
@@ -1206,6 +1452,10 @@ void tiku_shell_cmd_bleadv(uint8_t argc, const char *argv[])
         bleadv_smp();
         return;
     }
+    if (strcmp(argv[1], "ccmhw") == 0) {          /* CCM00 hardware CCM KAT   */
+        bleadv_ccmhw();
+        return;
+    }
     if (strcmp(argv[1], "flprnus") == 0) {
         bleadv_flprnus(0u);
         return;
@@ -1215,7 +1465,16 @@ void tiku_shell_cmd_bleadv(uint8_t argc, const char *argv[])
         return;
     }
     if (strcmp(argv[1], "flprpair") == 0) {       /* Phase E: SMP responder    */
-        bleadv_flprpair();
+        bleadv_flprpair(0u);
+        return;
+    }
+    if (strcmp(argv[1], "flprbond") == 0) {       /* bonding: remember/reuse   */
+        if (argc >= 3 && strcmp(argv[2], "clear") == 0) {
+            tiku_ble_bond_clear();
+            SHELL_PRINTF("bonds cleared\n");
+            return;
+        }
+        bleadv_flprpair(1u);
         return;
     }
     if (strcmp(argv[1], "serial") == 0) {
@@ -1296,6 +1555,37 @@ void tiku_shell_cmd_bleadv(uint8_t argc, const char *argv[])
             if (v > 0 && v <= 600) { s = (unsigned)v; }
         }
         bleadv_censmp(s);
+        return;
+    }
+    if (strcmp(argv[1], "cenbond") == 0) {        /* bonding: pair/reuse LTK   */
+        unsigned s = 30u;
+        const char *target = (const char *)0;
+        if (argc >= 3 && strcmp(argv[2], "clear") == 0) {
+            tiku_ble_bond_clear();
+            SHELL_PRINTF("bonds cleared\n");
+            return;
+        }
+        if (argc >= 3) {
+            long v = strtol(argv[2], (char **)0, 10);
+            if (v > 0 && v <= 600) { s = (unsigned)v; }
+        }
+        if (argc >= 4) {                           /* scan-by-address arg     */
+            target = argv[3];
+        }
+        bleadv_cenbond(s, target);
+        return;
+    }
+    if (strcmp(argv[1], "cenphy") == 0) {   /* F2: PHY update (2M / coded)  */
+        unsigned s = 30u;
+        uint8_t target = 1u;
+        if (argc >= 3) {
+            long v = strtol(argv[2], (char **)0, 10);
+            if (v > 0 && v <= 600) { s = (unsigned)v; }
+        }
+        if (argc >= 4 && strcmp(argv[3], "coded") == 0) {
+            target = 2u;
+        }
+        bleadv_cenphy(s, target);
         return;
     }
     if (strcmp(argv[1], "conn") == 0) {

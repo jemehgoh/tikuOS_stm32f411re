@@ -1,5 +1,5 @@
 /*
- * Tiku Operating System v0.05
+ * Tiku Operating System v0.06
  * Simple. Ubiquitous. Intelligence, Everywhere.
  * http://tiku-os.org
  *
@@ -31,6 +31,7 @@
 /*---------------------------------------------------------------------------*/
 
 #define TIKU_DEVICE_NAME            "MSP430FR2433"
+#define TIKU_DEVICE_NVM_LABEL       "FRAM"   /**< NVM technology (UI label). */
 
 /*---------------------------------------------------------------------------*/
 /* GPIO PORT AVAILABILITY                                                    */
