@@ -1,5 +1,5 @@
 /*
- * Tiku Operating System v0.05
+ * Tiku Operating System v0.06
  * Simple. Ubiquitous. Intelligence, Everywhere.
  * http://tiku-os.org
  *
@@ -19,6 +19,11 @@
  *   2. Create kernel/shell/commands/tiku_shell_cmd_xxx.h and .c
  *   3. Add #include and table entry in tiku_shell.c
  *   4. Add the .c file to the Makefile TIKU_SHELL_ENABLE section
+ *   5. If it drives hardware not every target has, add a rule to the
+ *      HARDWARE REQUIREMENTS section at the bottom of this file (and
+ *      gate/warn in the Makefile) so the flag resolves to 0 where the
+ *      capability is absent -- gate the whole .c on the resolved flag,
+ *      no runtime "not available" stubs
  */
 
 #ifndef TIKU_SHELL_CONFIG_H_
@@ -133,6 +138,9 @@
 #ifndef TIKU_SHELL_CMD_RADIO154
 #define TIKU_SHELL_CMD_RADIO154 0 /**< radio154- 802.15.4 PHY bring-up (opt-in) */
 #endif
+#ifndef TIKU_SHELL_CMD_RFTEST
+#define TIKU_SHELL_CMD_RFTEST 0 /**< rftest- RF test carrier, bench only (opt-in) */
+#endif
 #ifndef TIKU_SHELL_CMD_AXONSPROBE
 #define TIKU_SHELL_CMD_AXONSPROBE 0 /**< axonsprobe- Axon NPU bring-up probe (opt-in) */
 #endif
@@ -163,10 +171,11 @@
 #ifndef TIKU_SHELL_CMD_NAME
 #define TIKU_SHELL_CMD_NAME    1  /**< name    - Read or set device name */
 #endif
-/* `if` is opt-in: it costs ~1 KB of FRAM, and the default FR5969 build
- * (MEMORY_MODEL=small) sits within a few hundred bytes of the 48 KB
- * lower-FRAM cap once arrow-key history navigation is included.  `on`
- * (rules) covers most interactive use cases.  Re-enable with
+/* `if` is opt-in: it costs ~1 KB of FRAM.  The gate dates from the
+ * 48 KB lower-FRAM cap of the FR5969 (MEMORY_MODEL=small), which is no
+ * longer a supported part; FR5994/FR6989 have HIFRAM and default to
+ * MEMORY_MODEL=large, so the headroom argument no longer binds.  `on`
+ * (rules) still covers most interactive use cases.  Re-enable with
  *   EXTRA_CFLAGS="-DTIKU_SHELL_CMD_IF=1"
  * paired with a comparable disable (e.g. -DTIKU_SHELL_CMD_CALC=0). */
 #ifndef TIKU_SHELL_CMD_IF
@@ -294,15 +303,16 @@
 #define TIKU_SHELL_CMD_CHANGED 1  /**< changed - Block until VFS value changes */
 #endif
 /* I2C is opt-in: it pulls in tiku_i2c_bus and arch driver, which
- * together cost ~1.4 KB of FRAM.  The default FR5969 shell build
- * already sits at ~44 KB of the 48 KB FRAM cap, so enabling I2C
- * requires turning off something else of comparable size.  Two
- * recipes that fit comfortably:
+ * together cost ~1.4 KB of FRAM.  The gate dates from the FR5969's
+ * 48 KB lower-FRAM cap, where enabling I2C meant turning off
+ * something of comparable size; on the supported FR5994/FR6989 parts
+ * there is ample headroom and the pairing is no longer required.
+ * Two recipes that keep the trade explicit:
  *
- *   make MCU=msp430fr5969 TIKU_SHELL_ENABLE=1 \
+ *   make MCU=msp430fr5994 TIKU_SHELL_ENABLE=1 \
  *        EXTRA_CFLAGS="-DTIKU_SHELL_CMD_I2C=1 -DTIKU_SHELL_CMD_HISTORY=0"
  *
- *   make MCU=msp430fr5969 TIKU_SHELL_ENABLE=1 \
+ *   make MCU=msp430fr5994 TIKU_SHELL_ENABLE=1 \
  *        EXTRA_CFLAGS="-DTIKU_SHELL_CMD_I2C=1 -DTIKU_SHELL_CMD_CALC=0"
  */
 #ifndef TIKU_SHELL_CMD_I2C
@@ -315,11 +325,12 @@
 #define TIKU_SHELL_CMD_CLEAR  1  /**< clear  - ANSI clear screen */
 #endif
 
-/* Scripting and debugging extras: enabled per-build via EXTRA_CFLAGS
- * because the default FR5969 shell already sits ~250 B from the
- * 48 KB FRAM cap.  Pick the combination you need; multiple flags
+/* Scripting and debugging extras: enabled per-build via EXTRA_CFLAGS.
+ * The gate dates from the FR5969, whose default shell sat ~250 B from
+ * the 48 KB lower-FRAM cap; the supported FR5994/FR6989 parts have
+ * room to spare.  Pick the combination you need; multiple flags
  * are independent.  Example:
- *   make MCU=msp430fr5969 TIKU_SHELL_ENABLE=1 \
+ *   make MCU=msp430fr5994 TIKU_SHELL_ENABLE=1 \
  *        EXTRA_CFLAGS="-DTIKU_SHELL_CMD_DELAY=1 -DTIKU_SHELL_CMD_REPEAT=1"
  *
  * To enable the larger ones (peek/poke/i2c), pair them with a
@@ -347,7 +358,7 @@
 /** @defgroup TIKU_SHELL_COLOR ANSI Color Output
  * @brief Enable colored shell output via ANSI escape codes.
  *
- * Build with:  make TIKU_SHELL_COLOR=1 MCU=msp430fr5969
+ * Build with:  make TIKU_SHELL_COLOR=1 MCU=msp430fr5994
  *
  * Requires a terminal that renders ANSI escapes (picocom, screen,
  * minicom, PuTTY, telnet).  Disable for raw serial logging.
@@ -400,7 +411,7 @@
  * Requires the TikuKits TCP stack (TIKU_KITS_NET_TCP_ENABLE=1).
  * The net process must be auto-started alongside the CLI process.
  * Build with:
- *   make APP=cli MCU=msp430fr5969 \
+ *   make APP=cli MCU=msp430fr5994 \
  *        EXTRA_CFLAGS="-DTIKU_KITS_NET_TCP_ENABLE=1 -DTIKU_SHELL_TCP_ENABLE=1"
  */
 #ifndef TIKU_SHELL_TCP_ENABLE
@@ -422,5 +433,82 @@
 #endif
 
 /** @} */
+
+/*---------------------------------------------------------------------------*/
+/* HARDWARE REQUIREMENTS -- capability resolution                            */
+/*---------------------------------------------------------------------------*/
+/*
+ * A command that drives hardware the build does not have is forced OFF
+ * here, AFTER every default and user override above.  This is the ONE
+ * place where "command X needs capability Y" is written down; the shell
+ * table, the command .c and the help listing all read the resolved
+ * flag, so a `-DTIKU_SHELL_CMD_X=1` on a target without the hardware
+ * yields a build without the command -- not a stub in `help` and not an
+ * undefined reference at link (both of which the pre-resolution scheme
+ * produced, depending on the command).
+ *
+ * The Makefile mirrors these rules where it owns the decision to
+ * compile the command's .c at all, and prints a warning when a command
+ * was requested on a target that cannot have it.
+ *
+ * Capability macros used here are -D flags from the Makefile (or, for
+ * LCD/Axon, board/device-header macros -- those resolutions are only
+ * meaningful in TUs that include tiku.h first, which tiku_shell.c
+ * does).  Keep each rule to the same three-line shape.
+ */
+
+/* rftest + bleadv drive the on-die 2.4 GHz RADIO (broadcast BLE). */
+#if TIKU_SHELL_CMD_RFTEST && !(TIKU_HAS_BLE_ADV + 0)
+#undef  TIKU_SHELL_CMD_RFTEST
+#define TIKU_SHELL_CMD_RFTEST 0
+#endif
+#if TIKU_SHELL_CMD_BLEADV && !(TIKU_HAS_BLE_ADV + 0)
+#undef  TIKU_SHELL_CMD_BLEADV
+#define TIKU_SHELL_CMD_BLEADV 0
+#endif
+
+/* radio154 drives the 802.15.4 PHY. */
+#if TIKU_SHELL_CMD_RADIO154 && !(TIKU_HAS_154 + 0)
+#undef  TIKU_SHELL_CMD_RADIO154
+#define TIKU_SHELL_CMD_RADIO154 0
+#endif
+
+/* cryptoprobe drives the CRACEN CryptoMaster. */
+#if TIKU_SHELL_CMD_CRYPTOPROBE && !(TIKU_CRACEN_PK_ENABLE + 0)
+#undef  TIKU_SHELL_CMD_CRYPTOPROBE
+#define TIKU_SHELL_CMD_CRYPTOPROBE 0
+#endif
+
+/* wifi / bt drive the CYW43439; ble drives the EM9305. */
+#if TIKU_SHELL_CMD_WIFI && !(TIKU_DRV_WIFI_CYW43_ENABLE + 0)
+#undef  TIKU_SHELL_CMD_WIFI
+#define TIKU_SHELL_CMD_WIFI 0
+#endif
+#if TIKU_SHELL_CMD_BT && !(TIKU_DRV_WIFI_CYW43_BT_ENABLE + 0)
+#undef  TIKU_SHELL_CMD_BT
+#define TIKU_SHELL_CMD_BT 0
+#endif
+#if TIKU_SHELL_CMD_BLE && !(TIKU_DRV_BLE_EM9305_ENABLE + 0)
+#undef  TIKU_SHELL_CMD_BLE
+#define TIKU_SHELL_CMD_BLE 0
+#endif
+
+/* mrambench drives the Ambiq bootrom MRAM programmer. */
+#if TIKU_SHELL_CMD_MRAMBENCH && !defined(PLATFORM_AMBIQ)
+#undef  TIKU_SHELL_CMD_MRAMBENCH
+#define TIKU_SHELL_CMD_MRAMBENCH 0
+#endif
+
+/* lcd drives the segment-LCD controller (board-header capability). */
+#if TIKU_SHELL_CMD_LCD && !(TIKU_BOARD_HAS_LCD + 0)
+#undef  TIKU_SHELL_CMD_LCD
+#define TIKU_SHELL_CMD_LCD 0
+#endif
+
+/* axonsprobe (Axon NPU) has NO rule here on purpose: its capability
+ * macro TIKU_DEVICE_HAS_AXONS lives in the device header, which
+ * tiku_shell_cmd_axonsprobe.h pulls in AFTER this file -- a rule here
+ * would evaluate before the macro exists and kill the flag in that TU
+ * only.  The Makefile gates its compilation to nrf54lm20b instead. */
 
 #endif /* TIKU_SHELL_CONFIG_H_ */

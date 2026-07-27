@@ -1,5 +1,5 @@
 /*
- * Tiku Operating System v0.05
+ * Tiku Operating System v0.06
  * Simple. Ubiquitous. Intelligence, Everywhere.
  * http://tiku-os.org
  *
@@ -111,6 +111,15 @@ void tiku_mpu_arch_init_segments(void);
  * The specific register encoding is handled entirely by the arch layer.
  */
 void tiku_mpu_arch_set_default_protection(void);
+
+/**
+ * @brief Arch hook for tiku_mpu_module_window_exec(); see kernel/memory.
+ *
+ * Ports with no RAM execution window implement this as a no-op.
+ *
+ * @param enable  1 = window RO + executable, 0 = window RW + execute-never.
+ */
+void tiku_mpu_arch_module_window_exec(int enable);
 
 /**
  * @brief Set permissions on a single MPU segment

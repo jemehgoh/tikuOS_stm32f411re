@@ -72,30 +72,80 @@ __sram_end    = ORIGIN(SRAM) + LENGTH(SRAM);
  * NOTE (2026-07-15 Ambiq-parity layout, kintsugi/memoryfix.md B.0): growing
  * these carves MOVES every cell/TFS address -- established DKs re-prime once
  * (primed != 0, /data empty).  Expected, one-time. */
-__tiku_nvm_rram_size  = 0x4000;                             /* 16 KB */
-__tiku_nvm_rram_start = ORIGIN(RRAM) + LENGTH(RRAM) - __tiku_nvm_rram_size;
-__tiku_nvm_rram_end   = ORIGIN(RRAM) + LENGTH(RRAM);
+/* Canonical NVM layout: inputs + shared derivation (arch/common). */
+__tiku_layout_top          = ORIGIN(RRAM) + LENGTH(RRAM);
+/* PACKING-ONLY ESCAPE HATCH -- not a tuning knob.  tools/axonpack.py's
+ * verification gate compares its patched output against a LINKED image of the
+ * same model, and the model that most needs checking (tinyml_vww, 698 KB) is
+ * precisely the one that cannot link.  Passing
+ * -Wl,--defsym=__tiku_code_cap_override=0xC0000 produces a reference ELF for
+ * that comparison only; it is never flashed and never shipped, and
+ * tools/axonpack_selftest.sh is the only caller.  A build that needs this to
+ * produce FIRMWARE has exactly the pathology the window exists to prevent --
+ * see the budget note below before reaching for it. */
+__tiku_layout_code_cap     = DEFINED(__tiku_code_cap_override)
+                             ? __tiku_code_cap_override
+                             : 0x60000;                     /* 384 KB code */
+/* Shared Nordic code budget: 384 KB on BOTH parts -- the same figure every
+ * TikuOS platform now uses (P4), so "does this firmware fit" has ONE answer for
+ * the whole fleet, and the module slot lands at the same address on both Nordic
+ * parts (one module image serves each).
+ *
+ * This was 800 KB, and the reason is worth recording because it is the mistake
+ * the number now refuses to make.  It was sized by the largest image anyone
+ * could build, which was an Axon KAT: Nordic's compiled model weights and test
+ * vectors are const arrays, so they land in .rodata, so they landed in THIS
+ * window (measured 2026-07-25, nrf54lm20b, -Os):
+ *
+ *   shell + BASIC, no Axon .............................  126 KB
+ *   + Axon driver, model gc-dropped ....................  127 KB
+ *   + tinyml_kws  weights  25 KB + vectors  72 KB ......  206 KB
+ *   + tinyml_ic   weights                       .......  357 KB
+ *   + tinyml_ad   weights 260 KB + vectors   5 KB ......  362 KB
+ *   + tinyml_vww  weights 203 KB + vectors 307 KB ......  698 KB  <-- set the cap
+ *
+ * Letting that set the cap put 544 KB of RRAM permanently beyond reach on every
+ * shipped board so that a vendor TEST HARNESS could link -- and the actual
+ * firmware is 126 KB, 16% of the window.
+ *
+ * RESOLVED 2026-07-26 (A3).  Model weights are data and now live in /data:
+ * TIKU_AXON_MODEL_FROM_STORE=1 compiles no model at all and reads each one --
+ * weights, command buffer, descriptor and labels -- from a file at run time.
+ * That image is 91 KB, and it is 91 KB whichever model it runs, so the biggest
+ * model no longer has any say in this number.  All four shipped models,
+ * tinyml_vww included, run from it bit-exact against the vendor's own vectors.
+ * TIKU_AXON_MODEL=<name> still bakes one in for development and remains the
+ * reference the store path is diffed against; vww still cannot link that way,
+ * which is now a statement about the harness rather than a limitation.
+ *
+ * Do not raise this number to make something build.
+ * The L15 has no NPU, so it only ever needs ~140 KB; it carries the same cap
+ * for family consistency, and the address space it gives up was idle anyway
+ * (the freed NVM goes to the durable tier, which currently has no consumer). */
+__tiku_layout_module_size  = 0x8000;                        /* 32 KB slot  */
+__tiku_layout_durable_size = 0x4000;                        /* 16 KB persist */
+INCLUDE arch/common/tiku_nvm_layout.ld
+
+__tiku_nvm_rram_size  = __tiku_layout_durable_size;
+__tiku_nvm_rram_start = __tiku_layout_durable_start;
+__tiku_nvm_rram_end   = __tiku_layout_top;
 
 /* Carved NVM region (the tiku_nvm_region backend), Ambiq-style layout:
- * NVM tier at the front | TFS FS extent (256 KB, TIKU_NVMFS_FS_BYTES) |
- * reserved named-slot tail (64 KB, TIKU_NVM_RESERVED_BYTES: BASIC saved
- * program + F1 run-state checkpoint).  A byte-writable RRAM span just BELOW
+ * NVM tier at the front (32 KB) | TFS FS extent (all the rest,
+ * TIKU_NVMFS_FS_BYTES -- BASIC's saved program and run-state checkpoint are
+ * files in it, not a carved tail).  A byte-writable RRAM span just BELOW
  * the durable-persist region; written in place behind the WEN gate (no
- * erase).  996 KB leaves a 1 MB code window below (Axon-enabled images are
- * the big ones; the ASSERT at the bottom is the hard cap).
+ * erase).  The 384 KB code window ends at the module slot (the ASSERT at the
+ * bottom is the hard cap).
  * __tiku_nvmfs_size is an absolute symbol whose ADDRESS is the size. */
-/* Loadable-native-module slot (Tier 3, tiku_basic_module.h): a 4 KB
- * byte-writable, EXECUTABLE RRAM span just below the durable-persist region.
- * A module is linked at this VMA; the loader writes its image here in place
- * behind the WEN gate (no erase) and runs it XIP -- SRAM is W^X (execute-
- * never), so a module MUST live in RRAM, which also makes it durable for free.
- * Carved from the top of the FS extent (FS base unchanged; -4 KB capacity). */
-__tiku_module_slot_size = 0x1000;                           /* 4 KB */
-__tiku_module_slot      = __tiku_nvm_rram_start - __tiku_module_slot_size;
-
-__tiku_nvmfs_size = 0xF8000;                                /* 992 KB (-4 KB) */
-__tiku_nvmfs_base = __tiku_module_slot - __tiku_nvmfs_size;
-__tiku_nvmfs_end  = __tiku_module_slot;
+/* Loadable-native-module slot (Tier 3, tiku_basic_module.h): 32 KB of
+ * byte-writable, EXECUTABLE RRAM at the TOP OF THE CODE WINDOW -- canonical
+ * layout order (2026-07): code | module | NVM region | persist.  Modules are
+ * code, so slot growth trades against the code estate on every platform.
+ * The loader writes the image in place behind the WEN gate and runs it XIP
+ * (durable across reboot and power loss); SRAM is W^X (execute-never), so a
+ * module MUST live in RRAM.  Keep in sync with TIKU_MODULE_CARVE_ADDR. */
+/* (module slot + NVM region symbols come from the shared derivation.) */
 
 /* The Cortex-M loads the initial SP from vector[0]; place it at the top of
  * SRAM and let the stack grow down toward .bss. */
@@ -217,7 +267,7 @@ SECTIONS
     /* The RRAM code image (code + rodata + .data load copy) must not grow up
      * into the reserved NVM regions at the top of RRAM -- guard against the
      * lower of the two bases (the filestore). */
-    ASSERT(__data_load + (__data_end - __data_start) <= __tiku_nvmfs_base,
+    ASSERT(__data_load + (__data_end - __data_start) <= __tiku_module_slot,
            "ERROR: RRAM image overruns the reserved NVM/persist regions")
 
     /* The durable persist data must fit inside the reserved region. */

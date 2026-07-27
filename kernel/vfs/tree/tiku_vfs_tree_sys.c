@@ -1,5 +1,5 @@
 /*
- * Tiku Operating System v0.05
+ * Tiku Operating System v0.06
  * Simple. Ubiquitous. Intelligence, Everywhere.
  * http://tiku-os.org
  *
@@ -15,7 +15,7 @@
  *   /sys/time            (rw) wall-clock seconds since epoch
  *   /sys/device/name     (rw) FRAM-persisted device name
  *   /sys/device/id       stable per-chip ID from the unique-ID ROM
- *   /sys/device/mcu      silicon name ("MSP430FR5969", ...)
+ *   /sys/device/mcu      silicon name ("MSP430FR5994", ...)
  *   /sys/device/version  OS version (alias of /sys/version)
  *   /sys/mem/{sram,nvm}  configured memory sizes
  *   /sys/mem/free        live stack headroom (SP - _end)
@@ -56,6 +56,9 @@
 #include "tiku_vfs_tree_timer.h"
 #include "tiku_vfs_tree_watchdog.h"
 #include "tiku_vfs_tree_power.h"
+#if (TIKU_DRV_GPU_ENABLE + 0)
+#include "tiku_vfs_tree_gpu.h"       /* /sys/gpu -- Apollo510 GPU status     */
+#endif
 #include "tiku_vfs_tree_persist.h"
 #include "tiku_vfs_tree_watch.h"
 #include "tiku_vfs_tree_inittab.h"
@@ -71,6 +74,7 @@
 #include <kernel/process/tiku_process.h>
 #include <kernel/scheduler/tiku_sched.h>
 #include <stdio.h>
+#include <kernel/memory/tiku_nvm_map.h>  /* TIKU_DEVICE_RAM_USABLE */
 #if (TIKU_HAS_BLE_ADV + 0)
 #include <stdlib.h>                  /* strtoul: /sys/radio/beacon interval */
 #include <string.h>                  /* strchr/strcmp: beacon write parse   */
@@ -184,7 +188,7 @@ time_write(const char *buf, size_t len)
  * @brief Read handler for /sys/mem/sram.
  *
  * Renders the device's total SRAM size in bytes as a decimal line
- * ("2048\n" on FR5969).  This is the silicon constant from the
+ * ("8192\n" on FR5994).  This is the silicon constant from the
  * device header, not a live measurement — see /sys/mem/free for
  * runtime headroom.
  *
@@ -196,7 +200,7 @@ static int
 sram_read(char *buf, size_t max)
 {
     return snprintf(buf, max, "%lu\n",
-                    (unsigned long)TIKU_DEVICE_RAM_SIZE);
+                    (unsigned long)TIKU_DEVICE_RAM_USABLE);
 }
 
 /**
@@ -432,7 +436,7 @@ sched_idle_read(char *buf, size_t max)
 /**
  * @brief Read handler for /sys/version.
  *
- * Renders the TIKU_VERSION string from tiku.h ("0.05\n").  Also
+ * Renders the TIKU_VERSION string from tiku.h ("0.06\n").  Also
  * exposed as /sys/device/version for clients that read the whole
  * device directory in one sweep.
  *
@@ -566,7 +570,7 @@ device_id_read(char *buf, size_t max)
  * @brief Read handler for /sys/device/mcu.
  *
  * Renders the silicon name from the selected device header
- * ("MSP430FR5969\n", "RP2350\n", ...).
+ * ("MSP430FR5994\n", "RP2350\n", ...).
  *
  * @param buf  Output buffer for the rendered text
  * @param max  Capacity of @p buf in bytes
@@ -1225,6 +1229,10 @@ static const tiku_vfs_node_t sys_children[] = {
     { "cpu",      TIKU_VFS_DIR,  NULL, NULL, sys_cpu_children, 1 },
     { "power",    TIKU_VFS_DIR,  NULL, NULL,
       tiku_vfs_tree_power_children,    TIKU_VFS_TREE_POWER_NCHILD },
+#if (TIKU_DRV_GPU_ENABLE + 0)
+    { "gpu",      TIKU_VFS_DIR,  NULL, NULL,
+      tiku_vfs_tree_gpu_children,      TIKU_VFS_TREE_GPU_NCHILD },
+#endif
     { "timer",    TIKU_VFS_DIR,  NULL, NULL,
       tiku_vfs_tree_timer_children,    TIKU_VFS_TREE_TIMER_NCHILD },
     { "clock",    TIKU_VFS_DIR,  NULL, NULL,

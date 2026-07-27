@@ -1,5 +1,5 @@
 /*
- * Tiku Operating System v0.05
+ * Tiku Operating System v0.06
  * Simple. Ubiquitous. Intelligence, Everywhere.
  * http://tiku-os.org
  *
@@ -7,7 +7,7 @@
  *
  * tiku_shell_cmd_free.c - "free" command implementation
  *
- * Displays system memory usage: SRAM and FRAM totals with
+ * Displays system memory usage: SRAM and non-volatile totals with
  * per-process breakdown from the process registry's
  * sram_used / fram_used fields.
  *
@@ -24,10 +24,14 @@
 #include <kernel/memory/tiku_mem.h>
 #include "tiku.h"
 #include <stdint.h>
+/* Unconditional: this header carries the TIKU_DEVICE_NVM_LABEL and
+ * TIKU_DEVICE_RAM_USABLE fallbacks that every memory report needs.  It used to
+ * be included only under TIKU_INIT_ENABLE, which meant the fallbacks were
+ * reachable in some builds and not others -- the include-order trap. */
+#include <kernel/memory/tiku_nvm_map.h>
 
 #if TIKU_INIT_ENABLE
 #include <kernel/init/tiku_init.h>
-#include <kernel/memory/tiku_nvm_map.h>
 #endif
 
 /*---------------------------------------------------------------------------*/
@@ -148,7 +152,7 @@ tiku_shell_cmd_free(uint8_t argc, const char *argv[])
     (void)argc;
     (void)argv;
 
-    sram_total = (unsigned long)TIKU_DEVICE_RAM_SIZE;
+    sram_total = (unsigned long)TIKU_DEVICE_RAM_USABLE;
 
     /*
      * fram_total is the size of the lower-FRAM 16-bit window
@@ -211,7 +215,11 @@ tiku_shell_cmd_free(uint8_t argc, const char *argv[])
     SHELL_PRINTF("  stack+free  %5lu\n",
                  (unsigned long)(sram_total - sram_static));
 
-    SHELL_PRINTF(SH_BOLD "FRAM" SH_RST "  %5lu total (lower window)\n",
+    SHELL_PRINTF(SH_BOLD "%s" SH_RST "  %5lu total"
+#if defined(TIKU_DEVICE_HAS_HIFRAM) && TIKU_DEVICE_HAS_HIFRAM
+                 " (lower window)"
+#endif
+                 "\n", TIKU_DEVICE_NVM_LABEL,
                  (unsigned long)fram_total);
     /* in-use = code+rodata+persistent+data-init+(.lower.text under
      * large mode), reported as one number because the breakdown
@@ -219,7 +227,11 @@ tiku_shell_cmd_free(uint8_t argc, const char *argv[])
     SHELL_PRINTF("  in use      %5lu\n",
                  (unsigned long)(fram_used > TIKU_FREE_IVT_BYTES
                  ? (fram_used - TIKU_FREE_IVT_BYTES) : 0));
+#if defined(PLATFORM_MSP430)
+    /* The interrupt-vector table sits inside the NVM window on MSP430 only;
+     * elsewhere TIKU_FREE_IVT_BYTES is 0 and the row is just noise. */
     SHELL_PRINTF("  ivt         %5u\n", (unsigned)TIKU_FREE_IVT_BYTES);
+#endif
     SHELL_PRINTF("  unallocd    %5lu\n",
                  (unsigned long)(fram_total > fram_used ? fram_total - fram_used : 0));
 #if defined(TIKU_DEVICE_HAS_HIFRAM) && TIKU_DEVICE_HAS_HIFRAM
@@ -273,7 +285,7 @@ tiku_shell_cmd_free(uint8_t argc, const char *argv[])
                  (unsigned long)(sram_total - sram_static - stack_used()));
 
     /* FRAM: unallocated + tier allocator */
-    SHELL_PRINTF(SH_BOLD "FRAM" SH_RST "\n");
+    SHELL_PRINTF(SH_BOLD "%s" SH_RST "\n", TIKU_DEVICE_NVM_LABEL);
     {
         tiku_mem_stats_t nvm_tier;
         if (tiku_tier_stats(TIKU_MEM_NVM, &nvm_tier) == TIKU_MEM_OK) {
@@ -315,7 +327,10 @@ tiku_shell_cmd_free(uint8_t argc, const char *argv[])
 
     SHELL_PRINTF(SH_CYAN "--- Processes (%u/%u) ---" SH_RST "\n",
                  proc_count, TIKU_PROCESS_MAX);
-    SHELL_PRINTF(" pid  %-10s    sram    fram  state\n", "name");
+    /* Lower-case column set; the technology is already named by the section
+     * header above (e.g. "RRAM  2084864 total"), so this stays generic
+     * rather than shouting "RRAM" mid-table -- and it is never wrong. */
+    SHELL_PRINTF(" pid  %-10s    sram     nvm  state\n", "name");
     for (i = 0; i < TIKU_PROCESS_MAX; i++) {
         struct tiku_process *p = tiku_process_get((int8_t)i);
         if (p == NULL) {

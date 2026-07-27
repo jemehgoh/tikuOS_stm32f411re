@@ -1,5 +1,5 @@
 /*
- * Tiku Operating System v0.05
+ * Tiku Operating System v0.06
  * Simple. Ubiquitous. Intelligence, Everywhere.
  * http://tiku-os.org
  *
@@ -22,7 +22,7 @@
  * generic layer. The W^X guarantee that matters (code is RX, every data region
  * is execute-never) is fully enforced.
  *
- * Seven non-overlapping regions (this M55 reports 16, so headroom is ample):
+ * Eight non-overlapping regions (this M55 reports 16, so headroom is ample):
  *   0  NVM   .uninit (DTCM)               RW + XN   (writable: holds NVM tier)
  *   1  TEXT  MRAM __flash_start..end      RX            (code + rodata)
  *   2  SRAM  DTCM start..uninit_start     RW + XN       (.data/.bss/.mpu_diag)
@@ -30,6 +30,7 @@
  *   4  GUARD 4 KB below the stack budget  RO + XN       (stack-overflow trip)
  *   5  SRAM  guard+4K..__sram_end         RW + XN       (live stack)
  *   6  SSRAM 0x20080000 + 3 MB            RW + XN       (tier buffers, snapshot)
+ *   7  MOD   module slot (4 KB MRAM)      RO + X        (Tier-3 XIP modules)
  * MAIR0[0] = Normal Write-Back R/W-allocate so the M55 L1 caches keep working
  * (RP2350 used Non-cacheable — it has no cache). PRIVDEFENA lets peripherals
  * (0x40000000+), the SCS/MPU (0xE0000000+) and the bootrom keep the default
@@ -42,6 +43,7 @@
 #include "tiku_mpu_arch.h"
 #include "apollo510.h"            /* CMSIS: MPU/SCB/NVIC + mpu_armv8.h */
 #include <hal/tiku_cpu.h>         /* tiku_cpu_irq_disable/enable */
+#include <kernel/shell/basic/tiku_basic_module.h>  /* TIKU_MODULE_EXEC_* */
 #include <stdint.h>
 
 /*---------------------------------------------------------------------------*/
@@ -54,6 +56,9 @@ extern uint32_t __sram_start;     /* DTCM base   */
 extern uint32_t __sram_end;       /* DTCM top (= __stack) */
 extern uint32_t __flash_start;    /* MRAM code window base */
 extern uint32_t __flash_end;      /* MRAM code window end (below the NVM mirror) */
+extern uint32_t __tiku_module_slot;      /* Tier-3 module slot base       */
+extern uint32_t __tiku_module_slot_size; /* ABSOLUTE: its ADDRESS is the  */
+                                         /* slot size (linker convention) */
 
 /**
  * @defgroup MPU_SSRAM_MAP Shared SRAM region constants
@@ -131,7 +136,7 @@ static volatile struct tiku_mpu_diag mpu_diag;
 
 /**
  * @defgroup MPU_REGIONS ARMv8-M MPU region index constants
- * @brief Slot numbers for the seven non-overlapping DTCM/MRAM/SSRAM regions.
+ * @brief Slot numbers for the eight non-overlapping DTCM/MRAM/SSRAM regions.
  * @{
  */
 #define MPU_REGION_NVM         0U
@@ -141,7 +146,16 @@ static volatile struct tiku_mpu_diag mpu_diag;
 #define MPU_REGION_STACK_GUARD 4U
 #define MPU_REGION_SRAM_TOP    5U
 #define MPU_REGION_SSRAM       6U
+#define MPU_REGION_MODULE      7U
 /** @} */
+
+/* Size of the Tier-3 module slot, taken FROM THE LINKER rather than
+ * duplicated: __tiku_module_slot_size is an absolute symbol whose ADDRESS
+ * is the size, so this can never drift from the carve again (it did: it
+ * sat at 4 KB after the slot grew to 32 KB, leaving 28 KB of the slot
+ * outside the MPU region and covered only by PRIVDEFENA's default map). */
+#define TIKU_MPU_MODULE_SLOT_BYTES \
+    ((uint32_t)(uintptr_t)&__tiku_module_slot_size)
 
 /**
  * @defgroup MPU_STACK_GUARD Stack guard sizing constants
@@ -295,12 +309,12 @@ void tiku_mpu_arch_disable_irq(void) { tiku_cpu_irq_disable(); }
 void tiku_mpu_arch_enable_irq(void)  { tiku_cpu_irq_enable(); }
 
 /**
- * @brief Initialize all seven ARMv8-M MPU regions and enable the MPU
+ * @brief Initialize all eight ARMv8-M MPU regions and enable the MPU
  *
  * On cold boot (magic absent) zeroes the .mpu_diag block and stamps the
  * magic; on a warm (post-fault) reset the existing violation counters are
  * preserved. Then programs MAIR0[0] with Normal WB/WA attributes, sets up
- * the seven regions listed in the file header, enables the MPU with
+ * the eight regions listed in the file header, enables the MPU with
  * PRIVDEFENA (peripherals and the SCS keep default privileged access
  * without burning region slots), and routes MemManage faults to priority 0.
  * HFNMIENA is off by default; define TIKU_MPU_HFNMI_ENFORCE=1 to opt in.
@@ -353,6 +367,34 @@ void tiku_mpu_arch_init_segments(void) {
                    AMBIQ_SSRAM_BASE,
                    AMBIQ_SSRAM_BASE + AMBIQ_SSRAM_SIZE - 1U,
                    0U, 1U);                                     /* region 6 */
+        /* Region 7 covers wherever a Tier-3 module EXECUTES, which differs by
+         * part -- see kernel/shell/basic/tiku_basic_module.h.
+         *
+         * XIP parts (apollo4l/4p): the MRAM slot directly above the code
+         * window.  RO + executable, permanently: the module runs in place and
+         * the CPU never stores to it (installs go through the bootrom
+         * programmer, which the MPU does not gate).
+         *
+         * apollo510: the module is COPIED into an ITCM window and run from
+         * there, so the slot size is 0 and this region would be degenerate
+         * (base .. base-1, matching nothing) -- which is how the window ended
+         * up with no MPU coverage at all, sitting RWX on the background map.
+         * It now covers the ITCM window instead, and starts in the RESTING
+         * state: RW + XN.  tiku_mpu_arch_module_window_exec() flips it to
+         * RO + X around the branch, so the window is never writable and
+         * executable at the same moment. */
+#if TIKU_MODULE_EXEC_IN_RAM
+        mpu_region(MPU_REGION_MODULE,
+                   TIKU_MODULE_EXEC_ADDR,
+                   TIKU_MODULE_EXEC_ADDR + TIKU_MODULE_CARVE_SIZE - 1U,
+                   0U /* RW */, 1U /* XN */);                   /* region 7 */
+#else
+        mpu_region(MPU_REGION_MODULE,
+                   (uint32_t)(uintptr_t)&__tiku_module_slot,
+                   (uint32_t)(uintptr_t)&__tiku_module_slot +
+                       TIKU_MPU_MODULE_SLOT_BYTES - 1U,
+                   1U /* RO */, 0U /* exec OK */);              /* region 7 */
+#endif
     }
 
     /* Enable MPU + PRIVDEFENA. HFNMIENA off by default (a buggy fault handler
@@ -749,4 +791,29 @@ void tiku_ambiq_hard_fault_handler(void) {
         "mrsne r0, psp                \n\t"
         "b     ambiq_hard_fault_body  \n\t"
     );
+}
+
+/**
+ * @brief Flip the module execution window between writable and executable.
+ *
+ * The W^X-in-time half of the module loader (see kernel/memory/tiku_mem.h for
+ * the contract, and tiku_basic_module.h for why apollo510 is the only part with
+ * a window at all).  mpu_region() issues the DSB/ISB pair, so the new
+ * permissions are in force before the caller's next instruction fetch -- which
+ * matters here, because that next fetch may BE the module.
+ *
+ * @param enable  1 = RO + executable (a module is about to run / is running),
+ *                0 = RW + execute-never (resting; the loader may write).
+ */
+void tiku_mpu_arch_module_window_exec(int enable)
+{
+#if TIKU_MODULE_EXEC_IN_RAM
+    mpu_region(MPU_REGION_MODULE,
+               TIKU_MODULE_EXEC_ADDR,
+               TIKU_MODULE_EXEC_ADDR + TIKU_MODULE_CARVE_SIZE - 1U,
+               enable ? 1U : 0U,        /* RO while executable */
+               enable ? 0U : 1U);       /* XN while writable   */
+#else
+    (void)enable;                       /* XIP: no window to flip */
+#endif
 }
