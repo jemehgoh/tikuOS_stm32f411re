@@ -50,7 +50,8 @@
  *
  * Common semantics during a held window (either flavour):
  *   - The software-timer dispatcher early-exits if polled.
- *   - The Timer A0 ISR suppresses tiku_timer_request_poll().
+ *   - The platform tick/deadline source may be masked or may continue to fire,
+ *     but timer dispatch remains deferred until the window closes.
  *   - The process scheduler is NOT frozen; tiku_process_post()
  *     calls during the window queue up exactly as today.
  *   - Global interrupts (GIE) stay ENABLED. We never blanket-mask
@@ -94,8 +95,8 @@
  *  transmitter built on tiku_htimer. */
 #define TIKU_CRIT_PRESERVE_HTIMER  (1u << 0)
 
-/** System tick ISR (Timer A0 CCR0). Preserve to keep
- *  tiku_clock_time() advancing accurately during the window. */
+/** System tick/deadline ISR. Preserve to keep timer wakeups live during the
+ *  window when the platform maps this flag to an interrupt source. */
 #define TIKU_CRIT_PRESERVE_TICK    (1u << 1)
 
 /** UART RX/TX ISRs (eUSCI_A modules). Preserve to keep shell
