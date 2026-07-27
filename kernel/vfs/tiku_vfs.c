@@ -1,5 +1,5 @@
 /*
- * Tiku Operating System v0.05
+ * Tiku Operating System v0.06
  * Simple. Ubiquitous. Intelligence, Everywhere.
  * http://tiku-os.org
  *
@@ -127,28 +127,10 @@ const tiku_vfs_node_t *tiku_vfs_resolve(const char *path)
     }
 
     node = vfs_root;
-    p = path + 1;  /* skip leading '/' */
+    p = path;      /* next_segment skips the leading '/' itself */
 
-    /* Root path: "/" or empty after slash */
-    if (*p == '\0') {
-        return node;
-    }
-
-    while (*p != '\0') {
-        /* Skip consecutive slashes */
-        while (*p == '/') {
-            p++;
-        }
-        if (*p == '\0') {
-            break;  /* trailing slash */
-        }
-
-        /* Extract component */
-        comp = p;
-        while (*p != '/' && *p != '\0') {
-            p++;
-        }
-        comp_len = (size_t)(p - comp);
+    /* One segment per iteration; "/" alone yields none -> root. */
+    while (tiku_vfs_next_segment(&p, &comp, &comp_len)) {
 
         /* Current node must be a directory to descend */
         if (node->type != TIKU_VFS_DIR || node->children == NULL) {
@@ -753,6 +735,21 @@ int tiku_vfs_list(const char *path, tiku_vfs_list_fn callback, void *ctx)
     char pbuf[TIKU_VFS_PATHBUF];
     size_t sl;
     uint8_t i;
+
+    /* A NULL callback used to reach the invocation below and jump to address
+     * zero.  Every other pointer argument in this file is tolerated -- notify()
+     * accepts a NULL node, desc_of() a NULL node -- so a caller reasonably
+     * expects the same here, and "does this path exist and is it a directory"
+     * is a legitimate use with nothing to enumerate into. */
+    if (callback == NULL) {
+        node = tiku_vfs_resolve(path);
+        if (node != NULL) {
+            return (node->type == TIKU_VFS_DIR) ? 0 : -1;
+        }
+        mount = vfs_parent_of(path, &sub);
+        return (mount != NULL && mount->dyn != NULL &&
+                mount->dyn->list_dir != NULL) ? 0 : -1;
+    }
 
     node = tiku_vfs_resolve(path);
     if (node != NULL) {

@@ -159,6 +159,26 @@ endif
 # (GP23..25 + GP29). The plain Pi Pico 2 doesn't carry the module, so
 # the driver requires BOTH the right silicon and the right PCB.
 ifeq ($(TIKU_DRV_WIFI_CYW43_ENABLE),1)
+# The CYW43439 firmware is linked into .rodata via .incbin, where the linker
+# counts ~233 KB of radio firmware as CODE.  That is what P3a removes: radio
+# firmware is DATA and belongs in /data, provisioned over the shell's recv,
+# which needs no radio to work.
+#
+# THE LINK ERROR THAT USED TO ENFORCE THIS IS GONE.  At the old 256 KB window
+# this config could not link, and that failure was the forcing function.  At
+# 384 KB it fits: rp2350 base is ~124 KB and the blobs are ~233 KB (+6 KB with
+# BT), so roughly 357-363 KB -- under the window with ~30 KB to spare.  That is
+# an estimate from the component sizes, not a measured link, because the blobs
+# are untracked (drivers 3d20e84) and absent from a fresh checkout by design.
+#
+# So this warning is now the ONLY thing standing between a working build and
+# shipping the shape P3a exists to remove.  Raising the window further to keep
+# it comfortable would be the exact pathology: the blob would once again be
+# sizing the OS's permanent memory contract.
+$(warning TIKU_DRV_WIFI_CYW43_ENABLE=1: the CYW43439 firmware is compiled into \
+.rodata and charged against the code window (~233 KB of it). This links at 384 \
+KB but is NOT the shipping shape -- P3a moves the firmware to /data. Do NOT \
+raise the window to make room for a blob.)
 ifneq ($(TIKU_PLATFORM),rp2350)
 $(error TIKU_DRV_WIFI_CYW43_ENABLE=1 requires MCU=rp2350 \
 (currently MCU=$(MCU)). The CYW43439 driver depends on \
@@ -758,17 +778,19 @@ CFLAGS += -I$(PROJ_DIR)/arch/st/CMSIS/Core/Include
 CFLAGS += -ffunction-sections -fdata-sections -fno-common
 
 # Memory tiers. tiku_mem.h defaults to the MSP430-era 128 B SRAM (AUTO) tier,
-# which can't hold a real allocation. BASIC's program arena (~98 KB for the
-# 1024-line BIG tier RP2350 selects) then fails to fit SRAM and resolve_tier()
-# falls back to the 1 KB NVM tier -- which on RP2350 is QSPI flash (program-op,
-# not byte-writable), so the first arena store faults and `basic` wedged the
-# board at entry. Size the SRAM (AUTO) tier to hold the arena in the part's
-# 520 KB SRAM. Gated on BASIC so non-BASIC builds keep the lean default.
+# which can't hold a real allocation. BASIC's program arena (117,120 B at the
+# 512 lines RP2350 selects -- 148 * PROGRAM_LINES + 41344) then fails to fit
+# SRAM and resolve_tier() falls back to the NVM tier -- which on RP2350 is QSPI
+# flash (program-op, not byte-writable), so the first arena store faults and
+# `basic` wedged the board at entry. Size the SRAM (AUTO) tier to hold the arena
+# in the part's 520 KB SRAM. Gated on BASIC so non-BASIC builds keep the lean
+# default. A _Static_assert in tiku_basic_arena.inl now checks the two numbers
+# against each other at build time.
 ifeq ($(TIKU_SHELL_BASIC_ENABLE),1)
 ifeq ($(HAS_TLS),1)
 # HTTPS (HAS_TLS) adds the cert-TLS client's static buffers to .bss; trim the
 # BASIC tier to 128 KB so the cyw43 bring-up + stack keep their SRAM (the
-# ~98 KB 1024-line arena still fits).
+# 117 KB 512-line arena still fits, with 13.6 KB spare).
 CFLAGS += -DTIKU_TIER_SRAM_SIZE=131072    # 128 KB: arena + TLS .bss + radio
 # TLS server flights are multi-KB; the lean 512 B TCP receive window turns
 # each one into fragile 512-byte stop-and-wait (a lost window-update ACK
@@ -778,7 +800,7 @@ CFLAGS += -DTIKU_TIER_SRAM_SIZE=131072    # 128 KB: arena + TLS .bss + radio
 CFLAGS += -DTIKU_KITS_NET_TCP_RX_BUF_SIZE=4096
 CFLAGS += -DTIKU_KITS_NET_TCP_MAX_CONNS=2
 else
-CFLAGS += -DTIKU_TIER_SRAM_SIZE=163840    # 160 KB: fits the 1024-line BASIC arena
+CFLAGS += -DTIKU_TIER_SRAM_SIZE=163840    # 160 KB: fits the 512-line BASIC arena
 endif
 endif
 
@@ -901,31 +923,36 @@ CFLAGS += --specs=nano.specs --specs=nosys.specs
 CFLAGS += -I$(PROJ_DIR)
 CFLAGS += -ffunction-sections -fdata-sections -fno-common
 
-# BASIC needs a real SRAM (AUTO) tier for its program arena (~98 KB for the
-# 1024-line BIG tier); the tiku_mem.h default is 128 B, so `basic` OOMs at
-# entry without this.  The nRF54L15 has 256 KB SRAM, so a 160 KB tier fits the
-# arena with ample room for .bss + stack.  Gated on BASIC so non-BASIC builds
-# keep the lean default.  (Same fix the rp2350 block applies for its part.)
-# 32 KB, not rp2350's 160 KB: nordic runs the FRAM BASIC tier (96 lines,
-# 2 KB heap -- observed AUTO-tier demand ~10 KB), and the https build must
-# leave room for BOTH TLS clients' RFC-max record buffers in 256 KB SRAM.
+# SRAM (AUTO) tier size.  BASIC's program arena is the tier's ONLY consumer,
+# and its size is exact, not an estimate:
+#
+#     BASIC_ARENA_BYTES = 148 * TIKU_BASIC_PROGRAM_LINES + 41344
+#
+# (the invariant 41 KB is mostly two fixed reserves -- 16 KB for DIMmed arrays
+# and 16 KB of big buffers -- carried whether a program uses them or not).
+# The tiku_mem.h default is 128 B, so `basic` OOMs at entry without an
+# override.  A _Static_assert in tiku_basic_arena.inl now checks the pool
+# against the request at BUILD time; before v0.06 nothing did, and a short
+# pool produced a clean build that failed on the board.
 ifeq ($(TIKU_SHELL_BASIC_ENABLE),1)
-# Threaded HTTPS also carries the worker scheduler state in the same 240 KB
-# application SRAM window.  The Nordic FRAM-tier BASIC profile has measured
-# AUTO-tier demand of only ~10 KB, so keep 20 KB for threaded builds and
-# recover 12 KB of static headroom; non-threaded BASIC retains the original
-# 32 KB arena.  This lets the canonical TikuBench/TikuConsole HTTPS-offload
-# profile link while remaining comfortably above observed BASIC demand.
 ifneq (,$(filter nrf54lm20a nrf54lm20b,$(MCU)))
-# The LM20's tier arena lives in RAM2 (the upper 256 KB SRAM bank, linker
-# section .ram2) and does not compete with the primary bank's .bss/stack at
-# all -- so give BASIC a roomy arena regardless of threads.  192 KB of the
-# 255 KB usable bank (top 1 KB of RAM2 is unbacked on this silicon).
-CFLAGS += -DTIKU_TIER_SRAM_SIZE=196608    # 192 KB tier arena in RAM2
-else ifeq ($(TIKU_THREADS_ENABLE),1)
-CFLAGS += -DTIKU_TIER_SRAM_SIZE=20480     # 20 KB: BASIC + thread headroom
+# LM20, 1400 lines -> 248,544 B.  Its tier lives in RAM2 (the upper SRAM bank,
+# linker section .ram2) and so does not compete with the primary bank's
+# .bss/stack at all, which is why the LM20 can afford the largest program
+# capacity outside Apollo510: 248 KB of the 255 KB usable bank (the top 1 KB of
+# RAM2 is unbacked on this silicon), leaving ~5 KB of tier slack.  Threads make
+# no difference here.
+CFLAGS += -DTIKU_TIER_SRAM_SIZE=253952    # 248 KB tier arena in RAM2
 else
-CFLAGS += -DTIKU_TIER_SRAM_SIZE=32768     # 32 KB: FRAM-tier BASIC arena
+# L15, 256 lines -> 79,232 B.  One value regardless of TIKU_THREADS_ENABLE:
+# the worker/TLS state threads add is .bss and stack, NOT tier allocations, so
+# shrinking the tier does not pay for it.  The threaded build used to set
+# 65,536 here -- 13.7 KB short of the arena -- from a tally that counted the
+# line table, big buffers and string heap but missed the DIM reserve; `basic`
+# then failed at entry on any threaded L15 image.  96 KB in the single 240 KB
+# application bank still leaves ~56 KB above .bss for the stack, against the
+# linker's 36 KB floor.
+CFLAGS += -DTIKU_TIER_SRAM_SIZE=98304     # 96 KB: BIG-256 BASIC arena
 endif
 endif
 
@@ -1127,6 +1154,10 @@ ifneq ($(MSP430_SUPPORT_DIR),)
 LDFLAGS += -L$(MSP430_SUPPORT_DIR)
 endif
 LDFLAGS += -Wl,--gc-sections
+# Emit a link map like the ARM ports do, so MSP430 RAM/FRAM figures can be
+# MEASURED rather than computed. Every memory audit before this had to derive
+# MSP430 numbers by hand because this one flag was missing.
+LDFLAGS += -Wl,-Map=$(BUILD_DIR)/main.map
 # --- msp430-elf ld DWARF workaround -------------------------------------
 # libnosys.a (pulled in by --specs=nosys.specs) ships a malformed
 # .debug_line unit that ld 9.3.1 mis-handles under --gc-sections on larger
@@ -1331,12 +1362,14 @@ SRCS += arch/nordic/tiku_onewire_arch.c
 SRCS += arch/nordic/tiku_trng_arch.c
 SRCS += arch/nordic/tiku_crypto_arch.c
 SRCS += arch/nordic/tiku_radio_arch.c
+SRCS += arch/nordic/tiku_ble_ccm_arch.c
 SRCS += arch/nordic/tiku_fault_arch.c
 # On-die 2.4 GHz RADIO backs the GENERIC broadcast-BLE capability: the
 # tiku_ble_adv facade, the BASIC BLEBEACON/BLESCAN$ words and /sys/radio all
 # gate on TIKU_HAS_BLE_ADV, never on the chip (same pattern as TIKU_HAS_BLE).
 SRCS += interfaces/bluetooth/tiku_ble_adv.c
 CFLAGS += -DTIKU_HAS_BLE_ADV=1
+TIKU_CAP_BLE_ADV := 1
 # Phase E: LE Secure Connections (SMP) pairing crypto + state machine.  Used by
 # BOTH roles -- the FLPR-backed peripheral host (responder) and the RADIO-driven
 # central test peer (initiator) -- so it lives with the BLE_ADV capability, not
@@ -1344,6 +1377,7 @@ CFLAGS += -DTIKU_HAS_BLE_ADV=1
 # the crypto kit (self-contained); unused code is GC'd on non-pairing builds.
 SRCS += interfaces/bluetooth/tiku_ble_smp.c
 SRCS += interfaces/bluetooth/tiku_ble_smp_pair.c
+SRCS += interfaces/bluetooth/tiku_ble_bond.c
 SRCS += $(wildcard tikukits/crypto/p256/*.c)
 # From-scratch IEEE 802.15.4 PHY on the same on-die RADIO (N-track).  Gated
 # on TIKU_HAS_154 (capability, never the chip); the radio154 shell command
@@ -1352,6 +1386,7 @@ SRCS += arch/nordic/tiku_ieee154_arch.c
 SRCS += interfaces/radio/tiku_154_frame.c
 SRCS += interfaces/radio/tiku_154.c
 CFLAGS += -DTIKU_HAS_154=1
+TIKU_CAP_154 := 1
 # FLPR (VPR RISC-V coprocessor) -- opt-in.  Builds the tiny RISC-V firmware
 # (arch/nordic/flpr/) with the xPack riscv-none-elf toolchain (unpacked under
 # gitignored temp/toolchains/ -- see kintsugi/flpr_plan.md F0), embeds the
@@ -1467,6 +1502,14 @@ SRCS += arch/ambiq/tiku_mpu_arch.c
 SRCS += arch/ambiq/tiku_region_arch.c
 SRCS += arch/ambiq/tiku_nvm_region_apollo510.c
 SRCS += arch/ambiq/tiku_gpio_arch.c
+ifeq ($(TIKU_DRV_GPU_ENABLE),1)
+SRCS += arch/ambiq/tiku_gpu_arch.c
+SRCS += kernel/vfs/tree/tiku_vfs_tree_gpu.c   # /sys/gpu status nodes
+endif
+ifeq ($(TIKU_DRV_DC_ENABLE),1)
+SRCS += arch/ambiq/tiku_dc_arch.c
+SRCS += interfaces/display/tiku_display.c    # GPU-accelerated compositor
+endif
 endif
 # No AmbiqSuite sources compiled in (de-SDK complete): system_apollo510.c,
 # am_util_delay.c, am_util_stdio.c, am_resources.c all dropped.
@@ -1495,6 +1538,9 @@ SRCS += arch/msp430/tiku_nvm_region_msp430.c
 endif
 SRCS += boot/tiku_boot.c
 SRCS += hal/tiku_cpu.c
+# Portable u8 vector kernels: Helium/MVE when -mcpu has it (Apollo510 M55),
+# bit-identical scalar elsewhere. Unreferenced kernels are gc-section'd away.
+SRCS += hal/tiku_simd.c
 SRCS += kernel/cpu/tiku_common.c
 SRCS += kernel/cpu/tiku_watchdog.c
 SRCS += kernel/cpu/tiku_hang.c
@@ -1541,6 +1587,40 @@ ifeq ($(TIKU_BITBANG_ENABLE),1)
 CFLAGS += -DTIKU_BITBANG_ENABLE=1
 SRCS += kernel/timers/tiku_bitbang.c
 endif
+
+# Apollo510 GPU (Think Silicon / Nema-class 2.5D) -- from-scratch, register-level
+# driver, no vendor blob. Opt-in, apollo510/apollo510b only (the SRCS entry is
+# in the apollo510 arch branch). GPU C tests pull it in via TEST_GPU.
+TIKU_DRV_GPU_ENABLE ?= 0
+ifeq ($(TEST_GPU),1)
+override TIKU_DRV_GPU_ENABLE := 1
+endif
+ifeq ($(TEST_GPU_COMPUTE),1)
+override TIKU_DRV_GPU_ENABLE := 1
+endif
+ifeq ($(TIKU_DRV_GPU_ENABLE),1)
+ifeq ($(filter apollo510 apollo510b,$(MCU)),)
+$(error TIKU_DRV_GPU_ENABLE=1 requires MCU=apollo510 or apollo510b (the GPU is \
+Apollo510-only); currently MCU=$(MCU))
+endif
+CFLAGS += -DTIKU_DRV_GPU_ENABLE=1
+endif
+
+# Apollo510 display path (NemaDC + DSI + CO5300 round AMOLED) -- from-scratch,
+# register-level, no vendor blob. Opt-in; the panel kit is on the base
+# apollo510 EVB. GPU display tests pull it in via TEST_GPU_DISPLAY.
+TIKU_DRV_DC_ENABLE ?= 0
+ifeq ($(TEST_GPU_DISPLAY),1)
+override TIKU_DRV_DC_ENABLE := 1
+endif
+ifeq ($(TIKU_DRV_DC_ENABLE),1)
+ifeq ($(filter apollo510 apollo510b,$(MCU)),)
+$(error TIKU_DRV_DC_ENABLE=1 requires MCU=apollo510 or apollo510b (NemaDC is \
+Apollo510-only); currently MCU=$(MCU))
+endif
+CFLAGS += -DTIKU_DRV_DC_ENABLE=1
+endif
+
 SRCS += interfaces/led/tiku_led.c
 SRCS += interfaces/bus/tiku_i2c_bus.c
 SRCS += interfaces/bus/tiku_spi_bus.c
@@ -1590,6 +1670,11 @@ SRCS += kernel/vfs/tree/tiku_vfs_tree_data.c
 # File store backing the dynamic /data directory (self-gated; the data tree
 # module above references it only when the shell is built).
 SRCS += kernel/fs/tiku_tfs.c
+# Chunked large objects over the store (NN weights, radio firmware, module
+# images): stock TFS calls plus name arithmetic, no NVM access of its own.
+# Unreferenced entry points are gc-section'd away.
+SRCS += kernel/fs/tiku_blob.c
+SRCS += kernel/fs/tiku_model.c
 
 # ---------------------------------------------------------------------------
 # Shell (kernel service — compiled when TIKU_SHELL_ENABLE=1)
@@ -1674,7 +1759,75 @@ endif
 ifeq ($(TIKU_SHELL_BASIC_ENABLE),1)
 CFLAGS += -DTIKU_SHELL_CMD_BASIC=1
 SRCS += kernel/shell/basic/tiku_basic.c
+SRCS += kernel/shell/basic/tiku_basic_module.c   # Tier 3 loader (self-gates)
 SRCS += kernel/shell/commands/tiku_shell_cmd_basic.c
+endif
+
+# Loadable native module (Tier 3, loadable.md): compile mod_demo.c SEPARATELY
+# at the executable NVM slot VMA, flatten to a blob, and wrap it as an ARM
+# object embedded in the firmware (the "bytes that arrive over the air").
+# Per-DEVICE: the slot address, install mechanism and CPU differ --
+#   nrf54lm20a/b + nrf54l15: RRAM slot 0x0C8000, Cortex-M33 (byte-writable
+#                         XIP) -- ONE address for the whole Nordic family
+#   apollo510/apollo510b: MRAM slot 0x488000,  Cortex-M55 (bootrom-programmed)
+#   apollo4l/apollo4p:    MRAM slot 0x90000,   Cortex-M4  (bootrom-programmed)
+#   rp2350:               flash slot 0x100F8000, Cortex-M33 (boot-ROM sectors)
+#   msp430fr5994/fr6989:  FRAM slot 0x43000/0x23000 (HIFRAM top, MPU-unlocked)
+# ARM slots are 32 KB (canonical order: code | module | region | persist);
+# MSP430 keeps ~4 KB at the top of HIFRAM (deliberate small-part exception).
+# Other MCUs have no module slot carved in their linker script -> hard error.
+ifeq ($(TIKU_BASIC_MODULE_ENABLE),1)
+CFLAGS        += -DTIKU_BASIC_MODULE_ENABLE=1
+MOD_BUILD      = $(BUILD_DIR)/module
+# Per-family wrap format for the embedded-image object (must match the
+# FIRMWARE's object format, since it links into the firmware).
+MOD_WRAP_OUT   = elf32-littlearm
+MOD_WRAP_ARCH  = arm
+# objcopy binary-wrap works for ARM; msp430-elf-ld REJECTS wrapped objects
+# (no .MSP430.attributes -> "unknown code model"), so MSP430 embeds the
+# image as a generated C array compiled with the firmware's own flags.
+MOD_EMBED      = objcopy
+ifneq (,$(filter nrf54lm20a nrf54lm20b,$(MCU)))
+MOD_CPU_FLAGS  = -mcpu=cortex-m33 -mthumb -mfloat-abi=soft
+MOD_LDS        = kernel/shell/basic/modules/mod_demo.ld
+else ifeq ($(MCU),nrf54l15)
+# Same slot VMA as the LM20 (shared 800 KB Nordic code window), so the LM20
+# module script serves both parts and a module image is family-portable.
+MOD_CPU_FLAGS  = -mcpu=cortex-m33 -mthumb -mfloat-abi=soft -DTIKU_DEVICE_NRF54L15
+MOD_LDS        = kernel/shell/basic/modules/mod_demo.ld
+else ifeq ($(MCU),rp2350)
+MOD_CPU_FLAGS  = -mcpu=cortex-m33 -mthumb -mfloat-abi=soft -DPLATFORM_RP2350
+MOD_LDS        = kernel/shell/basic/modules/mod_demo_rp2350.ld
+else ifneq (,$(filter apollo510 apollo510b,$(MCU)))
+MOD_CPU_FLAGS  = -mcpu=cortex-m55 -mthumb -mfloat-abi=soft -DAM_PART_APOLLO510
+MOD_LDS        = kernel/shell/basic/modules/mod_demo_apollo510.ld
+else ifneq (,$(filter apollo4l apollo4p,$(MCU)))
+MOD_CPU_FLAGS  = -mcpu=cortex-m4 -mthumb -mfloat-abi=soft -DAM_PART_APOLLO4L
+MOD_LDS        = kernel/shell/basic/modules/mod_demo_apollo4l.ld
+else ifeq ($(MCU),msp430fr5994)
+# MSP430 module: same compiler/memory-model as the firmware (-mlarge, CALLA
+# calling convention through the syscall table); no Thumb, no ARM wrap.
+MOD_CPU_FLAGS  = -mmcu=msp430fr5994 -mlarge
+MOD_LDS        = kernel/shell/basic/modules/mod_demo_msp430fr5994.ld
+MOD_LDFLAGS    =
+MOD_EMBED      = carray
+else ifeq ($(MCU),msp430fr6989)
+MOD_CPU_FLAGS  = -mmcu=msp430fr6989 -mlarge
+MOD_LDS        = kernel/shell/basic/modules/mod_demo_msp430fr6989.ld
+MOD_LDFLAGS    =
+MOD_EMBED      = carray
+else
+$(error TIKU_BASIC_MODULE_ENABLE=1: no module slot for MCU=$(MCU) \
+        (supported: nrf54lm20a nrf54lm20b nrf54l15 rp2350 apollo510 \
+        apollo510b apollo4l apollo4p msp430fr5994 msp430fr6989))
+endif
+MOD_CFLAGS     = $(MOD_CPU_FLAGS) -Os -ffreestanding \
+                 -fno-builtin -fno-jump-tables -DTIKU_MODULE_BUILD=1 \
+                 -I kernel/shell/basic
+# ARM modules link fully freestanding; MSP430 keeps the toolchain specs
+# (minus crt0) so the hardware-multiply helper lib (libmul_f5) resolves.
+MOD_LDFLAGS   ?= -nostdlib
+TIKU_MOD_IMG_O = $(MOD_BUILD)/mod_demo_img.o
 endif
 
 # Embedded BASIC: BASIC_PROGRAM=foo.bas turns into a C string literal
@@ -1736,10 +1889,18 @@ ifneq (,$(findstring TIKU_SHELL_CMD_NVMPROBE=1,$(EXTRA_CFLAGS)))
 SRCS += kernel/shell/commands/tiku_shell_cmd_nvmprobe.c
 endif
 ifneq (,$(findstring TIKU_SHELL_CMD_CRYPTOPROBE=1,$(EXTRA_CFLAGS)))
+ifeq ($(TIKU_CRACEN_PK_ENABLE),1)
 SRCS += kernel/shell/commands/tiku_shell_cmd_cryptoprobe.c
+else
+$(warning cryptoprobe: needs TIKU_CRACEN_PK_ENABLE=1 (CRACEN PK) -- skipped)
+endif
 endif
 ifneq (,$(findstring TIKU_SHELL_CMD_AXONSPROBE=1,$(EXTRA_CFLAGS)))
+ifeq ($(MCU),nrf54lm20b)
 SRCS += kernel/shell/commands/tiku_shell_cmd_axonsprobe.c
+else
+$(warning axonsprobe: the Axon NPU exists only on nrf54lm20b -- skipped)
+endif
 endif
 
 # Axon NPU (nRF54LM20B) -- opt-in.  Links Nordic's Axon driver core from the
@@ -1771,7 +1932,76 @@ LDLIBS_AXON = $(AXON_SDK)/lib/axon/bin/arm/libnrf-axon-driver-internal.a
 # checkout.  The interlayer working buffer lives in RAM2 (size per model;
 # 140000 covers the shipped tinyml set -- the model init verifies and
 # reports the exact need on mismatch).
+# The two model configurations are mutually exclusive:
+#
+#   TIKU_AXON_MODEL=<name>          bake that one model into .rodata (the
+#                                   development convenience, and the reference
+#                                   the store path is checked against)
+#   TIKU_AXON_MODEL_FROM_STORE=1    bake NO model at all; every model arrives
+#                                   as a file in /data (the shipping shape)
+#
+# Naming one of them is not naming the other.
+ifeq ($(TIKU_AXON_MODEL_FROM_STORE),1)
 ifneq ($(strip $(TIKU_AXON_MODEL)),)
+$(error TIKU_AXON_MODEL_FROM_STORE=1 and TIKU_AXON_MODEL=$(TIKU_AXON_MODEL) are \
+mutually exclusive -- from-store means no model is compiled in. Drop \
+TIKU_AXON_MODEL to build the model-free image.)
+endif
+# THE SHIPPING SHAPE.  Nordic's inference sources are compiled for their CODE;
+# no model translation unit is compiled at all, so no weights, no command
+# buffer and no KAT vectors reach .rodata.  The vendor globals that the model TU
+# used to define are supplied by the probe instead, and every model -- including
+# its descriptor -- is read from /data at run time.
+#
+# This is what makes tinyml_vww buildable: its arrays are 632 KB in a single
+# translation unit, against a 384 KB code window.  Nothing about the image is
+# model-specific any more, so "which models fit" stops being a build question.
+SRCS += $(AXON_SDK)/drivers/axon/nrf_axon_nn_infer.c
+SRCS += $(AXON_SDK)/drivers/axon/nrf_axon_nn_infer_test.c
+SRCS += $(AXON_SDK)/drivers/axon/nrf_axon_nn_op_extensions.c
+SRCS += $(AXON_SDK)/lib/axon/platform/src/nrf_axon_logging.c
+SRCS += $(AXON_SDK)/lib/axon/platform/src/nrf_axon_vector_compare.c
+CFLAGS += -DPRId64='"lld"' -DPRIx64='"llx"'
+CFLAGS += -DTIKU_AXON_MODEL_FROM_STORE=1
+CFLAGS += -I$(AXON_SDK)/tests/axon/compiled_models
+TIKU_AXON_ILB ?= 140000
+CFLAGS += -DNRF_AXON_INTERLAYER_BUFFER_SIZE=$(TIKU_AXON_ILB)
+CFLAGS += -DNRF_AXON_PSUM_BUFFER_SIZE=$(TIKU_AXON_PSUM)
+TIKU_AXON_PSUM ?= 0
+else ifneq ($(strip $(TIKU_AXON_MODEL)),)
+# Nordic's compiled models are C arrays, so this config bakes the weights (and
+# the KAT's test vectors) into .rodata, where the linker counts them as CODE and
+# they eat the code window.  That is the pathology P3d exists to remove: weights
+# are DATA and belong in /data as a file.
+#
+# Which models still overrun is a MEASURED fact, not a guess -- at the 384 KB
+# window, on nrf54lm20b:
+#     tinyml_kws  214,745 B   links
+#     tinyml_ic   369,213 B   links
+#     tinyml_ad   374,445 B   links
+#     tinyml_vww  ~700 KB     DOES NOT LINK
+# so the warning below fires only for the models that genuinely do not fit.  It
+# used to fire for all four and claim all four exceeded the window, which was
+# false for three of them -- and a warning that cries wolf is one nobody reads
+# on the occasion it is true.
+#
+# vww is the model P3d's acceptance gate is written against (the PERSON /
+# 161974240 / "output bit exact!" baseline), so the forcing function survives
+# exactly where it has to.  Add a model here if a future one overruns; do NOT
+# answer an overrun by raising the window.
+AXON_OVERSIZE_MODELS := tinyml_vww
+ifneq (,$(filter $(TIKU_AXON_MODEL),$(AXON_OVERSIZE_MODELS)))
+$(warning TIKU_AXON_MODEL=$(TIKU_AXON_MODEL): this model's weights + KAT \
+vectors in .rodata exceed the 384 KB code window, so the link WILL fail. \
+Build TIKU_AXON_MODEL_FROM_STORE=1 instead and provision the model to /data. \
+Do NOT raise the window -- weights are DATA, and sizing the OS's memory \
+contract around a vendor test harness is the design P3/P4 undid.)
+else
+$(warning TIKU_AXON_MODEL=$(TIKU_AXON_MODEL): links today, but the weights are \
+still compiled into .rodata and charged against the code window. This build is \
+a development convenience and the reference the store path is checked against; \
+TIKU_AXON_MODEL_FROM_STORE=1 is the shipping shape.)
+endif
 SRCS += $(AXON_SDK)/drivers/axon/nrf_axon_nn_infer.c
 SRCS += $(AXON_SDK)/drivers/axon/nrf_axon_nn_infer_test.c
 SRCS += $(AXON_SDK)/drivers/axon/nrf_axon_nn_op_extensions.c
@@ -1793,11 +2023,30 @@ else
 CFLAGS += -DNRF_AXON_INTERLAYER_BUFFER_SIZE=0 -DNRF_AXON_PSUM_BUFFER_SIZE=0
 endif
 endif
+# Radio bring-up commands: requested via EXTRA_CFLAGS, honoured only where
+# the capability exists.  tiku_shell_config.h resolves the same rule on the
+# C side, so a skipped command vanishes from the table too -- these warnings
+# just tell the user WHY.
 ifneq (,$(findstring TIKU_SHELL_CMD_BLEADV=1,$(EXTRA_CFLAGS)))
+ifeq ($(TIKU_CAP_BLE_ADV),1)
 SRCS += kernel/shell/commands/tiku_shell_cmd_bleadv.c
+else
+$(warning bleadv: no broadcast-BLE radio on $(MCU) -- command skipped)
+endif
 endif
 ifneq (,$(findstring TIKU_SHELL_CMD_RADIO154=1,$(EXTRA_CFLAGS)))
+ifeq ($(TIKU_CAP_154),1)
 SRCS += kernel/shell/commands/tiku_shell_cmd_radio154.c
+else
+$(warning radio154: no 802.15.4 PHY on $(MCU) -- command skipped)
+endif
+endif
+ifneq (,$(findstring TIKU_SHELL_CMD_RFTEST=1,$(EXTRA_CFLAGS)))
+ifeq ($(TIKU_CAP_BLE_ADV),1)
+SRCS += kernel/shell/commands/tiku_shell_cmd_rftest.c
+else
+$(warning rftest: no test-capable 2.4 GHz radio on $(MCU) -- command skipped)
+endif
 endif
 endif
 # GPIO arch is always needed (VFS tree references GPIO read/write/dir).
@@ -2340,10 +2589,22 @@ endif # HAS_TIKUKITS
 
 endif # MINIMAL=1 / else
 
-# Object files in build directory. ASM_SRCS is for .S/.s files pulled in
-# by build fragments or vendor startup sources; same CFLAGS as C, since
-# the toolchain treats them as preprocess-and-assemble inputs and we only
-# need the include-path / -D macros.
+# Object files in build directory. ASM_SRCS is for .S files pulled in
+# by build.mk fragments (e.g. firmware-blob .incbin wrappers); same
+# CFLAGS as C, since the toolchain treats .S as preprocessed-and-then-
+# assembled and we only need the include-path / -D macros.
+# Deduplicate SRCS before deriving objects.  Several blocks legitimately
+# claim the same kit: the Nordic BLE-SMP block needs tikukits/crypto/p256
+# for LE Secure Connections, and the crypto-kit block adds it again, so
+# `MCU=nrf54l15 TIKU_KIT_CRYPTO_ENABLE=1` used to put the same object in
+# the link twice and fail with "multiple definition of
+# tiku_kits_crypto_p256_*".  $(sort) both sorts and removes duplicates;
+# link order of explicit objects does not affect symbol resolution (the
+# libraries come later, inside --start-group), and every section is placed
+# by pattern in the linker scripts rather than by object order.
+SRCS := $(sort $(SRCS))
+ASM_SRCS := $(sort $(ASM_SRCS))
+
 OBJS = $(patsubst %.c,$(BUILD_DIR)/%.o,$(SRCS)) \
        $(patsubst %.S,$(BUILD_DIR)/%.o,$(filter %.S,$(ASM_SRCS))) \
        $(patsubst %.s,$(BUILD_DIR)/%.o,$(filter %.s,$(ASM_SRCS)))
@@ -2357,6 +2618,11 @@ endif
 ifeq ($(TIKU_FLPR_ENABLE),1)
 # Embedded FLPR coprocessor image (recipes below `all:`, same reason).
 OBJS += $(TIKU_FLPR_IMG_O)
+endif
+
+ifeq ($(TIKU_BASIC_MODULE_ENABLE),1)
+# Embedded loadable-module image (recipes below `all:`).
+OBJS += $(TIKU_MOD_IMG_O)
 endif
 
 # Header-dependency tracking.  Each compile emits a .d next to its .o (via
@@ -2413,8 +2679,13 @@ $(PLATFORM_STAMP):
 	@mkdir -p build
 	@echo $(TIKU_PLATFORM) > $@
 
+# EXTRA_LDFLAGS is the link-side counterpart of EXTRA_CFLAGS, and like it, it is
+# fingerprinted by the flag-change guard -- switching it between builds of the
+# same MCU drops that build dir's objects rather than shipping stale ones.  It
+# exists for host-side tooling links (see the packing-only code-cap override in
+# the Nordic linker script), not as a way to reshape a shipped image.
 $(TARGET): $(OBJS) $(PLATFORM_STAMP) $(NOSYS_FIXED)
-	$(CC) $(LDFLAGS) -o $@ $(OBJS) $(LDLIBS)
+	$(CC) $(LDFLAGS) $(EXTRA_LDFLAGS) -o $@ $(OBJS) $(LDLIBS)
 
 $(BUILD_DIR)/%.o: %.c
 	@mkdir -p $(dir $@)
@@ -2505,6 +2776,33 @@ $(TIKU_FLPR_IMG_O): $(FLPR_BUILD)/tiku_flpr.bin
 	    tiku_flpr.bin tiku_flpr_img.o
 
 -include $(FLPR_OBJS:.o=.d)
+endif
+
+# Loadable-module sub-build: separately-compiled ARM module at the NVM slot
+# VMA -> flat blob -> ARM object with _binary_mod_demo_bin_* symbols the
+# loader (tiku_basic_module.c) installs from. $(MOD_LDS) selects the
+# per-device slot VMA (nordic RRAM vs apollo510 MRAM).
+ifeq ($(TIKU_BASIC_MODULE_ENABLE),1)
+$(MOD_BUILD)/mod_demo.elf: kernel/shell/basic/modules/mod_demo.c \
+                           $(MOD_LDS)
+	@mkdir -p $(dir $@)
+	$(CC) $(MOD_CFLAGS) $(MOD_LDFLAGS) -T $(MOD_LDS) \
+	    -Wl,--gc-sections -nostartfiles -o $@ $< -lgcc
+
+$(MOD_BUILD)/mod_demo.bin: $(MOD_BUILD)/mod_demo.elf
+	$(OBJCOPY) -O binary $< $@
+	@echo "  [module]  $$(wc -c < $@ | tr -d ' ') bytes"
+
+ifeq ($(MOD_EMBED),carray)
+$(TIKU_MOD_IMG_O): $(MOD_BUILD)/mod_demo.bin
+	python3 tools/mod_embed.py $(MOD_BUILD)/mod_demo.bin $(MOD_BUILD)/mod_demo_img.c
+	$(CC) $(CFLAGS) -c -o $@ $(MOD_BUILD)/mod_demo_img.c
+else
+$(TIKU_MOD_IMG_O): $(MOD_BUILD)/mod_demo.bin
+	cd $(MOD_BUILD) && $(OBJCOPY) -I binary -O $(MOD_WRAP_OUT) -B $(MOD_WRAP_ARCH) \
+	    --rename-section .data=.rodata,alloc,load,readonly,data,contents \
+	    mod_demo.bin mod_demo_img.o
+endif
 endif
 
 size: $(TARGET)

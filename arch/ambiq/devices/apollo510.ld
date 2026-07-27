@@ -28,11 +28,13 @@ ENTRY(tiku_ambiq_reset_handler)
 
 MEMORY
 {
-    /* Code window: a fixed ~512 KB budget for code/rodata. Everything between
-     * the code window and the 32 KB mirror becomes the carved NVM region, so
-     * the NVM store/tier gets the bulk of MRAM (~3.4 MB). A region overflow
-     * here means code outgrew its 512 KB budget. */
-    MRAM  (rx)  : ORIGIN = 0x00410000, LENGTH = 0x80000
+    /* Code window: a fixed 384 KB budget for code/rodata -- the fleet-wide
+     * contract, sized for code growth (largest measured image 130.3 KB).
+     * apollo510 carves NO module slot (its module executes from ITCM), so
+     * everything between this window and the 64 KB durable mirror becomes the
+     * carved NVM region -- ~3.5 MB, which the tier and /data split. Overflow
+     * here means code outgrew its budget -- do NOT raise it to fit data. */
+    MRAM  (rx)  : ORIGIN = 0x00410000, LENGTH = 0x60000   /* 384 KB code window (M4) */
     TCM   (rwx) : ORIGIN = 0x20000000, LENGTH = 512K      /* DTCM: .data/.bss/heap/stack    */
     SSRAM (rwx) : ORIGIN = 0x20080000, LENGTH = 3M        /* shared SRAM (unused at bring-up) */
 }
@@ -40,20 +42,38 @@ MEMORY
 __flash_start = ORIGIN(MRAM);
 __flash_end   = ORIGIN(MRAM) + LENGTH(MRAM);
 
-/* Carved NVM store/tier region (substrate B): ALL MRAM between the 512 KB code
- * window and the 32 KB mirror -- ~3.4 MB on this part. Read in place by pointer
+/* NO loadable-native-module slot on this part (module_size = 0). A Tier-3
+ * module image is a store file (mod.bin) that the loader copies into the ITCM
+ * and runs from there -- see tiku_basic_module.h and modules/
+ * mod_demo_apollo510.ld. The 32 KB of executable MRAM that used to be carved
+ * here (0x488000..0x490000) is region now, which is the whole point: the image
+ * was being counted twice, once as a .rodata blob in the code window and again
+ * as the slot it was programmed into. Every other ARM part still carves the
+ * slot -- each needs its own RAM window and its own verification, and only
+ * Apollo510 has been measured (TikuBench tests/memory/test_mem_tcm.c). */
+/* Canonical NVM layout: inputs + shared derivation (arch/common). */
+__tiku_layout_top          = 0x00800000;
+__tiku_layout_code_cap     = ORIGIN(MRAM) + LENGTH(MRAM);  /* end of code */
+__tiku_layout_module_size  = 0x0;                          /* none: ITCM  */
+__tiku_layout_durable_size = 0x10000;                      /* 64 KB mirror */
+INCLUDE arch/common/tiku_nvm_layout.ld
+
+/* Carved NVM store/tier region (substrate B): ALL MRAM between the code window
+ * and the 64 KB mirror -- ~3.7 MB on this part. Read in place by pointer
  * (PRIVDEFENA's default map covers MRAM above the code window); written via the
  * bootrom backend (kernel/memory/tiku_nvm_region). The NVM tier and file store
- * ride this. */
-__tiku_nvmfs_base = ORIGIN(MRAM) + LENGTH(MRAM);   /* 0x490000: just above code */
+ * ride this. The base follows the code window directly now that no module slot
+ * sits between them, so SHRINKING the window (P4) moves the FS -- which is a
+ * reformat, not a silent corruption: the store's superblock carries its own
+ * geometry and a mount over foreign bytes fails cleanly. */
+/* (__tiku_nvmfs_base/__tiku_nvmfs_size come from the shared derivation.) */
 
 /* NVM mirror page (mem port C, Proposal A): 64 KB at the top of MRAM
  * (0x7F0000..0x800000), where tiku_mem_arch_nvm_flush() programs the .uninit
  * snapshot. Grown from 32 KB for more durable cells/aliases headroom. The SBL
  * (0x400000) is never touched. */
-__tiku_nvm_mram_start = 0x007F0000;                            /* top - 64 KB */
-__tiku_nvm_mram_size  = 0x10000;                               /* 64 KB */
-__tiku_nvmfs_size     = __tiku_nvm_mram_start - __tiku_nvmfs_base;  /* ~3.4 MB */
+__tiku_nvm_mram_start = __tiku_layout_durable_start;
+__tiku_nvm_mram_size  = __tiku_layout_durable_size;
 __sram_start  = ORIGIN(TCM);
 __sram_end    = ORIGIN(TCM) + LENGTH(TCM);
 
@@ -207,7 +227,7 @@ SECTIONS
 
     /* The NVM mirror page must hold the magic word + the whole .uninit image. */
     ASSERT((__uninit_end - __uninit_start) <= (__tiku_nvm_mram_size - 4),
-           "ERROR: .uninit too large for the 32 KB NVM mirror page (mem port C)")
+           "ERROR: .uninit too large for the 64 KB NVM mirror page (mem port C)")
 
     /DISCARD/ :
     {

@@ -1,5 +1,5 @@
 /*
- * Tiku Operating System v0.05
+ * Tiku Operating System v0.06
  * Simple. Ubiquitous. Intelligence, Everywhere.
  * http://tiku-os.org
  *
@@ -208,11 +208,12 @@ static long          basic_sub_result;
  * match_kw's raw-text path at the dispatch fallthroughs. */
 typedef struct {
     char    name[TIKU_BASIC_EXT_NAME_MAX];   /* "" = free slot */
-    uint8_t kind;                            /* 0 = statement, 1 = numeric fn */
+    uint8_t kind;                            /* 0 stmt, 1 numeric fn, 2 str fn */
     uint8_t arity;                           /* numeric fns: 0..2 */
     union {
         tiku_basic_ext_stmt_fn stmt;
         tiku_basic_ext_nfn     nfn;
+        tiku_basic_ext_strfn   strfn;
     } u;
 } basic_ext_entry_t;
 static basic_ext_entry_t basic_ext_tab[TIKU_BASIC_EXT_MAX];
@@ -247,9 +248,10 @@ static long parse_array_index(const char **p,
 
 /* Durable saved-program state, buffer-backed variant.  The save buffer + the
  * persist-store metadata carry BASIC_NVM_PERSISTENT (.persistent FRAM on
- * MSP430 -- durable; plain .bss on Nordic/host -- session-only);
+ * MSP430 -- durable; plain .bss on host -- session-only);
  * tiku_persist_init() validates entries via the magic number on every boot.
- * Not built on the region-backed parts (Ambiq MRAM, RP2350 flash): there the
+ * Not built on ANY region-backed part (Ambiq MRAM, RP2350 flash, Nordic RRAM --
+ * all three have a reserved tail now, so BASIC_NVM_ON_REGION is set): there the
  * saved program lives at a fixed offset in the carved NVM region's reserved
  * tail instead -- see basic_prog_store/fetch in tiku_basic_persist.inl. */
 #if !BASIC_NVM_ON_REGION

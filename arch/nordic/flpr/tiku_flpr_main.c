@@ -1,5 +1,5 @@
 /*
- * Tiku Operating System v0.05
+ * Tiku Operating System v0.06
  * Simple. Ubiquitous. Intelligence, Everywhere.
  * http://tiku-os.org
  *
@@ -140,7 +140,7 @@ static void flpr_beacon_burst(void)
  * the packet format are already set by the M33 (secure) before the flip;
  * we only touch FREQUENCY/DATAWHITE/PACKETPTR/SHORTS + the RX task, mirror
  * of flpr_beacon_burst's per-channel TX. */
-static uint8_t rxprobe_buf[48] __attribute__((aligned(4)));
+static uint8_t rxprobe_buf[TIKU_FLPR_DLE_BUF_SIZE] __attribute__((aligned(4)));
 
 static void flpr_rxprobe(tiku_flpr_shared_t *sh)
 {
@@ -213,7 +213,13 @@ static void flpr_rxprobe(tiku_flpr_shared_t *sh)
  * the M33 advertising phase in tiku_radio_arch_connect; the M33 set the
  * static packet format + adv-AA/CRC before the NS flip. */
 static uint8_t conn_adv[48] __attribute__((aligned(4)));
-static uint8_t conn_rx[48]  __attribute__((aligned(4)));
+/* RX DMA target: must hold [S0][LEN][S1] + PCNF1.MAXLEN (80 since DLE/F1)
+ * = 83 bytes.  At 48 this overflowed 35 bytes into the NEXT .bss object on
+ * every address-matched long/garbage reception (CRC pass not required) --
+ * which was conn_adv's head, so the FLPR radiated prefix-corrupted but
+ * CRC-consistent ADV_INDs and whole connect sessions went deaf.  See
+ * kintsugi/radioleft.md §0. */
+static uint8_t conn_rx[TIKU_FLPR_DLE_BUF_SIZE] __attribute__((aligned(4)));
 
 /* --- Link-layer helpers ported from tiku_radio_arch.c (pure logic) --- */
 
@@ -275,7 +281,7 @@ static uint8_t flpr_ll_ack(uint8_t *sn, uint8_t *nesn, uint8_t rx_sn,
  * is forwarded verbatim to the M33 host over f2a; the host's response frame
  * comes back over a2f and is queued as an LLID=2 data PDU.  ATT/GATT lives
  * on the M33 now (tiku_ble_host) -- the coprocessor no longer parses it. */
-static uint8_t  fll_tx[40];             /* pending PDU [hdr][len][S1][pay]  */
+static uint8_t  fll_tx[TIKU_FLPR_DLE_BUF_SIZE]; /* pending PDU [hdr][len][S1][pay]*/
 static uint8_t  fll_tx_len;             /* payload len; 0 = none            */
 static uint8_t  fll_tx_llid;            /* 2 L2CAP / 3 control              */
 static uint8_t  fll_sent_vers;          /* we queued our VERSION_IND        */
@@ -305,6 +311,10 @@ static uint16_t fll_cu_timeout;         /* new supervision, 10 ms (telemetry)*/
 static uint8_t  fll_enc_pending;        /* LL_ENC_REQ seen, awaiting M33 SKDs */
 static uint8_t  fll_enc_done;           /* LL_ENC_RSP sent (dedup retransmits) */
 static uint32_t fll_enc_seq;            /* enc_req_seq value we published     */
+/* PHY update (Phase F2): apply the new PHY (RADIO MODE/PCNF0) at its Instant. */
+static uint8_t  fll_phy_pending;        /* LL_PHY_UPDATE_IND armed            */
+static uint8_t  fll_phy_new;            /* target PHY: 0 = 1M, 1 = 2M         */
+static uint16_t fll_phy_instant;        /* connEventCount to switch at        */
 
 static void fll_queue_raw(uint8_t llid, const uint8_t *p, uint8_t plen)
 {
@@ -435,7 +445,41 @@ static void fll_handle_rx(const uint8_t *buf, tiku_flpr_shared_t *sh)
             flpr_doorbell_to_app();
             fll_enc_pending = 1u;
         }
-    } else if (op != 0x09u && op != 0x13u && op != 0x07u) {
+    } else if (op == 0x14u) {                   /* LL_LENGTH_REQ (DLE)      */
+        /* Reply with our max, and publish the effective TX size (min of our
+         * max and the peer's MaxRxOctets) so the M33 host stops fragmenting a
+         * whole L2CAP PDU across data PDUs.  CtrData: MaxRxOctets[2] MaxRxTime
+         * [2] MaxTxOctets[2] MaxTxTime[2] (LE) at buf[4..11]. */
+        if (buf[1] >= 9u) {
+            uint16_t peer_rx = (uint16_t)(buf[4] | ((uint16_t)buf[5] << 8));
+            uint32_t eff = (peer_rx < TIKU_FLPR_DLE_MAX_OCTETS)
+                         ? peer_rx : TIKU_FLPR_DLE_MAX_OCTETS;
+            uint8_t rsp[8];
+            rsp[0] = (uint8_t)TIKU_FLPR_DLE_MAX_OCTETS; rsp[1] = 0u;
+            rsp[2] = (uint8_t)TIKU_FLPR_DLE_MAX_TIME;
+            rsp[3] = (uint8_t)(TIKU_FLPR_DLE_MAX_TIME >> 8);
+            rsp[4] = (uint8_t)TIKU_FLPR_DLE_MAX_OCTETS; rsp[5] = 0u;
+            rsp[6] = (uint8_t)TIKU_FLPR_DLE_MAX_TIME;
+            rsp[7] = (uint8_t)(TIKU_FLPR_DLE_MAX_TIME >> 8);
+            fll_queue_ctrl(0x15u, rsp, 8u);     /* LL_LENGTH_RSP            */
+            if (eff < 27u) { eff = 27u; }
+            sh->dle_max = eff;                  /* publish to the M33 host  */
+        }
+    } else if (op == 0x16u) {                   /* LL_PHY_REQ (PHY update)  */
+        static const uint8_t rsp[2] = { 0x07u, 0x07u };  /* 1M + 2M + Coded */
+        fll_queue_ctrl(0x17u, rsp, 2u);         /* LL_PHY_RSP              */
+    } else if (op == 0x18u) {                   /* LL_PHY_UPDATE_IND        */
+        /* CtrData: PHY_C_TO_P[1] PHY_P_TO_C[1] Instant[2] at buf[4..7].
+         * Symmetric switch: our RX (C->P) and TX (P->C) take the same PHY;
+         * apply RADIO MODE/PCNF0 at the Instant.  0=1M 1=2M 2=Coded S8. */
+        if (buf[1] >= 5u) {
+            fll_phy_new = ((buf[4] & 0x04u) != 0u) ? 2u
+                        : ((buf[4] & 0x02u) != 0u) ? 1u : 0u;
+            fll_phy_instant = (uint16_t)(buf[6] | ((uint16_t)buf[7] << 8));
+            fll_phy_pending = 1u;
+        }
+    } else if (op != 0x09u && op != 0x13u && op != 0x07u &&
+               op != 0x15u && op != 0x17u) {
         fll_queue_ctrl(0x07u, &op, 1u);         /* LL_UNKNOWN_RSP           */
     }
 }
@@ -445,8 +489,8 @@ static void fll_handle_rx(const uint8_t *buf, tiku_flpr_shared_t *sh)
  * the CSA#1 channel and wait for its packet, hardware-T_IFS respond with
  * an empty PDU carrying our SN/NESN, and re-arm.  Channels advance per
  * event in lockstep with the central.  Supervision = a run of misses. */
-static uint8_t conn_txb[40]    __attribute__((aligned(4)));
-static uint8_t conn_datrx[48]  __attribute__((aligned(4)));
+static uint8_t conn_txb[TIKU_FLPR_DLE_BUF_SIZE]   __attribute__((aligned(4)));
+static uint8_t conn_datrx[TIKU_FLPR_DLE_BUF_SIZE] __attribute__((aligned(4)));
 
 /* Anchored-RX: cut RADIO-on time without breaking the channel lock.  The
  * continuous-RX loop stays synced for free -- one catch == one CSA#1 hop ==
@@ -477,6 +521,17 @@ static void flpr_conn_hold(tiku_flpr_shared_t *sh)
     uint8_t  last_un = 0u, k, i;
     uint32_t event = 0u, miss_run = 0u, spin;
     uint32_t idle_iters = 0u, win = ARX_WIN_MAX, rxon = 0u;
+    /* cec must track the CENTRAL's connEventCount -- every LL-update Instant
+     * (channel map / connection update / PHY) is compared against it.  A
+     * serviced event is one interval, but a MISS window spans as many
+     * intervals as it burned (a wide re-acquire window is ~8 of them), so
+     * misses advance cec by spent-iters / evt_iters, where evt_iters is the
+     * anchored-cadence measurement (idle + RX-wait ~= one interval) the
+     * closed loop already produces.  Advancing 1-per-miss (the old scheme)
+     * made cec lag by ~7 per wide miss, so "coordinated" Instants fired
+     * SECONDS late on this side -- fatal for a PHY switch (one side flips,
+     * the other is deaf on the old PHY and the lag then explodes). */
+    uint32_t evt_iters = 0u, idle_spent;
     uint8_t  have_anchor = 0u;
     uint16_t cec = 0u;                           /* connEventCount (wraps)    */
 
@@ -491,6 +546,11 @@ static void flpr_conn_hold(tiku_flpr_shared_t *sh)
     fll_cm_pending = 0u; fll_cu_pending = 0u;    /* Phase A: no update armed  */
     fll_enc_pending = 0u; fll_enc_done = 0u;      /* Phase E3: not encrypting  */
     sh->enc_on = 0u;
+    sh->dle_max = 0u;                             /* Phase F1: pre-DLE (27)    */
+    fll_phy_pending = 0u;                         /* Phase F2: 1M until update  */
+    sh->conn_phy = 0u; sh->conn_phy_evt = 0u;
+    sh->conn_phy_mode = 0u;                       /* F2 bisect telemetry (H1)   */
+    sh->conn_phy_addr = 0u; sh->conn_phy_crcok = 0u;
     sh->conn_sub = 0u;
     sh->conn_gap = 0u; sh->conn_rxon = 0u;       /* telemetry: not yet anchored*/
 
@@ -526,6 +586,37 @@ static void flpr_conn_hold(tiku_flpr_shared_t *sh)
             fll_cu_pending = 0u;
             sh->conn_cu = sh->conn_cu + 1u;
         }
+        /* Phase F2: switch the RADIO PHY at the Instant -- MODE + PCNF0.PLEN
+         * (2M = MODE 4, 16-bit preamble; 1M = MODE 3, 8-bit).  The base PCNF0
+         * bits (LFLEN 8, S0LEN 1, S1INCL) are PHY-independent.  This must
+         * precede the event's RX arm so we receive on the new PHY, in lockstep
+         * with the central which switches at the same connEventCount. */
+        if (fll_phy_pending &&
+            (uint16_t)(cec - fll_phy_instant) < 0x8000u) {
+            if (fll_phy_new == 2u) {             /* Coded S8: MODE 5, PLEN
+                                                  * LongRange, CILEN 2,
+                                                  * TERMLEN 3 (R8.2 config)  */
+                r->MODE  = 5u;
+                r->PCNF0 = (8u << 0) | (1u << 8) | (1u << 20) |
+                           (3u << 24) | (2u << 22) | (3u << 29);
+            } else if (fll_phy_new == 1u) {      /* 2M                        */
+                r->MODE  = 4u;
+                r->PCNF0 = (8u << 0) | (1u << 8) | (1u << 20) | (1u << 24);
+            } else {                             /* 1M                        */
+                r->MODE  = 3u;
+                r->PCNF0 = (8u << 0) | (1u << 8) | (1u << 20);
+            }
+            /* Drop the anchor so we wide-re-acquire on the NEW PHY (its air
+             * time + turnaround differ) -- same recovery the connection update
+             * uses; absorbs any 1-event cec slip in when each side flips. */
+            have_anchor = 0u;
+            idle_iters  = 0u;
+            win = ARX_WIN_MAX;
+            fll_phy_pending = 0u;
+            sh->conn_phy = fll_phy_new;
+            sh->conn_phy_evt = sh->conn_events;  /* survival baseline         */
+            sh->conn_phy_mode = r->MODE;         /* H1: did the write latch?  */
+        }
 
         /* Phase E3: the M33 has returned SKDs/IVs -> send LL_ENC_RSP.  (The
          * session key it also computed is picked up for CCM00 at START_ENC.) */
@@ -551,7 +642,9 @@ static void flpr_conn_hold(tiku_flpr_shared_t *sh)
          * count, using the RX-loop body (an EVENTS_DISABLED read that stays
          * 0 while idle) so idle and the RX-wait below share a feedback
          * scale.  STOP is polled coarsely so it lands within the idle. */
+        idle_spent = 0u;
         if (have_anchor && idle_iters != 0u) {
+            idle_spent = idle_iters;
             r->EVENTS_DISABLED = 0u;
             for (spin = 0u; spin < idle_iters; spin++) {
                 if (r->EVENTS_DISABLED != 0u) {  /* never set while idle      */
@@ -593,6 +686,23 @@ static void flpr_conn_hold(tiku_flpr_shared_t *sh)
                     break;
                 }
             }
+            /* This miss burned idle_spent + win iters of air time: convert
+             * that to elapsed connection events so cec stays in lockstep
+             * with the central through miss windows (see evt_iters above).
+             * Rounded; capped so one bad estimate can't fling cec ahead. */
+            if (evt_iters != 0u) {
+                uint32_t adv = (idle_spent + win + (evt_iters >> 1))
+                             / evt_iters;
+                if (adv == 0u) {
+                    adv = 1u;
+                }
+                if (adv > 32u) {
+                    adv = 32u;
+                }
+                cec = (uint16_t)(cec + adv);
+            } else {
+                cec++;                           /* no cadence estimate yet   */
+            }
             /* Lost lock: back the idle WAY off (the overshoot that caused
              * this) and re-acquire on the wide window.  Keeping a fraction
              * of the idle means we don't restart the climb from zero. */
@@ -610,11 +720,24 @@ static void flpr_conn_hold(tiku_flpr_shared_t *sh)
             if (sh->cmd == TIKU_FLPR_CMD_CONN_STOP) {
                 break;
             }
-            cec++;                               /* a miss is still one event */
             continue;                            /* miss: no serviced event  */
         }
         miss_run = 0u;
+        if (sh->conn_phy != 0u) {                /* H1: 2M RX sees ADDRESS?   */
+            sh->conn_phy_addr = sh->conn_phy_addr + 1u;
+        }
         rxon = spin;                             /* RX-wait iters this event  */
+        /* Cadence estimate: an ANCHORED catch is paced by the central at
+         * exactly one interval, so idle + RX-wait ~= one interval of iters
+         * whatever the (contended, drifting) FLPR execution rate currently
+         * is.  Smoothed 3:1 so a single outlier can't skew the miss->events
+         * conversion above.  Re-acquire catches (have_anchor == 0) measure
+         * window position, not cadence -- skip those. */
+        if (have_anchor) {
+            uint32_t m = idle_spent + rxon;
+            evt_iters = (evt_iters == 0u)
+                      ? m : (evt_iters - (evt_iters >> 2)) + (m >> 2);
+        }
         /* Closed-loop: creep the idle toward the point where the wait sits
          * in [RX_LO, RX_HI].  Small steps up (grow while the packet lands
          * late), a bigger step down (safety) when it lands early.  The
@@ -631,11 +754,20 @@ static void flpr_conn_hold(tiku_flpr_shared_t *sh)
             win = ARX_WIN_MIN;
         }
         /* CRC verdict lands just after PHYEND; bounded so we stay inside
-         * the 150 us T_IFS window before the auto-TX reads conn_txb. */
-        for (spin = 0u; spin < 3000u; spin++) {
-            if (r->EVENTS_CRCOK != 0u || r->EVENTS_CRCERROR != 0u) {
-                break;
+         * the 150 us T_IFS window before the auto-TX reads conn_txb.  On
+         * Coded S8 the packet BODY still has milliseconds of air time after
+         * ADDRESS (64 us/byte), so the verdict cap scales with the PHY --
+         * at 3000 iters every coded packet would be misread as CRC-bad. */
+        {
+            uint32_t crc_cap = (sh->conn_phy == 2u) ? 60000u : 3000u;
+            for (spin = 0u; spin < crc_cap; spin++) {
+                if (r->EVENTS_CRCOK != 0u || r->EVENTS_CRCERROR != 0u) {
+                    break;
+                }
             }
+        }
+        if (r->EVENTS_CRCOK != 0u && sh->conn_phy != 0u) {
+            sh->conn_phy_crcok = sh->conn_phy_crcok + 1u;  /* H1 telemetry  */
         }
         if (r->EVENTS_CRCOK != 0u) {
             uint8_t h = conn_datrx[0];
@@ -689,6 +821,13 @@ static void flpr_conn_hold(tiku_flpr_shared_t *sh)
             break;
         }
     }
+    /* F2: if this link switched PHYs, put the RADIO back on 1M before
+     * handing it on -- the advertising channels are 1M-only, and leaked 2M
+     * MODE/PCNF0 makes the next ADV session inaudible to every scanner. */
+    if (sh->conn_phy != 0u) {
+        r->MODE  = 3u;
+        r->PCNF0 = (8u << 0) | (1u << 8) | (1u << 20);
+    }
     sh->conn_state = 3u;                         /* link ended               */
 }
 
@@ -699,7 +838,18 @@ static void flpr_conn_adv(tiku_flpr_shared_t *sh)
         (const volatile tiku_flpr_conn_t *)sh->a2f_buf;
     uint8_t  addr[6];
     uint32_t alen = in->adv_len, i, spin, attempt;
+    uint32_t lcg;
     uint8_t  chan = 0u, connected = 0u;
+
+    /* advDelay seed: the Core spec REQUIRES a 0..10 ms pseudo-random delay
+     * per advertising event.  Without it, this fixed spin-paced TX/RX loop
+     * and a peer central's equally fixed scan-window rotation can PHASE-
+     * LOCK in antiphase and stay mutually deaf for a whole session (seen
+     * on the rig: passive scan hears the ADV at -32 dBm while the central
+     * connect-scan catches nothing for 15 s).  mcycle is un-inhibited at
+     * boot, so it seeds each session differently. */
+    __asm__ volatile ("csrr %0, mcycle" : "=r"(lcg));
+    lcg |= 1u;
 
     if (alen > sizeof(conn_adv)) {
         alen = sizeof(conn_adv);
@@ -717,6 +867,12 @@ static void flpr_conn_adv(tiku_flpr_shared_t *sh)
     flpr_hfclk_kick();
 
     for (attempt = 0u; attempt < 4000u && !connected; attempt++) {
+        /* HFCLK kick per 3-channel cycle -- the beacon-proven per-burst
+         * discipline; a single session-start kick's ~1.4 ms UARTE request
+         * would not cover a seconds-long advertising session. */
+        if (chan == 0u) {
+            flpr_hfclk_kick();
+        }
         r->FREQUENCY = beacon_freq[chan];
         r->DATAWHITE = 0x00890000u | (0x40u | beacon_widx[chan]);
         /* TX ADV_IND, hardware turnaround to RX (DISABLED_RXEN). */
@@ -809,6 +965,19 @@ static void flpr_conn_adv(tiku_flpr_shared_t *sh)
         }
         if (!connected) {
             chan = (uint8_t)((chan + 1u) % 3u);
+            /* advDelay after each 3-channel event: 0..~16k idle iters
+             * (~0..4 ms at the contended FLPR rate) breaks any phase lock
+             * with a scanner's window rotation (see seed comment above). */
+            if (chan == 0u) {
+                uint32_t d;
+                lcg = lcg * 1103515245u + 12345u;
+                d = (lcg >> 16) & 0x3FFFu;
+                for (spin = 0u; spin < d; spin++) {
+                    if (r->EVENTS_DISABLED == 0xFFFFFFFFu) {
+                        break;                   /* never true: keep the read */
+                    }
+                }
+            }
         }
         if (sh->cmd != 0u) {                     /* honour STOP / new cmd    */
             break;

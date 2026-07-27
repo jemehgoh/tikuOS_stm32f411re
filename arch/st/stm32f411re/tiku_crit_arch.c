@@ -7,6 +7,11 @@
  *
  * tiku_crit_arch.c - STM32F411RE IRQ-mask backend for tiku_crit
  *
+ * STM32F411 uses TIM2 as the system clock/deadline source. Critical-window
+ * tick preservation therefore means keeping TIM2_IRQn enabled; when the tick is
+ * not preserved, TIM2_IRQn is masked at the NVIC and any pending deadline is
+ * drained by tiku_crit_end().
+ *
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -19,7 +24,6 @@ struct stm32f411_crit_state {
     uint32_t iser0_saved;
     uint32_t iser1_saved;
     uint32_t iser2_saved;
-    uint32_t syst_csr_saved;
 };
 
 static struct stm32f411_crit_state crit_state;
@@ -46,8 +50,10 @@ void tiku_crit_arch_mask_irqs(uint8_t preserve_mask)
     crit_state.iser0_saved = NVIC->ISER[0];
     crit_state.iser1_saved = NVIC->ISER[1];
     crit_state.iser2_saved = NVIC->ISER[2];
-    crit_state.syst_csr_saved = SysTick->CTRL;
 
+    if (preserve_mask & TIKU_CRIT_PRESERVE_TICK) {
+        stm32f411_irq_keep((uint32_t)TIM2_IRQn, &keep0, &keep1, &keep2);
+    }
     if (preserve_mask & TIKU_CRIT_PRESERVE_HTIMER) {
         stm32f411_irq_keep((uint32_t)TIM5_IRQn, &keep0, &keep1, &keep2);
     }
@@ -75,10 +81,6 @@ void tiku_crit_arch_mask_irqs(uint8_t preserve_mask)
         stm32f411_irq_keep((uint32_t)I2C3_ER_IRQn, &keep0, &keep1, &keep2);
     }
 
-    if ((preserve_mask & TIKU_CRIT_PRESERVE_TICK) == 0U) {
-        SysTick->CTRL &= ~SysTick_CTRL_TICKINT_Msk;
-    }
-
     mask = crit_state.iser0_saved & ~keep0;
     if (mask != 0U) {
         NVIC->ICER[0] = mask;
@@ -98,7 +100,6 @@ void tiku_crit_arch_mask_irqs(uint8_t preserve_mask)
 
 void tiku_crit_arch_unmask_irqs(void)
 {
-    SysTick->CTRL = crit_state.syst_csr_saved;
     NVIC->ISER[0] = crit_state.iser0_saved;
     NVIC->ISER[1] = crit_state.iser1_saved;
     NVIC->ISER[2] = crit_state.iser2_saved;
