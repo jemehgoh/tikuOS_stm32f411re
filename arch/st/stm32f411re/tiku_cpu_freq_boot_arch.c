@@ -255,6 +255,11 @@ static const struct stm32f411_clock_plan stm32f411_clock_plans[] = {
 #define STM32F411_CLOCK_PLAN_COUNT \
     (sizeof(stm32f411_clock_plans) / sizeof(stm32f411_clock_plans[0]))
 
+#define STM32F411_CLOCK_PLAN_HSI16_INDEX 3U
+
+static const struct stm32f411_clock_plan *g_active_clock_plan =
+    &stm32f411_clock_plans[STM32F411_CLOCK_PLAN_HSI16_INDEX];
+
 static const struct stm32f411_clock_plan *
 stm32f411_lookup_clock_plan(unsigned int target_mhz, uint8_t *unsupported) {
     unsigned int i;
@@ -293,6 +298,8 @@ static void stm32f411_fallback_hsi(void) {
     stm32f411_pll_disable();
     (void)stm32f411_flash_configure(0U);
     stm32f411_clock_cache_hsi();
+    g_active_clock_plan =
+        &stm32f411_clock_plans[STM32F411_CLOCK_PLAN_HSI16_INDEX];
     SystemCoreClockUpdate();
     g_clock_fault = 1U;
 }
@@ -349,6 +356,8 @@ void tiku_cpu_boot_stm32f411_init(void) {
     }
 
     stm32f411_clock_cache_hsi();
+    g_active_clock_plan =
+        &stm32f411_clock_plans[STM32F411_CLOCK_PLAN_HSI16_INDEX];
     SystemCoreClockUpdate();
     stm32f411_enable_boot_peripherals();
 }
@@ -372,6 +381,7 @@ void tiku_cpu_freq_stm32f411_init(unsigned int target_mhz) {
             g_clock_fault = unsupported;
         }
         stm32f411_update_clock_cache(plan);
+        g_active_clock_plan = plan;
         SystemCoreClockUpdate();
         return;
     }
@@ -382,8 +392,52 @@ void tiku_cpu_freq_stm32f411_init(unsigned int target_mhz) {
     }
 
     stm32f411_update_clock_cache(plan);
+    g_active_clock_plan = plan;
     SystemCoreClockUpdate();
     g_clock_fault = unsupported;
+}
+
+int tiku_cpu_boot_stm32f411_post_stop_wake(void) {
+    const struct stm32f411_clock_plan *plan = g_active_clock_plan;
+
+    if (plan == 0) {
+        stm32f411_fallback_hsi();
+        return 0;
+    }
+
+    if (!plan->use_pll) {
+        if (!stm32f411_switch_sysclk_to_hsi()) {
+            stm32f411_fallback_hsi();
+            return 0;
+        }
+
+        stm32f411_pll_disable();
+        if (!stm32f411_flash_configure(plan->flash_latency)) {
+            g_clock_fault = 1U;
+            return 0;
+        }
+
+        stm32f411_apply_cfgr(plan);
+        stm32f411_update_clock_cache(plan);
+        SystemCoreClockUpdate();
+        return 1;
+    }
+
+    if (((RCC->CFGR & RCC_CFGR_SWS_Msk) == RCC_CFGR_SWS_PLL) &&
+        ((RCC->CR & RCC_CR_PLLRDY) != 0U)) {
+        stm32f411_update_clock_cache(plan);
+        SystemCoreClockUpdate();
+        return 1;
+    }
+
+    if (!stm32f411_apply_pll_plan(plan)) {
+        stm32f411_fallback_hsi();
+        return 0;
+    }
+
+    stm32f411_update_clock_cache(plan);
+    SystemCoreClockUpdate();
+    return 1;
 }
 
 void tiku_cpu_boot_stm32f411_power_wfi_enter(void) {

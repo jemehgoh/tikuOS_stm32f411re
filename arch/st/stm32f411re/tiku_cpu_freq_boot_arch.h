@@ -45,6 +45,19 @@ void tiku_cpu_freq_stm32f411_init(unsigned int target_mhz);
 void tiku_cpu_boot_stm32f411_power_wfi_enter(void);
 
 /**
+ * @brief Restore the configured SYSCLK tree after a STOP-mode wake.
+ *
+ * STM32F411 resumes from STOP on HSI with PLL disabled. The current STM32
+ * idle hook is WFI-only, so this is normally a no-op; RTC-mediated timer wake
+ * code calls it before timestamp-based resync so future STOP-mode idle paths
+ * do not run the post-wake accounting on a degraded clock tree.
+ *
+ * @return Non-zero when the configured clock tree is available, zero if the
+ *         port had to fall back to HSI and set the clock fault flag.
+ */
+int tiku_cpu_boot_stm32f411_post_stop_wake(void);
+
+/**
  * @brief Request a Cortex-M system reset.
  */
 void tiku_cpu_boot_stm32f411_reset(void);

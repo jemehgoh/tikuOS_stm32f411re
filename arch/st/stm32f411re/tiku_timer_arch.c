@@ -12,6 +12,7 @@
 
 #include "tiku_timer_arch.h"
 #include "tiku_cpu_freq_boot_arch.h"
+#include "tiku_rtc_arch.h"
 #include <hal/tiku_cpu.h>
 #include <kernel/cpu/tiku_hang.h>
 #include <kernel/timers/tiku_clock.h>
@@ -32,6 +33,33 @@
 #define TIKU_STM32_DEADLINE16_SAFE_SECONDS \
     (TIKU_STM32_DEADLINE16_SAFE_TICKS / TIKU_CLOCK_ARCH_SECOND)
 
+#ifndef TIKU_STM32F411_RTC_WUT_THRESHOLD_TICKS
+#define TIKU_STM32F411_RTC_WUT_THRESHOLD_TICKS \
+    ((tiku_clock_time_t)(TIKU_CLOCK_ARCH_SECOND * 30U))
+#endif
+
+#ifndef TIKU_STM32F411_RTC_WAKE_MARGIN_TICKS
+#define TIKU_STM32F411_RTC_WAKE_MARGIN_TICKS \
+    ((tiku_clock_time_t)TIKU_CLOCK_ARCH_SECOND)
+#endif
+
+#ifndef TIKU_STM32F411_RTC_ALARM_THRESHOLD_TICKS
+#define TIKU_STM32F411_RTC_ALARM_THRESHOLD_TICKS \
+    ((tiku_clock_time_t)TIKU_CLOCK_SAFE_HALF_RANGE)
+#endif
+
+#ifndef TIKU_STM32F411_RTC_TIMER_ALARM_ID
+#define TIKU_STM32F411_RTC_TIMER_ALARM_ID TIKU_STM32F411_RTC_ALARM_A
+#endif
+
+#ifndef TIKU_STM32F411_STOP_IDLE_ENABLE
+#define TIKU_STM32F411_STOP_IDLE_ENABLE 0
+#endif
+
+#ifndef TIKU_STM32F411_STOP_BLOCK_WHEN_HANG_ARMED
+#define TIKU_STM32F411_STOP_BLOCK_WHEN_HANG_ARMED 1
+#endif
+
 #if TIKU_CLOCK_ARCH_SECOND == 0
 #error "TIKU_CLOCK_ARCH_SECOND must be nonzero"
 #endif
@@ -48,6 +76,13 @@
 typedef char stm32f411_public_clock_must_be_16_bit[
     (sizeof(tiku_clock_time_t) == sizeof(uint16_t)) ? 1 : -1];
 
+typedef enum {
+    TIKU_STM32_TIMER_BACKEND_NONE = 0,
+    TIKU_STM32_TIMER_BACKEND_TIM2 = 1,
+    TIKU_STM32_TIMER_BACKEND_RTC_WUT = 2,
+    TIKU_STM32_TIMER_BACKEND_RTC_ALARM = 3,
+} tiku_stm32_timer_backend_t;
+
 /*---------------------------------------------------------------------------*/
 /* State                                                                     */
 /*---------------------------------------------------------------------------*/
@@ -60,6 +95,16 @@ static volatile uint8_t        g_tim2_cc1_source = TIKU_STM32_CC_SRC_NONE;
 static volatile uint8_t        g_tim2_timer_armed = 0U;
 static volatile uint8_t        g_tim2_timer_poll_pending = 0U;
 static volatile tiku_clock_time_t g_tim2_timer_deadline16 = 0U;
+static volatile tiku_stm32_timer_backend_t g_timer_backend =
+    TIKU_STM32_TIMER_BACKEND_NONE;
+static tiku_stm32f411_rtc_timestamp_t g_rtc_wut_epoch;
+static volatile uint8_t        g_rtc_wut_armed = 0U;
+static volatile uint8_t        g_rtc_wut_wake_pending = 0U;
+static volatile tiku_clock_time_t g_rtc_wut_deadline16 = 0U;
+static tiku_stm32f411_rtc_timestamp_t g_rtc_alarm_epoch;
+static volatile uint8_t        g_rtc_alarm_armed = 0U;
+static volatile uint8_t        g_rtc_alarm_wake_pending = 0U;
+static volatile tiku_clock_time_t g_rtc_alarm_deadline16 = 0U;
 static volatile uint8_t        g_tim2_hang_armed = 0U;
 static volatile tiku_clock_time_t g_tim2_hang_deadline16 = 0U;
 static volatile uint16_t       g_tim2_cc1_missed_writes = 0U;
@@ -158,11 +203,9 @@ static inline uint32_t stm32f411_tim2_now32(void)
     return TIM2->CNT;
 }
 
-static uint64_t stm32f411_tim2_sync_ticks_locked(void)
+static uint64_t stm32f411_tick_advance_counts_locked(uint32_t elapsed_counts)
 {
-    uint32_t now32 = stm32f411_tim2_now32();
     uint32_t counts_per_tick = g_tim2_counts_per_tick;
-    uint32_t elapsed_counts = now32 - g_tim2_last_count32;
     uint64_t total_counts;
 
     if (counts_per_tick == 0U) {
@@ -172,9 +215,38 @@ static uint64_t stm32f411_tim2_sync_ticks_locked(void)
     total_counts = (uint64_t)g_tick_remainder + elapsed_counts;
     g_tick_count += total_counts / counts_per_tick;
     g_tick_remainder = (uint32_t)(total_counts % counts_per_tick);
-    g_tim2_last_count32 = now32;
 
     return g_tick_count;
+}
+
+static uint64_t stm32f411_tick_advance_bulk_locked(uint64_t elapsed_ticks)
+{
+    g_tick_count += elapsed_ticks;
+    return g_tick_count;
+}
+
+static uint64_t stm32f411_tick_resync_bulk_locked(uint64_t elapsed_ticks)
+{
+    uint64_t ticks = stm32f411_tick_advance_bulk_locked(elapsed_ticks);
+
+    /*
+     * RTC-mediated resync accounts for the elapsed sleep window. Move the
+     * TIM2 baseline to "now" so the next TIM2 sync does not count the same
+     * wall time again.
+     */
+    g_tick_remainder = 0U;
+    g_tim2_last_count32 = stm32f411_tim2_now32();
+    return ticks;
+}
+
+static uint64_t stm32f411_tim2_sync_ticks_locked(void)
+{
+    uint32_t now32 = stm32f411_tim2_now32();
+    uint32_t elapsed_counts = now32 - g_tim2_last_count32;
+    uint64_t ticks = stm32f411_tick_advance_counts_locked(elapsed_counts);
+
+    g_tim2_last_count32 = now32;
+    return ticks;
 }
 
 static uint64_t stm32f411_tim2_ticks64(void)
@@ -198,6 +270,47 @@ static inline int
 stm32f411_clock16_before(tiku_clock_time_t a, tiku_clock_time_t b)
 {
     return TIKU_CLOCK_LT(a, b);
+}
+
+static tiku_clock_time_t
+stm32f411_timer_delay_to_deadline_locked(tiku_clock_time_t deadline16)
+{
+    tiku_clock_time_t now16 =
+        (tiku_clock_time_t)stm32f411_tim2_sync_ticks_locked();
+
+    if (!stm32f411_clock16_before(now16, deadline16)) {
+        return 0U;
+    }
+
+    return (tiku_clock_time_t)(deadline16 - now16);
+}
+
+static uint64_t
+stm32f411_rtc_elapsed_timer_ticks(
+    const tiku_stm32f411_rtc_timestamp_t *start,
+    const tiku_stm32f411_rtc_timestamp_t *end)
+{
+    uint32_t scale;
+    uint64_t start_subticks;
+    uint64_t end_subticks;
+    uint64_t elapsed_subticks;
+
+    if ((start == 0) || (end == 0) ||
+        (start->subsecond_scale == 0U) ||
+        (start->subsecond_scale != end->subsecond_scale)) {
+        return 0ULL;
+    }
+
+    scale = start->subsecond_scale;
+    start_subticks = (start->ticks * (uint64_t)scale) + start->subsecond;
+    end_subticks = (end->ticks * (uint64_t)scale) + end->subsecond;
+    if (end_subticks < start_subticks) {
+        return 0ULL;
+    }
+
+    elapsed_subticks = end_subticks - start_subticks;
+    return (elapsed_subticks * (uint64_t)TIKU_CLOCK_ARCH_SECOND) /
+           (uint64_t)scale;
 }
 
 static inline void
@@ -330,6 +443,344 @@ static void stm32f411_tim2_service_actions(uint8_t actions)
     }
 }
 
+static tiku_stm32_timer_backend_t
+stm32f411_timer_backend_classify_locked(tiku_clock_time_t next)
+{
+    tiku_clock_time_t delay = stm32f411_timer_delay_to_deadline_locked(next);
+
+    if (delay >= TIKU_STM32F411_RTC_ALARM_THRESHOLD_TICKS &&
+        delay < TIKU_CLOCK_SAFE_HALF_RANGE &&
+        delay > TIKU_STM32F411_RTC_WAKE_MARGIN_TICKS) {
+        return TIKU_STM32_TIMER_BACKEND_RTC_ALARM;
+    }
+
+    if (delay >= TIKU_STM32F411_RTC_WUT_THRESHOLD_TICKS &&
+        delay < TIKU_CLOCK_SAFE_HALF_RANGE &&
+        delay > TIKU_STM32F411_RTC_WAKE_MARGIN_TICKS) {
+        return TIKU_STM32_TIMER_BACKEND_RTC_WUT;
+    }
+
+    return TIKU_STM32_TIMER_BACKEND_TIM2;
+}
+
+static uint8_t
+stm32f411_timer_rtc_idle_allowed_locked(void)
+{
+#if TIKU_STM32F411_STOP_IDLE_ENABLE && \
+    TIKU_STM32F411_STOP_BLOCK_WHEN_HANG_ARMED
+    if (g_tim2_hang_armed) {
+        return 0U;
+    }
+#endif
+
+    return 1U;
+}
+
+static void
+stm32f411_timer_backend_disarm_rtc_wut_locked(void)
+{
+    if (g_rtc_wut_armed) {
+        (void)tiku_stm32f411_rtc_wakeup_cancel();
+    }
+
+    g_rtc_wut_armed = 0U;
+    g_rtc_wut_wake_pending = 0U;
+    g_rtc_wut_deadline16 = 0U;
+}
+
+static int
+stm32f411_timer_backend_arm_rtc_wut_locked(tiku_clock_time_t next)
+{
+    tiku_clock_time_t delay = stm32f411_timer_delay_to_deadline_locked(next);
+    tiku_clock_time_t wake_delta;
+    uint32_t wut_seconds;
+    int ret;
+
+    if (delay <= TIKU_STM32F411_RTC_WAKE_MARGIN_TICKS) {
+        return 0;
+    }
+
+    wake_delta = (tiku_clock_time_t)
+        (delay - TIKU_STM32F411_RTC_WAKE_MARGIN_TICKS);
+    wut_seconds = (uint32_t)(wake_delta / TIKU_CLOCK_ARCH_SECOND);
+    if (wut_seconds == 0U) {
+        return 0;
+    }
+
+    ret = tiku_stm32f411_rtc_read_timestamp(&g_rtc_wut_epoch, 0U);
+    if (ret != TIKU_STM32F411_RTC_OK) {
+        return 0;
+    }
+
+    ret = tiku_stm32f411_rtc_wakeup_set(
+        wut_seconds, TIKU_STM32F411_RTC_WAKEUP_CK_SPRE_16);
+    if (ret != TIKU_STM32F411_RTC_OK) {
+        return 0;
+    }
+
+    g_rtc_wut_deadline16 = next;
+    g_rtc_wut_wake_pending = 0U;
+    g_rtc_wut_armed = 1U;
+    g_timer_backend = TIKU_STM32_TIMER_BACKEND_RTC_WUT;
+    return 1;
+}
+
+static void
+stm32f411_timer_backend_disarm_rtc_alarm_locked(void)
+{
+    if (g_rtc_alarm_armed) {
+        (void)tiku_stm32f411_rtc_alarm_cancel(
+            TIKU_STM32F411_RTC_TIMER_ALARM_ID);
+    }
+
+    g_rtc_alarm_armed = 0U;
+    g_rtc_alarm_wake_pending = 0U;
+    g_rtc_alarm_deadline16 = 0U;
+}
+
+static int
+stm32f411_timer_backend_arm_rtc_alarm_locked(tiku_clock_time_t next)
+{
+    tiku_stm32f411_rtc_calendar_t target;
+    tiku_clock_time_t delay = stm32f411_timer_delay_to_deadline_locked(next);
+    tiku_clock_time_t wake_delta;
+    tiku_stm32f411_rtc_ticks_t target_ticks;
+    tiku_stm32f411_rtc_alarm_mask_t mask =
+        TIKU_STM32F411_RTC_ALARM_MATCH_SECOND |
+        TIKU_STM32F411_RTC_ALARM_MATCH_MINUTE |
+        TIKU_STM32F411_RTC_ALARM_MATCH_HOUR |
+        TIKU_STM32F411_RTC_ALARM_MATCH_DAY;
+    uint32_t wake_seconds;
+    int ret;
+
+    if (delay <= TIKU_STM32F411_RTC_WAKE_MARGIN_TICKS) {
+        return 0;
+    }
+
+    wake_delta = (tiku_clock_time_t)
+        (delay - TIKU_STM32F411_RTC_WAKE_MARGIN_TICKS);
+    wake_seconds = (uint32_t)(wake_delta / TIKU_CLOCK_ARCH_SECOND);
+    if (wake_seconds == 0U) {
+        return 0;
+    }
+
+    ret = tiku_stm32f411_rtc_read_timestamp(&g_rtc_alarm_epoch, 0U);
+    if (ret != TIKU_STM32F411_RTC_OK) {
+        return 0;
+    }
+
+    target_ticks = g_rtc_alarm_epoch.ticks +
+        (tiku_stm32f411_rtc_ticks_t)wake_seconds;
+    ret = tiku_stm32f411_rtc_ticks_to_calendar(target_ticks, &target);
+    if (ret != TIKU_STM32F411_RTC_OK) {
+        return 0;
+    }
+    if (target.year != g_rtc_alarm_epoch.calendar.year ||
+        target.month != g_rtc_alarm_epoch.calendar.month) {
+        return 0;
+    }
+
+    ret = tiku_stm32f411_rtc_alarm_set(
+        TIKU_STM32F411_RTC_TIMER_ALARM_ID, &target, mask);
+    if (ret != TIKU_STM32F411_RTC_OK) {
+        return 0;
+    }
+
+    g_rtc_alarm_deadline16 = next;
+    g_rtc_alarm_wake_pending = 0U;
+    g_rtc_alarm_armed = 1U;
+    g_timer_backend = TIKU_STM32_TIMER_BACKEND_RTC_ALARM;
+    return 1;
+}
+
+static void
+stm32f411_timer_backend_disarm_locked(void)
+{
+    switch (g_timer_backend) {
+    case TIKU_STM32_TIMER_BACKEND_TIM2:
+        g_tim2_timer_armed = 0U;
+        g_tim2_timer_poll_pending = 0U;
+        g_tim2_timer_deadline16 = 0U;
+        break;
+    case TIKU_STM32_TIMER_BACKEND_RTC_WUT:
+        stm32f411_timer_backend_disarm_rtc_wut_locked();
+        break;
+    case TIKU_STM32_TIMER_BACKEND_RTC_ALARM:
+        stm32f411_timer_backend_disarm_rtc_alarm_locked();
+        break;
+    case TIKU_STM32_TIMER_BACKEND_NONE:
+    default:
+        break;
+    }
+
+    g_timer_backend = TIKU_STM32_TIMER_BACKEND_NONE;
+}
+
+static int
+stm32f411_timer_backend_arm_locked(tiku_stm32_timer_backend_t backend,
+                                   tiku_clock_time_t next)
+{
+    switch (backend) {
+    case TIKU_STM32_TIMER_BACKEND_TIM2:
+        g_tim2_timer_armed = 1U;
+        g_tim2_timer_poll_pending = 0U;
+        g_tim2_timer_deadline16 = next;
+        g_timer_backend = TIKU_STM32_TIMER_BACKEND_TIM2;
+        return 1;
+    case TIKU_STM32_TIMER_BACKEND_RTC_WUT:
+        if (stm32f411_timer_backend_arm_rtc_wut_locked(next)) {
+            return 1;
+        }
+        g_timer_backend = TIKU_STM32_TIMER_BACKEND_NONE;
+        return 0;
+    case TIKU_STM32_TIMER_BACKEND_RTC_ALARM:
+        if (stm32f411_timer_backend_arm_rtc_alarm_locked(next)) {
+            return 1;
+        }
+        g_timer_backend = TIKU_STM32_TIMER_BACKEND_NONE;
+        return 0;
+    case TIKU_STM32_TIMER_BACKEND_NONE:
+    default:
+        g_timer_backend = TIKU_STM32_TIMER_BACKEND_NONE;
+        return 0;
+    }
+}
+
+static uint32_t
+stm32f411_timer_rtc_alarm_flag(void)
+{
+    switch ((tiku_stm32f411_rtc_alarm_id_t)TIKU_STM32F411_RTC_TIMER_ALARM_ID) {
+    case TIKU_STM32F411_RTC_ALARM_A:
+        return RTC_ISR_ALRAF;
+    case TIKU_STM32F411_RTC_ALARM_B:
+        return RTC_ISR_ALRBF;
+    default:
+        return 0U;
+    }
+}
+
+static uint8_t
+stm32f411_timer_leave_rtc_backend_locked(void)
+{
+    tiku_stm32f411_rtc_timestamp_t now;
+    const tiku_stm32f411_rtc_timestamp_t *epoch;
+    tiku_clock_time_t deadline16;
+    uint64_t elapsed_ticks;
+    uint8_t wake_pending;
+    int ret;
+
+    switch (g_timer_backend) {
+    case TIKU_STM32_TIMER_BACKEND_RTC_WUT:
+        if (!g_rtc_wut_armed) {
+            return 0U;
+        }
+        if ((RTC->ISR & RTC_ISR_WUTF) != 0U) {
+            g_rtc_wut_wake_pending = 1U;
+        }
+        epoch = &g_rtc_wut_epoch;
+        deadline16 = g_rtc_wut_deadline16;
+        wake_pending = g_rtc_wut_wake_pending;
+        break;
+    case TIKU_STM32_TIMER_BACKEND_RTC_ALARM:
+        if (!g_rtc_alarm_armed) {
+            return 0U;
+        }
+        if ((RTC->ISR & stm32f411_timer_rtc_alarm_flag()) != 0U) {
+            g_rtc_alarm_wake_pending = 1U;
+        }
+        epoch = &g_rtc_alarm_epoch;
+        deadline16 = g_rtc_alarm_deadline16;
+        wake_pending = g_rtc_alarm_wake_pending;
+        break;
+    case TIKU_STM32_TIMER_BACKEND_NONE:
+    case TIKU_STM32_TIMER_BACKEND_TIM2:
+    default:
+        return 0U;
+    }
+
+    if (wake_pending) {
+        /*
+         * If a future STM32 idle hook enters STOP, the core resumes on HSI
+         * with PLL disabled. Restore the configured clock tree before the
+         * timestamp/resync work; WFI-only idle makes this a cheap no-op.
+         */
+        (void)tiku_cpu_boot_stm32f411_post_stop_wake();
+        ret = tiku_stm32f411_rtc_read_timestamp(&now, 1U);
+        if (ret == TIKU_STM32F411_RTC_OK) {
+            elapsed_ticks =
+                stm32f411_rtc_elapsed_timer_ticks(epoch, &now);
+            (void)stm32f411_tick_resync_bulk_locked(elapsed_ticks);
+        } else {
+            /*
+             * Phase 4 keeps idle as WFI, so TIM2 has continued to run. If
+             * the RTC timestamp path fails, fall back to TIM2 sync rather
+             * than wedging the software timer backend.
+             */
+            (void)stm32f411_tim2_sync_ticks_locked();
+        }
+    } else {
+        /*
+         * A non-RTC interrupt ended the idle window early. TIM2 kept running
+         * during WFI, so its free-running counter is the best local clock for
+         * the partial sleep interval.
+         */
+        (void)stm32f411_tim2_sync_ticks_locked();
+    }
+
+    if (g_timer_backend == TIKU_STM32_TIMER_BACKEND_RTC_WUT) {
+        stm32f411_timer_backend_disarm_rtc_wut_locked();
+    } else {
+        stm32f411_timer_backend_disarm_rtc_alarm_locked();
+    }
+    g_timer_backend = TIKU_STM32_TIMER_BACKEND_NONE;
+
+    (void)stm32f411_timer_backend_arm_locked(
+        TIKU_STM32_TIMER_BACKEND_TIM2, deadline16);
+    return stm32f411_tim2_rearm_cc1_mux_locked();
+}
+
+static uint8_t
+stm32f411_timer_enter_rtc_backend_locked(uint8_t *stretched)
+{
+    tiku_stm32_timer_backend_t backend;
+    tiku_clock_time_t deadline16;
+    uint8_t actions;
+
+    *stretched = 0U;
+
+    if (g_timer_backend != TIKU_STM32_TIMER_BACKEND_TIM2 ||
+        !g_tim2_timer_armed ||
+        g_tim2_timer_poll_pending) {
+        return 0U;
+    }
+
+    if (!stm32f411_timer_rtc_idle_allowed_locked()) {
+        return 0U;
+    }
+
+    deadline16 = g_tim2_timer_deadline16;
+    backend = stm32f411_timer_backend_classify_locked(deadline16);
+    if (backend == TIKU_STM32_TIMER_BACKEND_TIM2 ||
+        backend == TIKU_STM32_TIMER_BACKEND_NONE) {
+        return 0U;
+    }
+
+    g_tim2_timer_armed = 0U;
+    g_tim2_timer_poll_pending = 0U;
+    g_tim2_timer_deadline16 = 0U;
+    g_timer_backend = TIKU_STM32_TIMER_BACKEND_NONE;
+
+    if (!stm32f411_timer_backend_arm_locked(backend, deadline16)) {
+        (void)stm32f411_timer_backend_arm_locked(
+            TIKU_STM32_TIMER_BACKEND_TIM2, deadline16);
+        return stm32f411_tim2_rearm_cc1_mux_locked();
+    }
+
+    *stretched = 1U;
+    actions = stm32f411_tim2_rearm_cc1_mux_locked();
+    return actions;
+}
+
 /*---------------------------------------------------------------------------*/
 /* HAL                                                                       */
 /*---------------------------------------------------------------------------*/
@@ -344,6 +795,13 @@ void tiku_clock_arch_init(void)
     g_tim2_timer_armed = 0U;
     g_tim2_timer_poll_pending = 0U;
     g_tim2_timer_deadline16 = 0U;
+    g_timer_backend = TIKU_STM32_TIMER_BACKEND_NONE;
+    g_rtc_wut_armed = 0U;
+    g_rtc_wut_wake_pending = 0U;
+    g_rtc_wut_deadline16 = 0U;
+    g_rtc_alarm_armed = 0U;
+    g_rtc_alarm_wake_pending = 0U;
+    g_rtc_alarm_deadline16 = 0U;
     g_tim2_hang_armed = 0U;
     g_tim2_hang_deadline16 = 0U;
     g_tim2_cc1_missed_writes = 0U;
@@ -424,14 +882,10 @@ void tiku_timer_arch_rearm(tiku_clock_time_t next, uint8_t armed)
     uint8_t actions;
 
     tiku_atomic_enter();
-    if (!armed) {
-        g_tim2_timer_armed = 0U;
-        g_tim2_timer_poll_pending = 0U;
-        g_tim2_timer_deadline16 = 0U;
-    } else {
-        g_tim2_timer_armed = 1U;
-        g_tim2_timer_poll_pending = 0U;
-        g_tim2_timer_deadline16 = next;
+    stm32f411_timer_backend_disarm_locked();
+    if (armed) {
+        (void)stm32f411_timer_backend_arm_locked(
+            TIKU_STM32_TIMER_BACKEND_TIM2, next);
     }
 
     actions = stm32f411_tim2_rearm_cc1_mux_locked();
@@ -464,16 +918,39 @@ void tiku_hang_arch_rearm(tiku_clock_time_t deadline, uint8_t armed)
 int tiku_clock_tickless_begin(tiku_clock_time_t ticks_ahead)
 {
     (void)ticks_ahead;
-    return 0;
+    uint8_t actions;
+    uint8_t stretched;
+
+    tiku_atomic_enter();
+    actions = stm32f411_timer_leave_rtc_backend_locked();
+    if (actions == 0U) {
+        actions = stm32f411_timer_enter_rtc_backend_locked(&stretched);
+    } else {
+        stretched = 0U;
+    }
+    tiku_atomic_exit();
+
+    stm32f411_tim2_service_actions(actions);
+    if (actions != 0U && !stretched) {
+        NVIC_SetPendingIRQ(TIM2_IRQn);
+    }
+    return stretched;
 }
 
 void tiku_clock_tickless_end(void)
 {
+    uint8_t actions;
+
+    tiku_atomic_enter();
+    actions = stm32f411_timer_leave_rtc_backend_locked();
+    tiku_atomic_exit();
+
+    stm32f411_tim2_service_actions(actions);
 }
 
 int tiku_clock_tickless_available(void)
 {
-    return 0;
+    return 1;
 }
 
 /*---------------------------------------------------------------------------*/
@@ -483,6 +960,23 @@ int tiku_clock_tickless_available(void)
 void tiku_stm32f411_systick_handler(void)
 {
     /* SysTick is not the scheduler heartbeat in TIM2 deadline mode. */
+}
+
+void tiku_stm32f411_timer_rtc_wakeup_irq(void)
+{
+    if (g_timer_backend == TIKU_STM32_TIMER_BACKEND_RTC_WUT &&
+        g_rtc_wut_armed) {
+        g_rtc_wut_wake_pending = 1U;
+    }
+}
+
+void tiku_stm32f411_timer_rtc_alarm_irq(uint32_t flags)
+{
+    if (g_timer_backend == TIKU_STM32_TIMER_BACKEND_RTC_ALARM &&
+        g_rtc_alarm_armed &&
+        ((flags & stm32f411_timer_rtc_alarm_flag()) != 0U)) {
+        g_rtc_alarm_wake_pending = 1U;
+    }
 }
 
 void tiku_stm32f411_tim2_irq_handler(void)

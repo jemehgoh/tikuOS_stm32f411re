@@ -41,6 +41,17 @@
 #define TIKU_STM32F411_RTC_UNUSED
 #endif
 
+void __attribute__((weak))
+tiku_stm32f411_timer_rtc_wakeup_irq(void)
+{
+}
+
+void __attribute__((weak))
+tiku_stm32f411_timer_rtc_alarm_irq(uint32_t flags)
+{
+    (void)flags;
+}
+
 typedef struct {
     uint8_t restore_dbp;
 } tiku_stm32f411_rtc_backup_access_t;
@@ -522,6 +533,29 @@ tiku_stm32f411_rtc_max_ticks(void)
              calendar.second;
 
     return ticks;
+}
+
+static uint32_t
+tiku_stm32f411_rtc_subsecond_scale(void)
+{
+    uint32_t prediv_s = (RTC->PRER & RTC_PRER_PREDIV_S)
+                      >> RTC_PRER_PREDIV_S_Pos;
+
+    return prediv_s + 1U;
+}
+
+static uint32_t
+tiku_stm32f411_rtc_subsecond_elapsed(uint32_t ss, uint32_t scale)
+{
+    if (scale == 0U) {
+        return 0U;
+    }
+
+    if (ss >= scale) {
+        return 0U;
+    }
+
+    return (scale - 1U) - ss;
 }
 
 static TIKU_STM32F411_RTC_UNUSED uint32_t
@@ -1116,6 +1150,103 @@ tiku_stm32f411_rtc_read_calendar(tiku_stm32f411_rtc_calendar_t *calendar)
 }
 
 int
+tiku_stm32f411_rtc_shadow_resync(void)
+{
+    int ret;
+
+    if (!tiku_stm32f411_rtc_is_initialized()) {
+        return TIKU_STM32F411_RTC_ERR_NOT_INIT;
+    }
+
+    if ((RTC->ISR & RTC_ISR_INIT) != 0U) {
+        return TIKU_STM32F411_RTC_ERR_BUSY;
+    }
+
+    if ((RTC->CR & RTC_CR_BYPSHAD) != 0U) {
+        return TIKU_STM32F411_RTC_OK;
+    }
+
+    tiku_atomic_enter();
+
+    tiku_stm32f411_rtc_backup_access_t access = { 0U };
+    tiku_stm32f411_rtc_backup_access_begin(&access);
+    tiku_stm32f411_rtc_write_unlock();
+
+    ret = tiku_stm32f411_rtc_shadow_sync();
+
+    tiku_stm32f411_rtc_write_lock();
+    tiku_stm32f411_rtc_backup_access_end(&access);
+    tiku_atomic_exit();
+
+    return ret;
+}
+
+int
+tiku_stm32f411_rtc_read_timestamp(
+    tiku_stm32f411_rtc_timestamp_t *timestamp,
+    uint8_t force_shadow_resync)
+{
+    tiku_stm32f411_rtc_calendar_t snapshot = { 0U };
+    tiku_stm32f411_rtc_ticks_t ticks = 0ULL;
+    uint32_t ss;
+    uint32_t tr;
+    uint32_t dr;
+    uint32_t scale;
+    int ret;
+
+    if (timestamp == 0) {
+        return TIKU_STM32F411_RTC_ERR_INVALID;
+    }
+
+    if (!tiku_stm32f411_rtc_is_initialized()) {
+        return TIKU_STM32F411_RTC_ERR_NOT_INIT;
+    }
+
+    if ((RTC->ISR & RTC_ISR_INIT) != 0U) {
+        return TIKU_STM32F411_RTC_ERR_BUSY;
+    }
+
+    if (force_shadow_resync ||
+        (((RTC->CR & RTC_CR_BYPSHAD) == 0U) &&
+         ((RTC->ISR & RTC_ISR_RSF) == 0U))) {
+        ret = tiku_stm32f411_rtc_shadow_resync();
+        if (ret != TIKU_STM32F411_RTC_OK) {
+            return ret;
+        }
+    }
+
+    /*
+     * With shadow registers enabled, SSR -> TR -> DR gives a coherent
+     * subsecond/calendar snapshot and DR unlocks the shadow copy.
+     */
+    ss = RTC->SSR & RTC_SSR_SS;
+    tr = RTC->TR;
+    dr = RTC->DR;
+    scale = tiku_stm32f411_rtc_subsecond_scale();
+
+    ret = tiku_stm32f411_rtc_unpack_tr(tr, &snapshot);
+    if (ret != TIKU_STM32F411_RTC_OK) {
+        return ret;
+    }
+
+    ret = tiku_stm32f411_rtc_unpack_dr(dr, &snapshot);
+    if (ret != TIKU_STM32F411_RTC_OK) {
+        return ret;
+    }
+
+    ret = tiku_stm32f411_rtc_calendar_to_ticks(&snapshot, &ticks);
+    if (ret != TIKU_STM32F411_RTC_OK) {
+        return ret;
+    }
+
+    timestamp->calendar = snapshot;
+    timestamp->ticks = ticks;
+    timestamp->subsecond = tiku_stm32f411_rtc_subsecond_elapsed(ss, scale);
+    timestamp->subsecond_scale = scale;
+    return TIKU_STM32F411_RTC_OK;
+}
+
+int
 tiku_stm32f411_rtc_alarm_set(tiku_stm32f411_rtc_alarm_id_t alarm_id,
                              const tiku_stm32f411_rtc_calendar_t *target,
                              tiku_stm32f411_rtc_alarm_mask_t match_mask)
@@ -1381,6 +1512,7 @@ tiku_stm32f411_exti17_rtc_alarm_irq_handler(void)
 
     if (flags != 0U) {
         RTC->ISR &= ~flags;
+        tiku_stm32f411_timer_rtc_alarm_irq(flags);
     }
 
     EXTI->PR = EXTI_PR_PR17;
@@ -1391,6 +1523,7 @@ tiku_stm32f411_exti22_rtc_wkup_irq_handler(void)
 {
     if ((RTC->ISR & RTC_ISR_WUTF) != 0U) {
         RTC->ISR &= ~RTC_ISR_WUTF;
+        tiku_stm32f411_timer_rtc_wakeup_irq();
     }
 
     EXTI->PR = EXTI_PR_PR22;

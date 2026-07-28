@@ -51,6 +51,16 @@ typedef struct {
     uint8_t  second;   /* 0..59 */
 } tiku_stm32f411_rtc_calendar_t;
 
+typedef uint64_t tiku_stm32f411_rtc_ticks_t;
+typedef uint32_t tiku_stm32f411_rtc_alarm_mask_t;
+
+typedef struct {
+    tiku_stm32f411_rtc_calendar_t calendar;
+    tiku_stm32f411_rtc_ticks_t ticks; /* Whole seconds since 2000-01-01 */
+    uint32_t subsecond;               /* Elapsed subsecond ticks in second */
+    uint32_t subsecond_scale;         /* Subsecond ticks per second */
+} tiku_stm32f411_rtc_timestamp_t;
+
 typedef enum {
     TIKU_STM32F411_RTC_CLOCK_LSE = 0,
     TIKU_STM32F411_RTC_CLOCK_LSI = 1,
@@ -77,9 +87,6 @@ typedef enum {
     TIKU_STM32F411_RTC_IRQ_WAKEUP  = 2,
 } tiku_stm32f411_rtc_interrupt_source_t;
 
-typedef uint64_t tiku_stm32f411_rtc_ticks_t;
-typedef uint32_t tiku_stm32f411_rtc_alarm_mask_t;
-
 /* Alarm-mask bits name fields that should participate in an Alarm A/B match. */
 #define TIKU_STM32F411_RTC_ALARM_MATCH_SECOND  (1UL << 0)
 #define TIKU_STM32F411_RTC_ALARM_MATCH_MINUTE  (1UL << 1)
@@ -100,6 +107,12 @@ int tiku_stm32f411_rtc_set_calendar(
 
 int tiku_stm32f411_rtc_read_calendar(
     tiku_stm32f411_rtc_calendar_t *calendar);
+
+int tiku_stm32f411_rtc_shadow_resync(void);
+
+int tiku_stm32f411_rtc_read_timestamp(
+    tiku_stm32f411_rtc_timestamp_t *timestamp,
+    uint8_t force_shadow_resync);
 
 int tiku_stm32f411_rtc_alarm_set(
     tiku_stm32f411_rtc_alarm_id_t alarm_id,
