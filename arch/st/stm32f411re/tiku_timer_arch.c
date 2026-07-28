@@ -52,10 +52,6 @@
 #define TIKU_STM32F411_RTC_TIMER_ALARM_ID TIKU_STM32F411_RTC_ALARM_A
 #endif
 
-#ifndef TIKU_STM32F411_STOP_IDLE_ENABLE
-#define TIKU_STM32F411_STOP_IDLE_ENABLE 0
-#endif
-
 #ifndef TIKU_STM32F411_STOP_BLOCK_WHEN_HANG_ARMED
 #define TIKU_STM32F411_STOP_BLOCK_WHEN_HANG_ARMED 1
 #endif
@@ -466,8 +462,7 @@ stm32f411_timer_backend_classify_locked(tiku_clock_time_t next)
 static uint8_t
 stm32f411_timer_rtc_idle_allowed_locked(void)
 {
-#if TIKU_STM32F411_STOP_IDLE_ENABLE && \
-    TIKU_STM32F411_STOP_BLOCK_WHEN_HANG_ARMED
+#if TIKU_STM32F411_STOP_BLOCK_WHEN_HANG_ARMED
     if (g_tim2_hang_armed) {
         return 0U;
     }
@@ -596,6 +591,8 @@ stm32f411_timer_backend_arm_rtc_alarm_locked(tiku_clock_time_t next)
 static void
 stm32f411_timer_backend_disarm_locked(void)
 {
+    tiku_cpu_boot_stm32f411_stop_cancel();
+
     switch (g_timer_backend) {
     case TIKU_STM32_TIMER_BACKEND_TIM2:
         g_tim2_timer_armed = 0U;
@@ -667,6 +664,7 @@ stm32f411_timer_leave_rtc_backend_locked(void)
     tiku_clock_time_t deadline16;
     uint64_t elapsed_ticks;
     uint8_t wake_pending;
+    uint8_t stop_attempted;
     int ret;
 
     switch (g_timer_backend) {
@@ -698,11 +696,13 @@ stm32f411_timer_leave_rtc_backend_locked(void)
         return 0U;
     }
 
-    if (wake_pending) {
+    stop_attempted =
+        (uint8_t)tiku_cpu_boot_stm32f411_stop_was_attempted();
+
+    if (wake_pending || stop_attempted) {
         /*
-         * If a future STM32 idle hook enters STOP, the core resumes on HSI
-         * with PLL disabled. Restore the configured clock tree before the
-         * timestamp/resync work; WFI-only idle makes this a cheap no-op.
+         * RTC wake and early STOP wake both need RTC-based elapsed time:
+         * TIM2 does not run while the core is in STOP.
          */
         (void)tiku_cpu_boot_stm32f411_post_stop_wake();
         ret = tiku_stm32f411_rtc_read_timestamp(&now, 1U);
@@ -712,9 +712,8 @@ stm32f411_timer_leave_rtc_backend_locked(void)
             (void)stm32f411_tick_resync_bulk_locked(elapsed_ticks);
         } else {
             /*
-             * Phase 4 keeps idle as WFI, so TIM2 has continued to run. If
-             * the RTC timestamp path fails, fall back to TIM2 sync rather
-             * than wedging the software timer backend.
+             * If RTC timestamping fails, fall back to TIM2 sync as a
+             * best-effort backend recovery path.
              */
             (void)stm32f411_tim2_sync_ticks_locked();
         }
@@ -733,6 +732,7 @@ stm32f411_timer_leave_rtc_backend_locked(void)
         stm32f411_timer_backend_disarm_rtc_alarm_locked();
     }
     g_timer_backend = TIKU_STM32_TIMER_BACKEND_NONE;
+    tiku_cpu_boot_stm32f411_stop_cancel();
 
     (void)stm32f411_timer_backend_arm_locked(
         TIKU_STM32_TIMER_BACKEND_TIM2, deadline16);
@@ -777,6 +777,7 @@ stm32f411_timer_enter_rtc_backend_locked(uint8_t *stretched)
     }
 
     *stretched = 1U;
+    tiku_cpu_boot_stm32f411_stop_request();
     actions = stm32f411_tim2_rearm_cc1_mux_locked();
     return actions;
 }

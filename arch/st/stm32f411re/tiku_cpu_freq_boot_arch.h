@@ -40,9 +40,32 @@ void tiku_cpu_freq_stm32f411_init(unsigned int target_mhz);
 /**
  * @brief Idle entry point for the scheduler.
  *
- * All generic idle depths map to WFI for the first STM32F411 port.
+ * Plain WFI idle primitive. The scheduler's light idle maps here directly.
  */
 void tiku_cpu_boot_stm32f411_power_wfi_enter(void);
+
+/**
+ * @brief Adaptive STM32F411 idle entry point.
+ *
+ * Deep/deepest idle maps here. It enters STOP only when the timer backend has
+ * requested an RTC-backed STOP sleep window; otherwise it falls back to WFI.
+ */
+void tiku_cpu_boot_stm32f411_idle_enter(void);
+
+/**
+ * @brief Mark the next adaptive idle window as STOP-eligible.
+ */
+void tiku_cpu_boot_stm32f411_stop_request(void);
+
+/**
+ * @brief Clear STOP eligibility for adaptive idle.
+ */
+void tiku_cpu_boot_stm32f411_stop_cancel(void);
+
+/**
+ * @brief Report whether adaptive idle attempted STOP in this window.
+ */
+int tiku_cpu_boot_stm32f411_stop_was_attempted(void);
 
 /**
  * @brief Restore the configured SYSCLK tree after a STOP-mode wake.

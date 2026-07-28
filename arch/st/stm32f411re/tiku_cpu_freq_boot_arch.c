@@ -55,6 +55,8 @@ static volatile unsigned long g_hclk_hz    = STM32F411_HSI_HZ;
 static volatile unsigned long g_pclk1_hz   = STM32F411_HSI_HZ;
 static volatile unsigned long g_pclk2_hz   = STM32F411_HSI_HZ;
 static volatile uint8_t       g_clock_fault = 0U;
+static volatile uint8_t       g_stop_requested = 0U;
+static volatile uint8_t       g_stop_attempted = 0U;
 
 /*---------------------------------------------------------------------------*/
 /* Internal helpers                                                          */
@@ -452,6 +454,50 @@ void tiku_cpu_boot_stm32f411_power_wfi_enter(void) {
         "wfi\n"
         "cpsid i\n"
         ::: "memory");
+}
+
+void tiku_cpu_boot_stm32f411_stop_request(void) {
+    g_stop_requested = 1U;
+    g_stop_attempted = 0U;
+}
+
+void tiku_cpu_boot_stm32f411_stop_cancel(void) {
+    g_stop_requested = 0U;
+    g_stop_attempted = 0U;
+}
+
+int tiku_cpu_boot_stm32f411_stop_was_attempted(void) {
+    return g_stop_attempted != 0U;
+}
+
+static void stm32f411_power_stop_enter(void) {
+    RCC->APB1ENR |= RCC_APB1ENR_PWREN;
+    (void)RCC->APB1ENR;
+
+    PWR->CR &= ~PWR_CR_PDDS;
+    PWR->CR |= PWR_CR_CWUF;
+    SCB->SCR |= SCB_SCR_SLEEPDEEP_Msk;
+    g_stop_attempted = 1U;
+
+    __asm__ volatile (
+        "cpsie i\n"
+        "dsb\n"
+        "isb\n"
+        "wfi\n"
+        "cpsid i\n"
+        ::: "memory");
+
+    SCB->SCR &= ~SCB_SCR_SLEEPDEEP_Msk;
+    (void)tiku_cpu_boot_stm32f411_post_stop_wake();
+}
+
+void tiku_cpu_boot_stm32f411_idle_enter(void) {
+    if (!g_stop_requested) {
+        tiku_cpu_boot_stm32f411_power_wfi_enter();
+        return;
+    }
+
+    stm32f411_power_stop_enter();
 }
 
 void tiku_cpu_boot_stm32f411_reset(void) {

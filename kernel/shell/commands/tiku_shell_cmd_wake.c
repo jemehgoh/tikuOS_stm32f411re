@@ -76,6 +76,8 @@ tiku_shell_cmd_wake(uint8_t argc, const char *argv[])
     SHELL_PRINTF("  TIM2     (sys deadline) %s  wakes WFI\n",
                  (w.sources & TIKU_WAKE_SYSTICK) ? "[on ]" : "[off]");
 
+    SHELL_PRINTF("  RTC      (sys deadline) [auto] wakes STOP\n");
+
     SHELL_PRINTF("  TIM5     (htimer)       %s  wakes WFI\n",
                  (w.sources & TIKU_WAKE_HTIMER) ? "[on ]" : "[off]");
 
@@ -97,8 +99,8 @@ tiku_shell_cmd_wake(uint8_t argc, const char *argv[])
         SHELL_PRINTF("  EXTI     (gpio irq)     [off]  wakes WFI\n");
     }
 
-    SHELL_PRINTF("\nNote: STM32F411 idle = plain WFI here;\n");
-    SHELL_PRINTF("  any enabled source above wakes the core.\n");
+    SHELL_PRINTF("\nNote: STM32F411 light idle = WFI;\n");
+    SHELL_PRINTF("  deep/deepest idle may enter STOP when RTC deadline wake is armed.\n");
 #else
     SHELL_PRINTF("  Timer A0 (sys clock)  %s  wakes LPM0-3\n",
                  (w.sources & TIKU_WAKE_SYSTICK) ? "[on ]" : "[off]");

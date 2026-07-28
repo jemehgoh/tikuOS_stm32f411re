@@ -305,9 +305,10 @@ tiku_cpu_idle_enter_t tiku_cpu_idle_hook(tiku_cpu_idle_mode_t mode) {
 #elif defined(PLATFORM_STM32F411)
     switch (mode) {
         case TIKU_CPU_IDLE_LIGHT:
+            return tiku_cpu_boot_stm32f411_power_wfi_enter;
         case TIKU_CPU_IDLE_DEEP:
         case TIKU_CPU_IDLE_DEEPEST:
-            return tiku_cpu_boot_stm32f411_power_wfi_enter;
+            return tiku_cpu_boot_stm32f411_idle_enter;
         case TIKU_CPU_IDLE_OFF:
         default:
             return NULL;
@@ -348,9 +349,14 @@ int tiku_cpu_idle_mode_wakes_on_tick(tiku_cpu_idle_mode_t mode) {
      * clears the LPM bits on exit.  LPM4 stops every clock, so the
      * tick can never fire, let alone wake us. */
     return mode != TIKU_CPU_IDLE_DEEPEST;
-#elif defined(PLATFORM_RP2350) || defined(PLATFORM_STM32F411) || defined(PLATFORM_AMBIQ) || defined(PLATFORM_NORDIC)
+#elif defined(PLATFORM_RP2350) || defined(PLATFORM_AMBIQ) || defined(PLATFORM_NORDIC)
     /* Every supported mode is a WFI variant; any enabled interrupt
      * (SysTick / deadline timer included) wakes the core. */
+    (void)mode;
+    return 1;
+#elif defined(PLATFORM_STM32F411)
+    /* Light idle wakes through TIM2-backed WFI deadlines. Deep/deepest idle
+     * may enter STOP, where the hybrid timer arms RTC as the wake source. */
     (void)mode;
     return 1;
 #else
@@ -379,8 +385,8 @@ const char *tiku_cpu_idle_mode_name(tiku_cpu_idle_mode_t mode) {
 #elif defined(PLATFORM_STM32F411)
     switch (mode) {
         case TIKU_CPU_IDLE_LIGHT:   return "WFI";
-        case TIKU_CPU_IDLE_DEEP:    return "WFI";
-        case TIKU_CPU_IDLE_DEEPEST: return "WFI";
+        case TIKU_CPU_IDLE_DEEP:    return "WFI/STOP";
+        case TIKU_CPU_IDLE_DEEPEST: return "WFI/STOP";
         case TIKU_CPU_IDLE_OFF:
         default:                    return "off";
     }
@@ -417,9 +423,10 @@ const char *tiku_cpu_idle_mode_desc(tiku_cpu_idle_mode_t mode) {
 #elif defined(PLATFORM_STM32F411)
     switch (mode) {
         case TIKU_CPU_IDLE_LIGHT:
+            return "WFI (Cortex-M4 wait-for-interrupt)";
         case TIKU_CPU_IDLE_DEEP:
         case TIKU_CPU_IDLE_DEEPEST:
-            return "WFI (Cortex-M4 wait-for-interrupt)";
+            return "adaptive WFI/STOP (RTC-backed STOP when eligible)";
         case TIKU_CPU_IDLE_OFF:
         default:
             return "off (busy-wait)";
