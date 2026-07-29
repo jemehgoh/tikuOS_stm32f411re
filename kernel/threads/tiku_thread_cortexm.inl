@@ -8,8 +8,9 @@
  * tiku_thread_cortexm.inl - generic Cortex-M worker-thread switcher
  *
  * The one context-switch implementation shared by every Cortex-M part
- * TikuOS threads on: Apollo510 (M55, ARMv8.1-M), Apollo4 Lite/Plus
- * (M4F, ARMv7E-M) and RP2350 (M33, ARMv8-M).  The mechanics are pure
+ * TikuOS threads on: Apollo510 (M55, ARMv8.1-M), Apollo4 Lite/Plus and
+ * STM32F411RE (M4F, ARMv7E-M), plus RP2350 (M33, ARMv8-M).  The mechanics
+ * are pure
  * architectural Cortex-M -- the register block (SCB/DWT/FPCCR), the
  * PendSV/PSP model, lazy FP stacking and the {s16-s31} callee-saved FP
  * set are identical across those cores -- so the body below is written
