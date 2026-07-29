@@ -37,7 +37,29 @@ TIKU_STM32_BRIDGE(BusFault_Handler, tiku_stm32f411_bus_fault_handler)
 TIKU_STM32_BRIDGE(UsageFault_Handler, tiku_stm32f411_usage_fault_handler)
 TIKU_STM32_BRIDGE(SVC_Handler, tiku_stm32f411_svcall_handler)
 TIKU_STM32_BRIDGE(DebugMon_Handler, tiku_stm32f411_debug_mon_handler)
-TIKU_STM32_BRIDGE(PendSV_Handler, tiku_stm32f411_pendsv_handler)
+
+/* PendSV cannot use the normal C bridge: a thread switch returns with an
+ * EXC_RETURN value, not to a C caller.  Tail-branch to the port hook so LR
+ * remains the exception-return token and no MSP bridge frame is left behind. */
+__attribute__((weak, naked))
+void tiku_stm32f411_pendsv_handler(void)
+{
+    __asm__ volatile (
+        "1:                                     \n"
+        "wfe                                    \n"
+        "b      1b                              \n");
+}
+
+__attribute__((naked))
+void PendSV_Handler(void)
+{
+    __asm__ volatile (
+        ".syntax unified                         \n"
+        "ldr    r3, =tiku_stm32f411_pendsv_handler\n"
+        "bx     r3                               \n"
+        );
+}
+
 TIKU_STM32_BRIDGE(SysTick_Handler, tiku_stm32f411_systick_handler)
 
 TIKU_STM32_BRIDGE(WWDG_IRQHandler, tiku_stm32f411_wwdg_irq_handler)
