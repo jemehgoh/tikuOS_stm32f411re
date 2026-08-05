@@ -5,23 +5,11 @@
  *
  * Authors: Ambuj Varshney <ambuj@tiku-os.org>
  *
- * tiku_usb_cdc_arch.h - RP2350 native USB CDC-ACM console backend
+ * tiku_usb_cdc_arch.h - RP2350 native USB CDC-ACM console backend.
  *
- * A from-scratch USB 1.1 full-speed device stack, just enough to present a
- * single CDC-ACM virtual serial port on the Pico 2's own USB connector --
- * so console/debug output can come over the same cable used for BOOTSEL
- * flashing, with no external FT232. It mirrors the tiku_uart_arch.* API so
- * the printf HAL and the pluggable shell I/O backend can select between UART
- * and USB at build time via the TIKU_CONSOLE make variable.
- *
- * The stack is POLLED (no IRQ): tiku_usb_cdc_poll() must be called often --
- * it is wired to the scheduler idle hook and is also nudged from putc/getc.
- *
- * Caveats (USB CDC is a dev/interactive convenience, not a low-power or CI
- * transport): the port re-enumerates across each BOOTSEL flash cycle, output
- * emitted before the host opens the port is dropped, and keeping the USB PHY
- * + 48 MHz clock alive costs power. Use UART (TIKU_CONSOLE=uart) for the
- * automated test loop and deployed low-power nodes.
+ * Presents one CDC-ACM port on the Pico 2's own USB connector, mirroring the UART
+ * arch API so the console backend is a build-time choice.  The stack is POLLED:
+ * tiku_usb_cdc_poll() must be called often.  Prefer UART for CI and low power.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -64,13 +52,12 @@ uint8_t tiku_usb_cdc_connected(void);
 /**
  * @brief Queue one character for the host.
  *
- * On a full TX ring this polls the bus for a bounded window
- * (TX_FULL_WAIT_US) to let the host drain a slot rather than dropping
- * the byte outright.  If it is still full at the deadline the driver
- * latches an internal stalled flag so the rest of a burst drops fast
- * instead of paying the wait per byte — a host that stops reading
- * slows the console, it never freezes it.
+ * On a full TX ring this polls the bus for a bounded window (TX_FULL_WAIT_US)
+ * to let the host drain a slot rather than dropping the byte outright.
  *
+ * @note Still full at the deadline, the driver latches a stalled flag so the
+ *       rest of a burst drops fast instead of paying the wait per byte: a host
+ *       that stops reading slows the console, it never freezes it.
  * @param c  Character to queue
  */
 void tiku_usb_cdc_putc(char c);
@@ -78,11 +65,9 @@ void tiku_usb_cdc_putc(char c);
 /**
  * @brief Queue a null-terminated string for the host.
  *
- * Feeds every character through tiku_usb_cdc_putc(), so it inherits the
- * same TX-ring back-pressure: when the ring is full the call waits a
- * bounded window for the host to drain a slot, and if the host is not
- * reading it latches a stalled flag and drops the rest of the burst
- * instead of freezing the console. No newline translation is done here.
+ * Feeds every character through tiku_usb_cdc_putc(), inheriting the same
+ * TX-ring back-pressure and drop-on-stalled-host behaviour.  No newline
+ * translation happens here.
  *
  * @param s  String to send; a NULL pointer is a no-op.
  */
@@ -91,14 +76,13 @@ void tiku_usb_cdc_puts(const char *s);
 /**
  * @brief Formatted output over the CDC port (mirrors tiku_uart_printf).
  *
- * Lightweight formatter: no heap, no floating point. Supports %c, %s,
- * %d, %u and %x with an optional '0' pad flag, a field width, and the
- * 'l' length modifier (%ld, %lu, %lx); %% emits a literal percent sign
- * and an unrecognized conversion is echoed verbatim. A newline in the
- * literal format text is expanded to CRLF (text substituted by %s / %c
- * is not). Emits through tiku_usb_cdc_putc(), so the same TX-ring
- * back-pressure and drop-on-stalled-host behaviour applies.
+ * Lightweight: no heap, no floating point.  Supports %c, %s, %d, %u and %x with
+ * an optional '0' pad flag, a field width and the 'l' modifier; %% emits a
+ * literal percent and an unrecognized conversion is echoed verbatim.
  *
+ * @note A newline in the literal format text expands to CRLF, though text
+ *       substituted by %s / %c does not.  Emits through tiku_usb_cdc_putc(), so
+ *       the same TX-ring back-pressure applies.
  * @param fmt  Format string; a NULL pointer is a no-op.
  * @param ...  Format arguments.
  */
@@ -131,10 +115,9 @@ uint8_t  tiku_usb_cdc_rx_ready(void);
 /**
  * @brief Read one byte from the RX ring. NON-BLOCKING.
  *
- * Services the bus first (tiku_usb_cdc_poll()) so bytes the host has
- * already delivered are picked up, then pops the oldest byte from the
- * 256-byte ring. It never waits for input: an empty ring returns the
- * -1 sentinel immediately, so callers poll rather than block.
+ * Services the bus first via tiku_usb_cdc_poll() so bytes the host already
+ * delivered are picked up, then pops the oldest byte from the 256-byte ring.
+ * It never waits: an empty ring returns immediately, so callers poll.
  *
  * @return The received byte as 0..255, or -1 if no byte is available.
  */
@@ -144,12 +127,12 @@ int      tiku_usb_cdc_getc(void);
  * @brief Return the number of received bytes dropped since the counter
  *        was last cleared.
  *
- * One overrun is counted per byte discarded because the 256-byte RX
- * ring was already full when a bulk-OUT packet arrived from the host,
- * i.e. the shell/application is not draining input fast enough. Purely
- * diagnostic: it is free-running (wraps at 65535, no saturation), is
- * zeroed by tiku_usb_cdc_init(), and reading it does not clear it.
+ * One overrun per byte discarded because the 256-byte RX ring was already full
+ * when a bulk-OUT packet arrived, i.e. the application is not draining input
+ * fast enough.
  *
+ * @note Purely diagnostic: free-running (wraps at 65535, no saturation), zeroed
+ *       by tiku_usb_cdc_init(), and reading it does not clear it.
  * @return Dropped-byte count since init or the last overrun reset.
  */
 uint16_t tiku_usb_cdc_overrun_count(void);

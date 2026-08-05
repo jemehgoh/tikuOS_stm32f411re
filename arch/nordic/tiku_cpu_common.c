@@ -5,15 +5,11 @@
  *
  * Authors: Ambuj Varshney <ambuj@tiku-os.org>
  *
- * tiku_cpu_common.c - nRF54L busy delays (SysTick) + system reset
+ * tiku_cpu_common.c - nRF54L busy delays (SysTick) and system reset.
  *
- * Delays use SysTick as a polled one-shot down-counter clocked from the
- * processor clock.  SysTick is core-internal and runs whether or not a
- * debugger is attached -- unlike the DWT cycle counter, whose CYCCNT can be
- * frozen without an active trace clock (an early nRF54L bring-up used DWT and
- * hung the delay loop when run standalone, printing nothing over UART).  The
- * kernel tick will live on the GRTC (low-power, always-on), so SysTick stays
- * free for busy-delays in the full build too.
+ * Delays poll SysTick as a one-shot down-counter, because it is core-internal and
+ * runs with or without a debugger attached -- unlike DWT's CYCCNT, which can be
+ * frozen with no trace clock and once hung the delay loop on a standalone boot.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -34,8 +30,19 @@
 #define TIKU_SYSTICK_MAX     0x00FFFFFFUL   /* SysTick reload is 24-bit */
 #define TIKU_PLL_CK128M      0x1UL          /* CURRENTFREQ: 128 MHz     */
 
-/** @brief Current core clock in Hz, from the live PLL state (64 or 128 MHz). */
-static uint32_t tiku_nordic_cpu_hz_now(void)
+/*
+ * THE ONE PLACE THAT ANSWERS "how fast is the core right now".
+ *
+ * Not static, and deliberately so.  This started as a private helper for the
+ * delay math while tiku_cpu_nordic_clock_get_hz() went on returning a 128 MHz
+ * constant -- so the two disagreed the moment the PLL was anything else, and
+ * the constant was the one every caller outside this file saw.  A single
+ * definition costs one exported symbol and removes a whole bug class: a
+ * duplicated fact about hardware is a fact that will eventually be duplicated
+ * WRONG (this tree has already paid for that once, with per-file copies of a
+ * placement attribute silently diverging).
+ */
+unsigned long tiku_nordic_cpu_hz_now(void)
 {
     return ((NRF_OSCILLATORS_S->PLL.CURRENTFREQ & 0x3UL) == TIKU_PLL_CK128M)
                ? 128000000UL

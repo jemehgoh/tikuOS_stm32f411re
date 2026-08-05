@@ -7,22 +7,9 @@
  *
  * tiku_stack.h - stack high-water measurement by painting.
  *
- * /sys/mem/free reports the LIVE gap under the current SP -- headroom at this
- * instant.  It cannot tell you how close the stack has EVER come to overflow,
- * which is the number that matters for sizing.  Painting does: fill the
- * unused stack with a sentinel early in boot; the deepest the stack ever
- * reached is the lowest overwritten sentinel, and the intact cushion below it
- * is the worst-case headroom -- measured, not guessed.  Pairs with the MPU
- * stack guard: the guard catches an overflow, this warns before one.
- *
- * SAFETY: painting is bounded by the ARCH-DECLARED stack bottom
- * (tiku_stack_arch_bottom), not by _end.  The gap between _end and the stack
- * holds the heap and the armed no-access MPU guard region -- painting or
- * scanning through those faults the CPU (the lesson of the first attempt).
- * The arch override lives next to the guard-arming code, computed from the
- * SAME expression, so the paint floor and the guard top cannot diverge.  On
- * an arch with no override the weak default returns 0 and the whole feature
- * is dormant: nothing painted, stack_free reports 0.
+ * /sys/mem/free reports the live gap under SP; painting reports how close the
+ * stack has ever come to overflow, which is the number that sizes it.  Bounded by
+ * the arch-declared stack bottom, never _end -- the heap and MPU guard lie between.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -54,9 +41,8 @@ void tiku_stack_paint(void);
  * @brief Worst-case stack headroom seen since tiku_stack_paint(), in bytes.
  *
  * The intact sentinel cushion above the arch stack bottom -- the closest the
- * stack has ever come to the guard.  Monotonically non-increasing.  0 when
- * the arch bottom is unknown (feature dormant) or, alarmingly, when the
- * stack has already consumed its whole budget.
+ * stack has ever come to the guard, and monotonically non-increasing.  0 when
+ * the feature is dormant or, alarmingly, when the whole budget is spent.
  */
 uint32_t tiku_stack_free(void);
 
@@ -64,13 +50,9 @@ uint32_t tiku_stack_free(void);
 /**
  * @brief TEST-ONLY hook: paint an explicit range with the sentinel.
  *
- * The same painter tiku_stack_paint() uses, but on caller-supplied
- * bounds, so the test suite can exercise it over a plain buffer
- * instead of the live stack (whose bounds are arch-supplied and whose
- * result is unrepeatable).  Not part of the normal API; compiled only
- * when TIKU_STACK_TEST_HOOKS is set.  Fills the word-aligned range
- * [bottom, sp - margin); a no-op when @p bottom is 0 or the range is
- * no larger than @p margin.
+ * The same painter on caller-supplied bounds, so the suite can exercise it over
+ * a plain buffer instead of the live stack.  Fills [bottom, sp - margin), and
+ * no-ops when @p bottom is 0 or the range is no larger than @p margin.
  *
  * @param bottom  Lowest address to paint (0 = no-op)
  * @param sp      Simulated stack pointer; painting stops @p margin below
@@ -81,11 +63,9 @@ void tiku_stack_test_paint(uintptr_t bottom, uintptr_t sp, uint32_t margin);
 /**
  * @brief TEST-ONLY hook: measure the intact cushion in an explicit range.
  *
- * The same scanner tiku_stack_free() uses, on caller-supplied bounds;
- * test suite only, compiled with TIKU_STACK_TEST_HOOKS.  Counts intact
- * sentinel words upward from @p bottom and stops at the first
- * overwritten word — the deepest point the "stack" ever reached — or
- * at @p sp, which is never read at or above.
+ * The same scanner on caller-supplied bounds: counts intact sentinel words
+ * upward from @p bottom and stops at the first overwritten one -- the deepest
+ * point reached -- or at @p sp, which is never read at or above.
  *
  * @param bottom  Lowest address of the painted range (0 = returns 0)
  * @param sp      Upper bound of the scan

@@ -5,19 +5,11 @@
  *
  * Authors: Ambuj Varshney <ambuj@tiku-os.org>
  *
- * tiku_ble_host.h - M33-side BLE host: L2CAP (fragmentation/recombination) +
- *                   the ATT/GATT server, fed L2CAP FRAGMENTS by the FLPR
- *                   controller across the shared-page mailbox.
+ * tiku_ble_host.h - M33-side BLE host: L2CAP plus the ATT/GATT server.
  *
- * Phase B split the peripheral into controller (FLPR) + host (M33).  Phase C
- * makes the host speak REAL L2CAP: a BLE data PDU carries at most ~27 bytes,
- * so an L2CAP PDU larger than that (any ATT payload past the 23-byte default
- * MTU) is fragmented across several data PDUs, tagged by the LL header's
- * LLID -- 0b10 (start) / 0b01 (continuation).  The controller forwards each
- * fragment with its LLID; this host RECOMBINES them into a whole L2CAP PDU
- * before running ATT, and FRAGMENTS its own responses/notifications back.
- * That unlocks payloads bigger than one PDU (a longer NUS message, a larger
- * MTU) -- the foundation general GATT (Phase D) needs.
+ * A BLE data PDU carries at most ~27 bytes, so a larger L2CAP PDU is fragmented
+ * and tagged by the LL header's LLID.  This host recombines inbound fragments
+ * before running ATT and fragments its own responses back.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -73,12 +65,11 @@ int tiku_ble_host_nus_notify(const uint8_t *data, uint16_t len);
 int tiku_ble_host_subscribed(void);
 
 /**
- * @brief Send an L2CAP Connection Parameter Update Request (CID 0x0005).
+ * @brief Send an L2CAP Connection Parameter Update Request.
  *
- * The peripheral-initiated way to ask the central for new connection
- * parameters; the central replies with a Response and (if accepted) issues
- * an LL_CONNECTION_UPDATE_IND that the FLPR controller follows (Phase A).
- * Queued for TX like any L2CAP PDU (fits one data PDU).
+ * The peripheral-initiated way to ask the central for new parameters; it
+ * replies with a Response and, if it accepts, an update the controller follows.
+ * Queued for TX like any L2CAP PDU, and fits one data PDU.
  *
  * @return 0 queued, -2 if a TX PDU is still draining (retry).
  */
@@ -107,7 +98,7 @@ uint16_t tiku_ble_host_max_single_frag(void);
  * @brief Arm the SMP responder for this connection (call once, connected).
  * @param inita  initiator (central) address A (6 B, little-endian).
  * @param at     A's address type (1 = random, 0 = public).
- * @param adva   advertiser (our) address B (6 B).
+ * @param adva   advertiser (local) address B (6 B).
  * @param bt     B's address type.
  *
  * Incoming CID 0x0006 PDUs then drive the LE-SC pairing; the host wraps the

@@ -5,12 +5,11 @@
  *
  * Authors: Ambuj Varshney <ambuj@tiku-os.org>
  *
- * tiku_crit_arch.c - Apollo 510 critical-window IRQ masking (NVIC)
+ * tiku_crit_arch.c - Apollo510 critical-window IRQ masking (NVIC).
  *
- * Snapshots the NVIC enable state and clears every IRQ family not named
- * in preserve_mask, restoring on exit. Pure Cortex-M NVIC — no AmbiqSuite
- * dependency. SysTick (the system tick) is a core exception, not an NVIC
- * line, so it is never masked here and keeps advancing the clock.
+ * Snapshots the NVIC enable state and clears every IRQ family outside
+ * preserve_mask, restoring on exit.  SysTick is a core exception rather than an
+ * NVIC line, so it is never masked and keeps advancing the clock.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -66,15 +65,12 @@ static inline void keep_set(uint32_t *keep, unsigned irq) {
 /**
  * @brief Disable NVIC IRQs, preserving those named in preserve_mask
  *
- * Snapshots the current NVIC ISER state into s_save[], builds a
- * keep-mask from preserve_mask (mapping TIKU_CRIT_PRESERVE_* flags to
- * the Apollo510 IRQ numbers above), then clears every IRQ not in the
- * keep-mask via ICER. A DSB+ISB fence ensures the new mask is visible
- * before the caller's protected code runs.
+ * Snapshots the current NVIC ISER state into s_save[], builds a keep-mask from
+ * @p preserve_mask, then clears every IRQ outside it via ICER.  A DSB+ISB fence
+ * makes the new mask visible before the caller's protected code runs.
  *
- * SysTick is a core exception (not an NVIC line) and is never affected;
- * the system tick keeps advancing during a critical window.
- *
+ * @note SysTick is a core exception, not an NVIC line, so it is never affected
+ *       and the system tick keeps advancing during a critical window.
  * @param preserve_mask  Bitmask of TIKU_CRIT_PRESERVE_* flags naming
  *                       IRQ families that must remain enabled
  */

@@ -5,18 +5,11 @@
  *
  * Authors: Ambuj Varshney <ambuj@tiku-os.org>
  *
- * tiku_nvm_map.c - NVM region table and backing storage
+ * tiku_nvm_map.c - NVM region table and backing storage.
  *
- * Declares durable arrays sized by device-header constants.  The
- * linker places them — no hardcoded addresses.  A static region table
- * provides runtime lookup by ID.
- *
- * The backing is TIKU_DURABLE (.persistent) on EVERY platform — FRAM
- * in place on MSP430, RRAM in place on nRF54L, SRAM+NVM-mirror on
- * RP2350/Ambiq.  (Until the 2026-07 audit this was MSP430-only, which
- * silently made the CONFIG region — the inittab! — volatile on every
- * Cortex-M part: `init add` entries vanished at each reboot.  Audit
- * finding P0-1; see kintsugi/memory.md §10c.)
+ * Declares durable arrays sized by device-header constants and placed by the
+ * linker, plus a static table for lookup by ID.  The backing is TIKU_DURABLE on
+ * every platform, so no region is silently volatile on the Cortex-M parts.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -73,13 +66,9 @@ static const tiku_nvm_region_t regions[] = {
 /**
  * @brief Initialise the NVM region map.
  *
- * Call once during early boot, before any subsystem that uses
- * tiku_nvm_region_get().  Registers each active region as a claim in
- * the kernel region registry so overlap with any other subsystem's
- * range is a validated error rather than silent aliasing.  Claim
- * failure is non-fatal (the registry may be full, or the region
- * table on a host build may not classify the section); lookups keep
- * working either way.
+ * Call once in early boot, before anything looks a region up.  Each active
+ * region is claimed in the kernel registry, so overlap with another subsystem
+ * is a validated error rather than silent aliasing; a failed claim is non-fatal.
  */
 void
 tiku_nvm_map_init(void)

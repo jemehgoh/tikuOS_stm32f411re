@@ -5,32 +5,11 @@
  *
  * Authors: Ambuj Varshney <ambuj@tiku-os.org>
  *
- * tiku_axon_platform.c - TikuOS platform layer for the Axon NPU (nRF54LM20B)
+ * tiku_axon_platform.c - TikuOS platform layer for the Axon NPU (nRF54LM20B).
  *
- * Implements the nrf_axon_platform_* porting seam that Nordic's Axon driver
- * core (libnrf-axon-driver-internal.a, LicenseRef-Nordic-5-Clause, linked
- * from the gitignored temp/axon-models checkout -- NEVER vendored, same
- * policy as the CRACEN PK microcode) expects from the host environment.
- * Reference semantics: the Zephyr platform layer in that checkout; the
- * interface is OS-agnostic by design (a simulator platform ships too).
- *
- * TikuOS is single-context (cooperative protothreads), so this is the
- * BARE-METAL flavor the interface documents:
- *   - reservations: a power refcount; no semaphore needed (one context).
- *   - driver events: nrf_axon_process_driver_event() is called DIRECTLY
- *     (the interface doc's bare-metal option) instead of a work queue.
- *   - user events: volatile flag + WFE.
- *   - the ISR (IRQ 86, crt slot wired in tiku_crt_early.c) forwards to
- *     nrf_axon_handle_interrupt() exactly like the Zephyr handler.
- *
- * Power quirk replicated from the vendor platform: while Axon is enabled the
- * system must hold a constant-latency-style state and RRAMC's low-power
- * config needs bit 0x20 restored after enable (vendor FIXME "magic bit" --
- * their code registers a retained sys-event; we pulse CONSTLAT and restore
- * the RRAMC bit directly).
- *
- * Build: opt-in via TIKU_AXON_ENABLE=1 (Makefile adds the checkout include
- * paths and links the blob; nrf54lm20b only).
+ * Implements the nrf_axon_platform_* seam the vendor driver core expects, in its
+ * bare-metal flavour: reservations are a power refcount, driver events are called
+ * directly rather than queued, and the IRQ forwards to the vendor handler.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -275,29 +254,16 @@ nrf_axon_result_e nrf_axon_platform_init(void)
 /**
  * @brief End an Axon session: engine off, and NOBODY holding it.
  *
- * THE REFCOUNT IS FORCED TO ZERO, not decremented, and that is the fix for a
- * real bug rather than defensive tidying.
+ * The refcount is FORCED to zero, not decremented.  This disables the hardware
+ * directly, and the refcount in tiku_axon_power_request/release is the other
+ * view of the same state, so moving one without the other leaves them at odds.
  *
- * This function disables the hardware directly.  The refcount in
- * tiku_axon_power_request/release is the other view of the same state, and a
- * teardown that moves one without the other leaves them disagreeing -- which
- * is exactly what happened: an NN inference returns with the count one higher
- * than it started (measured: three inferences, "post-run refs=3"), close()
- * then switched the engine OFF while the count still said three, and the next
- * session's power_request() saw a non-zero count, concluded the engine was
- * already up, and skipped the enable.  The engine never ran, its completion
- * event never came, and 8 s later the hang detector reset the chip with
- * /sys/boot/hang reading "0 Shell".
- *
- * The symptom was that the FIRST inference of a boot always worked and the
- * SECOND always wedged -- which reads like a model or relocation fault and is
- * neither.  It went unnoticed because the vendor's own entry point runs one
- * inference and exits; running a second model is what the file store is for.
- *
- * Whether the driver's leftover reservation is deliberate (it may keep the
- * engine warm between queued jobs) is not something this layer can know, so it
- * does not try to guess: close() is the point at which the session is over by
- * definition, and re-establishing the invariant here is correct either way.
+ * @note That disagreement wedges the SECOND session of a boot: an inference can
+ *       return with the count one higher than it started, close() then switches
+ *       the engine off while the count still says three, and the next
+ *       power_request() concludes the engine is already up and skips the
+ *       enable.  close() is where the session is over by definition, so
+ *       re-establishing the invariant here is correct either way.
  */
 void nrf_axon_platform_close(void)
 {

@@ -5,14 +5,11 @@
  *
  * Authors: Ambuj Varshney <ambuj@tiku-os.org>
  *
- * tiku_uart_arch.h - UART backend for printf (MSP430 architecture)
+ * tiku_uart_arch.h - UART backend for printf (MSP430).
  *
- * Provides a compiler-aware UART printf backend:
- *   - GCC (msp430-elf-gcc): Routes printf through eUSCI_A0 UART
- *     using the LaunchPad backchannel (USB-to-serial on debugger).
- *   - CCS (cl430): No-op; CIO semihosting handles printf via JTAG.
- *
- * Call tiku_uart_init() during boot, after clock and GPIO are ready.
+ * Routes printf through the LaunchPad backchannel UART under GCC, and is a no-op
+ * under CCS where semihosting handles it.  Call tiku_uart_init() during boot,
+ * after clock and GPIO are ready.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -80,10 +77,8 @@ int tiku_uart_getc(void);
 /**
  * @brief Return the number of hardware UART overruns since init.
  *
- * An overrun (UCOE) occurs when a new byte arrives before the
- * previous one was read from the shift register.  The ISR counts
- * each occurrence so firmware and tests can detect transport
- * reliability problems.
+ * An overrun happens when a byte arrives before the previous one was read out.
+ * The ISR counts each, so firmware and tests can spot transport trouble.
  *
  * @return Cumulative overrun count (reset to 0 by tiku_uart_init)
  */
@@ -92,29 +87,18 @@ uint16_t tiku_uart_overrun_count(void);
 /**
  * @brief Zero the overrun counter without re-initialising the UART.
  *
- * Useful for scoping a "no overruns during this phase" assertion to
- * a specific window. The drain loops in the loopback / ringbuf
- * tests intentionally swallow a backlog of host-echoed printf bytes
- * which (on bursty USB-CDC bridges like FT232 with no flow control)
- * can register one or two UCOE events before the test's binary
- * phase even starts. Call this immediately after the resync so the
- * counter only reflects what the binary phase actually does.
- *
- * Atomic against the RX ISR.
+ * Scopes a "no overruns in this phase" assertion to a window.  A test's drain
+ * loop swallows echoed bytes that can register an overrun on a bursty bridge
+ * before the phase starts, so resetting after the resync keeps the count honest.
  */
 void tiku_uart_overrun_reset(void);
 
 /**
  * @brief Inject one byte into the RX ring buffer (test only).
  *
- * Allows unit tests to feed bytes into the UART receive path
- * without the RX ISR running.  Only available when HAS_TESTS=1.
- *
- * Not part of the normal driver path: nothing in the shell or the
- * console backend calls it, and no hardware is touched.  The byte
- * appears to tiku_uart_rx_ready() / tiku_uart_getc() exactly as a
- * received one would.  If the ring is full the byte is dropped
- * silently.  Under the CCS/TI build this is a no-op stub.
+ * Feeds the receive path without the ISR running, touching no hardware; the
+ * byte then appears exactly as a received one would.  A full ring drops it
+ * silently, and the TI build compiles this to a stub.
  *
  * @param byte Byte to inject
  */

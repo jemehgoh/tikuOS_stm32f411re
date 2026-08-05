@@ -5,22 +5,11 @@
  *
  * Authors: Ambuj Varshney <ambuj@tiku-os.org>
  *
- * tiku_usb_cdc_arch.c - RP2350 native USB CDC-ACM console backend
+ * tiku_usb_cdc_arch.c - RP2350 native USB CDC-ACM console backend.
  *
- * A minimal, polled USB 1.1 full-speed device stack presenting one CDC-ACM
- * virtual serial port on the Pico 2's USB connector. See the header for the
- * rationale and caveats. The flow mirrors the canonical RP2040/RP2350
- * "dev_lowlevel" device example: PLL_USB -> clk_usb -> controller -> DPRAM
- * endpoint setup -> EP0 enumeration -> bulk IN/OUT data.
- *
- * HARDWARE BRING-UP NOTE: the USB *controller* and *DPRAM* register offsets
- * and bit positions below follow the RP2040 USB device controller (the
- * RP2350 device-mode block is the same IP). They are marked and grouped so
- * they can be checked against the RP2350 datasheet "USB" section during
- * first bring-up; the enumeration/descriptor logic above them is silicon-
- * independent. USB enumeration always needs a host-side dmesg / analyzer
- * pass on first silicon -- this driver is written correct-by-construction
- * but has not been validated on hardware here.
+ * A polled USB 1.1 full-speed device stack: PLL_USB, controller, DPRAM endpoint
+ * setup, EP0 enumeration, then bulk IN/OUT.  The register layout follows the
+ * RP2040 device block, which is the same IP; not yet validated on hardware.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -56,7 +45,7 @@
 #define USB_EP_STALL_ARM     0x68U
 #define USB_USB_MUXING       0x74U
 #define USB_USB_PWR          0x78U
-#define USB_INTE             0x90U   /* (unused: we poll, no NVIC IRQ)       */
+#define USB_INTE             0x90U   /* (unused: polled, no NVIC IRQ)        */
 
 /* MAIN_CTRL */
 #define USB_MAIN_CTRL_CONTROLLER_EN  (1U << 0)
@@ -376,7 +365,7 @@ static void handle_setup(void) {
             ep0_status_in();
             break;
         case 0x20:                                    /* SET_LINE_CODING    */
-            /* 7-byte OUT data stage follows; accept it (we don't use it) and
+            /* 7-byte OUT data stage follows; accept it (unused) and
              * the IN status is sent once the data arrives (PH_DATA_OUT). */
             u.ep0_phase = PH_DATA_OUT;
             ep_arm(DP_EP0_OUT_BUFCTRL, BUF_CTRL_DATA1_PID | 7U);
@@ -449,7 +438,7 @@ static void handle_buff_status(void) {
         u.ep2_pid ^= 1U;
         rx_arm();
     }
-    if (bs & BUFF_STATUS_EP3_IN) {    /* bulk IN: host took our packet      */
+    if (bs & BUFF_STATUS_EP3_IN) {    /* bulk IN: host took the packet      */
         usb_wr(USB_BUFF_STATUS, BUFF_STATUS_EP3_IN);
         u.ep3_busy = 0U;
         tx_kick();

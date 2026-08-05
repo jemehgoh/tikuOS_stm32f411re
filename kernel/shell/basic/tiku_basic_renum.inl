@@ -7,21 +7,16 @@
  *
  * tiku_basic_renum.inl - RENUM with line-reference rewriting.
  *
- * NOT a standalone translation unit.  Included from tiku_basic.c.
- *
- * Renumbers program lines from a given start with a given step and
- * rewrites every GOTO / GOSUB / IF..THEN <line> / ON..GOTO target
- * to track the new numbering.  GOTO references that don't match
- * any existing line are left alone -- they were already broken;
- * we don't want to break them harder by mapping them to a random
- * new number.
+ * Renumbers from a start with a step and rewrites every GOTO, GOSUB, THEN and ON
+ * target to track it.  A reference matching no existing line is left alone -- it
+ * was already broken, and remapping it to a live line would break it harder.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
 
 /* Look up an old line number in the renumber map; returns the new
  * number, or the original old number if not in the map (i.e. the
- * GOTO referenced a non-existent line, which we leave alone). */
+ * GOTO referenced a non-existent line, which is left alone). */
 static uint16_t
 renum_lookup(const uint16_t *old_nos, const uint16_t *new_nos,
              int n, uint16_t old)
@@ -61,7 +56,7 @@ match_kw_no_ws(const char **q, const char *kw)
  * each digit run gets remapped via the (old_nos, new_nos) tables.
  * Quoted strings ("...") are skipped without modification.
  *
- * After GOTO/GOSUB we also accept comma-separated number lists to
+ * After GOTO/GOSUB comma-separated number lists are also accepted, to
  * cover `ON expr GOTO l1, l2, ...`.
  *
  * Returns 0 on success, -1 if the rewritten line would exceed the
@@ -180,7 +175,7 @@ exec_renum(const char **q)
         new_nos[i] = (uint16_t)(start + (long)i * step);
     }
 
-    /* Rewrite each line's body using the map. Do this BEFORE we
+    /* Rewrite each line's body using the map. Do this BEFORE
      * change the line numbers, so the prog table is still self-
      * consistent during the rewrite. */
     for (i = 0; i < TIKU_BASIC_PROGRAM_LINES; i++) {

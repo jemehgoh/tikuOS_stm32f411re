@@ -5,18 +5,11 @@
  *
  * Authors: Ambuj Varshney <ambuj@tiku-os.org>
  *
- * tiku_trng_arch.h - Ambiq Apollo4/5 True Random Number Generator HAL
+ * tiku_trng_arch.h - Ambiq true random number generator HAL.
  *
- * Wraps the Arm CryptoCell-312 TRNG block embedded in the Apollo CRYPTO
- * peripheral (apollo4l/4p/510 share the same CC312 RNG register map).  A
- * ring oscillator feeds a 192-bit EHR (entropy holding register) split
- * across six 32-bit EHR_DATA[0..5] words; an EHR_VALID status bit flips when
- * the block is full.  Health tests (autocorrelation / CRNGT / Von Neumann)
- * gate each collection; a failed test re-arms the source.
- *
- * Same one-blocking-read API and 192-bit RAM cache as the RP2350 TRNG HAL,
- * so the kit-side binding (tikukits/net/tls/.../tiku_kits_crypto_tls_config.h)
- * is identical -- read_bytes() backs TIKU_KITS_CRYPTO_TLS_RNG_FILL.
+ * Wraps the CryptoCell-312 TRNG shared by apollo4l, 4p and 510.  Same
+ * one-blocking-read API and 192-bit RAM cache as the RP2350 HAL, so the kit-side
+ * TLS binding is identical.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -27,8 +20,8 @@
 #include <stdint.h>
 #include <stddef.h>
 
-/**
- * @brief Return codes for the TRNG driver.
+/*
+ * Return codes for the TRNG driver.
  *
  * TIKU_TRNG_OK            — success.
  * TIKU_TRNG_ERR_INVALID   — NULL pointer or zero-length buffer.
@@ -51,10 +44,9 @@ void tiku_trng_arch_init(void);
 /**
  * @brief Block until a 32-bit random word is available; return it.
  *
- * Fast path returns the next word from the 6-word software cache the
- * hardware already filled; slow path re-arms the ring-oscillator source and
- * spins on EHR_VALID (re-arming on a health-test failure) for a bounded
- * budget before giving up — see TIKU_TRNG_ERR_TIMEOUT.
+ * The fast path returns the next word from the 6-word software cache the
+ * hardware already filled; the slow path re-arms the ring-oscillator source and
+ * spins on EHR_VALID for a bounded budget, re-arming on a health-test failure.
  *
  * @param out  Where to store the random word. Must not be NULL.
  * @return TIKU_TRNG_OK or a negative error code.

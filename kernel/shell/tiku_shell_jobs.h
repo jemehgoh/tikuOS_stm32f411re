@@ -5,24 +5,11 @@
  *
  * Authors: Ambuj Varshney <ambuj@tiku-os.org>
  *
- * tiku_shell_jobs.h - Periodic and one-shot scheduled shell commands
+ * tiku_shell_jobs.h - periodic and one-shot scheduled shell commands.
  *
- * The jobs subsystem is a tiny in-process scheduler that re-dispatches
- * stored command lines through the shell parser at user-defined
- * intervals.  It is driven by a tick called from the shell main loop
- * (so it inherits the shell's cooperative scheduling and shares its
- * I/O backend with no extra synchronisation).
- *
- * Two job types are supported:
- *   - JOB_EVERY : recurring; fires every interval_sec, forever (until
- *                 explicitly deleted).
- *   - JOB_ONCE  : single-shot; fires once after interval_sec, then
- *                 the slot is automatically reclaimed.
- *
- * Storage is a fixed-size SRAM array; jobs do not persist across
- * reboots.  Commands stored in jobs go through the same parser as
- * interactive input, so any registered command (including aliases)
- * may be scheduled.
+ * A tiny in-process scheduler driven by a tick from the shell main loop, so it
+ * inherits cooperative scheduling and needs no synchronisation.  Jobs live in SRAM
+ * and do not survive a reboot.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -42,10 +29,9 @@
 #endif
 
 /** Maximum stored length of a scheduled-job command.  Tier-gated in step with
- *  TIKU_SHELL_LINE_SIZE so a periodic job (e.g. poll an API every N s) can hold
- *  a long command: 64 on MSP430-class, 255 on big-RAM parts.  Capped at 255 --
- *  the job copy length is a uint8_t -- which still holds any realistic command
- *  (a line-editor line is <= 255 chars). */
+ *  TIKU_SHELL_LINE_SIZE so a periodic job can hold a long command: 64 on
+ *  MSP430-class, 255 on big-RAM parts.  Capped at 255 because the job copy
+ *  length is a uint8_t, which still holds any line-editor line. */
 #ifndef TIKU_SHELL_JOBS_CMD_MAX
 #  ifdef PLATFORM_MSP430
 #    define TIKU_SHELL_JOBS_CMD_MAX  64
@@ -143,10 +129,9 @@ int8_t tiku_shell_jobs_schedule_argv(tiku_shell_job_type_t type,
 /**
  * @brief Periodic dispatcher; called from the shell main loop.
  *
- * Walks the job table, fires every job whose deadline has been
- * reached, re-arms recurring jobs, and reclaims one-shot slots.
- * Re-arming happens before dispatch so that a command that adds or
- * deletes jobs leaves the table in a consistent state on return.
+ * Walks the job table, fires every job whose deadline has been reached, re-arms
+ * recurring jobs and reclaims one-shot slots.  Re-arming happens before
+ * dispatch, so a command that adds or deletes jobs leaves the table consistent.
  */
 void tiku_shell_jobs_tick(void);
 

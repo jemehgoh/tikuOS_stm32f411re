@@ -5,29 +5,11 @@
  *
  * Authors: Ambuj Varshney <ambuj@tiku-os.org>
  *
- * tiku_mpu.c - MPU write-protection wrappers (platform-independent)
+ * tiku_mpu.c - MPU write-protection wrappers (platform-independent).
  *
- * Provides a controlled interface for NVM protection using the MPU.
- * All hardware register access and bit manipulation is routed through
- * the arch-level functions (tiku_mpu_arch_set_default_protection,
- * tiku_mpu_arch_set_seg_perm, tiku_mpu_arch_unlock_nvm, etc.), so
- * this file contains only platform-independent orchestration logic.
- *
- * Default policy: all MPU segments are read+execute, no write.
- * This prevents stray pointers and runaway code from corrupting NVM.
- * To write to NVM, code explicitly unlocks, writes, and relocks.
- *
- * FAULT-BEHAVIOR CONTRACT (what an UNBRACKETED durable store does):
- *   MSP430   the FRAM MPU silently DROPS the write — no fault, no flag
- *            (unless the violation NMI below is armed).  The quietest
- *            and therefore most dangerous failure mode in the fleet.
- *   nRF54L   precise BUS FAULT (RRAMC WEN closed) — the loud canary.
- *   RP2350 / Ambiq   MemManage fault -> deliberate reset, with a
- *            persistent .mpu_diag violation record.
- * Same bug, three behaviors: never rely on "it didn't crash" as proof
- * a durable write landed on MSP430.  Debug/bench builds should arm the
- * violation NMI (TIKU_MPU_NMI_ON_VIOLATION below) so all platforms
- * fail loudly.
+ * Orchestration only; every register access goes through tiku_mpu_arch_*.  The
+ * default is read+execute with no write, so code explicitly unlocks NVM, writes
+ * and relocks -- see tiku_mpu_unlock_nvm() for what an unbracketed store does.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -86,10 +68,23 @@ void tiku_mpu_set_permissions(tiku_mpu_seg_t seg, tiku_mpu_perm_t perm)
  *   on individual segments.
  */
 
+/*
+ * FAULT-BEHAVIOR CONTRACT -- what an UNBRACKETED durable store does:
+ *   MSP430          the FRAM MPU silently DROPS the write -- no fault, no flag
+ *                   (unless the violation NMI is armed).  The quietest, and so
+ *                   the most dangerous, failure mode in the fleet.
+ *   nRF54L          precise BUS FAULT (RRAMC WEN closed) -- the loud canary.
+ *   RP2350 / Ambiq  MemManage fault -> deliberate reset, with a persistent
+ *                   .mpu_diag violation record.
+ * Same bug, three behaviours: never read "it did not crash" as proof a durable
+ * write landed on MSP430.  Bench builds should arm TIKU_MPU_NMI_ON_VIOLATION so
+ * every platform fails loudly.
+ */
+
 /**
- * @brief Unlock NVM for writing — adds write permission to all segments
+ * @brief Unlock NVM for writing -- adds write permission to all segments.
  *
- * @return Previous protection state for later restoration
+ * @return Previous protection state for later restoration.
  */
 uint16_t tiku_mpu_unlock_nvm(void)
 {
@@ -97,16 +92,11 @@ uint16_t tiku_mpu_unlock_nvm(void)
 }
 
 /**
- * @brief Restore MPU to a previously saved state
+ * @brief Restore the MPU to a previously saved state.
  *
- * Before re-locking, flush any in-RAM .persistent modifications to
- * non-volatile storage.  On MSP430 this is a no-op (FRAM is already
- * durable); on RP2350 it triggers the flash-sector commit so the
- * unlock window's writes survive a full power cycle, not just a warm
- * reset.  Placing the flush HERE -- at the natural transaction
- * boundary -- catches both writes via tiku_mem_arch_nvm_write() and
- * direct stores into .persistent variables (memset, struct
- * assignments) inside the unlock window.
+ * Flushes any in-RAM .persistent changes before re-locking.  Doing it HERE, at
+ * the transaction boundary, catches both writes through the NVM helper and
+ * direct stores into .persistent variables inside the window.
  */
 void tiku_mpu_lock_nvm(uint16_t saved_state)
 {
@@ -117,8 +107,8 @@ void tiku_mpu_lock_nvm(uint16_t saved_state)
 /*
  * Why scoped_write disables interrupts:
  *   While NVM is unlocked, any ISR that fires has write access to
- *   NVM. A bug in an ISR could corrupt persistent data. By disabling
- *   interrupts for the duration of the unlock window, we guarantee that
+ *   NVM. A bug in an ISR could corrupt persistent data. Disabling
+ *   interrupts for the duration of the unlock window guarantees that
  *   only the caller's function can write to NVM.
  *
  * Caveat: the write function (fn) must be short — while it runs,
@@ -162,14 +152,11 @@ void tiku_mpu_enable_violation_nmi(void)
 /**
  * @brief Return the latched MPU violation flags from the NMI ISR.
  *
- * When the MPU detects a write to a protected region, the NMI ISR
- * latches the violation flags into a software variable.  This function
- * returns that latched value for diagnostic use (VFS `/sys/boot/mpu/violations`,
- * shell, tests).
+ * The ISR latches the flags into a software variable when a protected write is
+ * detected; this hands that value to the VFS, shell and tests.
  *
  * @return Bitmask of violated segments (platform-specific encoding).
  *         Zero means no violations have been recorded since last clear.
- *
  * @see tiku_mpu_clear_violation_flags()
  */
 uint16_t tiku_mpu_get_violation_flags(void)
@@ -194,10 +181,9 @@ void tiku_mpu_clear_violation_flags(void)
 /**
  * @brief Total MPU violations across warm boots.
  *
- * Delegates to the arch layer which returns the persistent counter
- * (in a NOLOAD section that survives a fault-triggered reset on
- * platforms that have one).  Returns 0 on platforms without
- * persistent diagnostic state.
+ * Delegates to the arch layer's persistent counter, which lives in a section
+ * that survives a fault-triggered reset where the platform has one, and reads
+ * 0 where it does not.
  */
 uint32_t tiku_mpu_get_violation_count(void)
 {

@@ -5,13 +5,11 @@
  *
  * Authors: Ambuj Varshney <ambuj@tiku-os.org>
  *
- * tiku_gpio_arch.h - nRF54L GPIO primitives (physical port/pin addressing)
+ * tiku_gpio_arch.h - nRF54L GPIO primitives (physical port/pin addressing).
  *
- * Helpers take a PHYSICAL port number (0/1/2 == P0/P1/P2) and a pin index
- * (0..31) matching the board silk (P<port>.<pin>).  The nRF GPIO block uses
- * DIRSET/OUTSET/OUTCLR and a per-pin PIN_CNF[] register; these helpers wrap
- * that so board headers can express LEDs/buttons declaratively.  The virtual
- * VFS port numbering (1/2/3) is a separate concern handled in the VFS layer.
+ * Helpers take a physical port (0/1/2) and pin index matching the board silk, so
+ * board headers can express LEDs and buttons declaratively.  The VFS's virtual
+ * port numbering is a separate concern handled in that layer.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -128,10 +126,9 @@ int8_t tiku_gpio_arch_toggle(uint8_t port, uint8_t pin);
 /**
  * @brief Read a pin's logical level.
  *
- * Output pins are read back from OUT, not IN: an output's input buffer
- * is left disconnected, so IN would read 0 whatever is being driven.
- * Input pins are read from IN.  This preserves the
- * read-back-what-you-drive semantics of the msp430/rp2350/ambiq ports.
+ * Output pins are read back from OUT, not IN: an output's input buffer is left
+ * disconnected, so IN would read 0 whatever is being driven.  This preserves
+ * the read-back-what-you-drive semantics of the other ports.
  *
  * @param port Virtual port (1 = P0, 2 = P1, 3 = P2).
  * @param pin  Pin index (0..31).

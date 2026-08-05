@@ -5,19 +5,11 @@
  *
  * Authors: Ambuj Varshney <ambuj@tiku-os.org>
  *
- * tiku_crit_arch.c - RP2350 IRQ-mask backend for tiku_crit
+ * tiku_crit_arch.c - RP2350 IRQ-mask backend for tiku_crit.
  *
- * The Cortex-M NVIC has per-source enable/disable registers and no
- * MSP430-style "IE family" abstraction. We implement
- * tiku_crit_arch_mask_irqs() by snapshotting the NVIC ISER0 register
- * (covers IRQs 0..31, which is more than the RP2350 actually
- * exposes), masking everything not in the preserve set, and then
- * restoring on unmask.
- *
- * The tick / htimer / UART IRQs each have a single NVIC line so the
- * preserve mapping is straightforward; the GPIO bank is a single
- * source for all 30+ pins so we either keep them all or kill them
- * all.
+ * The NVIC has per-source enables and no MSP430-style IE families, so masking
+ * snapshots ISER0, clears everything outside the preserve set and restores it.
+ * The GPIO bank is one source for all pins, so it is kept or dropped whole.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -40,7 +32,7 @@
 
 #define IRQ_BIT_TICK    0U   /* SysTick is a system exception, not NVIC,
                                 so masking it requires touching the SCB
-                                instead — for the first port we just
+                                instead — for the first port this just
                                 leave the system tick alone. */
 #define IRQ_BIT_HTIMER  BIT(RP2350_IRQ_TIMER0_0)
 #define IRQ_BIT_UART    BIT(RP2350_IRQ_UART0)
@@ -60,11 +52,11 @@ static struct {
 /**
  * @brief Mask NVIC IRQs, keeping only those listed in @p preserve_mask.
  *
- * Snapshots NVIC ISER0, builds a keep-set from the TIKU_CRIT_PRESERVE_*
- * bits, and writes the difference to NVIC ICER0. A DSB+ISB pair ensures
- * the disable is architecturally visible before the critical section body
- * runs. SysTick is not in the NVIC so it is always left enabled.
+ * Snapshots NVIC ISER0, builds a keep-set from the TIKU_CRIT_PRESERVE_* bits and
+ * writes the difference to ICER0.  A DSB+ISB pair makes the disable
+ * architecturally visible before the critical section body runs.
  *
+ * @note SysTick is not in the NVIC, so it is always left enabled.
  * @param preserve_mask  OR of TIKU_CRIT_PRESERVE_* flags for sources to
  *                       keep enabled (HTIMER, UART, GPIO, PIO)
  */

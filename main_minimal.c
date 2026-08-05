@@ -1,25 +1,11 @@
 /*
- * Tiku Operating System v0.06 — minimal smoke test (ARM ports)
+ * Tiku Operating System v0.06 -- minimal smoke test (ARM ports).
  *
- * No kernel, no scheduler, no shell. Just brings up clocks + console
- * and prints a heartbeat in a loop, toggling an LED each iteration.
- * Intended as a debugging aid: if THIS doesn't print, the failure is in
- * the boot/clock/console layer; if it does, the failure is higher up.
+ * No kernel, scheduler or shell: brings up clocks and console, then prints a
+ * heartbeat and toggles an LED in a loop.  If this does not print, the failure
+ * is in boot/clock/console; if it does, the failure is higher up.
  *
- * RP2350 (UART0 @115200 on GP0/GP1, LED on GP25):
- *   make MCU=rp2350 MINIMAL=1
- *   sudo picotool load -fx main.uf2
- *   make monitor MCU=rp2350
- *
- * Apollo510 EVB (console on SWO/ITM @1MHz, LED0 on pad 165):
- *   make MCU=apollo510 MINIMAL=1
- *   <flash main.bin to MRAM 0x410000 via J-Link>
- *   <open a SWO viewer at 1 MHz / SWOClock=1000>
- *
- * Expected output:
- *   TikuOS minimal: hello #0  clk=... Hz  fault=0
- *   TikuOS minimal: hello #1  clk=... Hz  fault=0
- *   ...
+ * Build with MINIMAL=1, e.g. `make MCU=rp2350 MINIMAL=1`.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -109,12 +95,8 @@ volatile uint32_t g_nordic_loop_count;
  * HW result (2026-07-10, nRF54L15-DK): ALL THREE PASS -- with the WEN gate
  * open, plain CPU stores to RRAM just work, from RRAM-executing code, with or
  * without the nrfx READY/READYNEXT handshakes, buffered or not (the controller
- * stalls the bus as needed).  The kernel-boot bus fault this probe was built
- * to bisect turned out to be a store issued with WEN CLOSED: TIKU_PERSIST_WARM
- * was mis-graded into RRAM `.persistent` on nordic, so the hang detector's
- * intentionally-unbracketed warm write hit the shut gate (fixed in
- * kernel/memory/tiku_mem.h).  Kept as a regression probe for the RRAM write
- * path:
+ * stalls the bus as needed).  A store issued with WEN CLOSED faults the bus
+ * instead.  Kept as a regression probe for the RRAM write path:
  *   T1  word store bracketed by the full nrfx handshake
  *   T2  8 back-to-back byte stores into the 32-entry write buffer, then
  *       TASKS_COMMITWRITEBUF + READY wait
@@ -303,6 +285,206 @@ int main(void)
         TIKU_BOARD_LED2_TOGGLE();
         tiku_cpu_nordic_delay_ms(500u);
         g_nordic_loop_count++;      /* progress marker (read over debugger) */
+        i++;
+    }
+
+    return 0;
+}
+
+#elif defined(PLATFORM_STM32N6)
+
+#include "arch/stm32n6/tiku_cpu_freq_boot_arch.h"
+#include "arch/stm32n6/tiku_cpu_common.h"
+#include "arch/stm32n6/tiku_uart_arch.h"
+#include "arch/stm32n6/tiku_gpio_arch.h"
+#include "arch/stm32n6/tiku_stm32n6_regs.h"
+
+/* NUCLEO-N657X0-Q LED3, the one the boot stub proved reachable. LED1 is PG8
+ * and LED2 is PG10 on the same port. */
+#define TIKU_MIN_LED_PORT   STM32N6_GPIO_PORT_G
+#define TIKU_MIN_LED_PIN    0U
+
+int main(void)
+{
+    /* HSI only: the boot ROM's clock tree is left alone, so nothing here can
+     * strand the console the ROM already relies on. */
+    tiku_cpu_boot_stm32n6_init();
+
+    tiku_stm32n6_gpio_init_output(TIKU_MIN_LED_PORT, TIKU_MIN_LED_PIN);
+
+    /* USART1 on PE5/PE6 -- the ST-LINK virtual COM port. */
+    tiku_uart_init();
+
+    tiku_cpu_stm32n6_delay_ms(100);
+    tiku_uart_puts("\n\n--- TikuOS minimal smoke test (NUCLEO-N657X0-Q) ---\n");
+    /* The image identifies its own delay calibration, so a heartbeat period
+     * can never be attributed to the wrong build. */
+    tiku_uart_printf("spin=%u iters/ms\n",
+                     (unsigned int)TIKU_STM32N6_SPIN_ITERS_PER_MS);
+
+    unsigned long clk = tiku_cpu_stm32n6_smclk_get_hz();
+    int           fault = tiku_cpu_stm32n6_clock_has_fault();
+
+    uint32_t i = 0;
+    while (1) {
+        tiku_uart_printf(
+            "TikuOS minimal: hello #%u  clk=%u Hz  fault=%d\n",
+            (unsigned int)i,
+            (unsigned int)clk,
+            fault);
+
+        tiku_stm32n6_gpio_toggle(TIKU_MIN_LED_PORT, TIKU_MIN_LED_PIN);
+        tiku_cpu_stm32n6_delay_ms(500U);
+        i++;
+    }
+
+    return 0;
+}
+
+#elif defined(PLATFORM_RA8P1)
+
+#include "arch/ra8p1/tiku_cpu_freq_boot_arch.h"
+#include "arch/ra8p1/tiku_cpu_common.h"
+#include "arch/ra8p1/tiku_uart_arch.h"
+#include "arch/ra8p1/tiku_cache_arch.h"
+#include "arch/ra8p1/tiku_gpio_arch.h"
+#include "arch/ra8p1/tiku_timer_arch.h"
+#include "arch/ra8p1/tiku_uart_arch.h"
+#include "arch/ra8p1/tiku_ra8p1_regs.h"
+#include "hal/tiku_crit_hal.h"
+
+/* EK-RA8P1 LED1, the blue one at P600. */
+#define TIKU_MIN_LED_PORT   TIKU_BOARD_LED1_PORT
+#define TIKU_MIN_LED_PIN    TIKU_BOARD_LED1_PIN
+
+int main(void)
+{
+    /* Nothing to do: the reset clock tree is what every constant in this image
+     * was computed from.  The call is here so the shape matches the other
+     * ports and R4 has one place to grow into. */
+    tiku_cpu_boot_ra8p1_init();
+
+    tiku_ra8p1_gpio_init_output(TIKU_MIN_LED_PORT, TIKU_MIN_LED_PIN);
+
+    /* SCI8 on PD02/PD03 -- the J-Link OB virtual COM port. */
+    tiku_uart_init();
+
+    tiku_cpu_ra8p1_delay_ms(100);
+    tiku_uart_puts("\n\n--- TikuOS minimal smoke test (EK-RA8P1 v1) ---\n");
+
+    tiku_ra8p1_clock_t c;
+    tiku_cpu_ra8p1_clock_probe(&c);
+    /* NOMINAL, not measured: these are what SCKSCR and SCKDIVCR imply given
+     * the datasheet's figure for the selected source.  MOCO's own tolerance is
+     * +-10%, and on this board the real rate is 8.33 MHz -- so this line says
+     * what the tree is CONFIGURED as, and R4's job is to make it also true. */
+    tiku_uart_printf("clk: cksel=%u src=%u Hz(nom) iclk=%u Hz pclka=%u Hz\n",
+                     (unsigned int)c.cksel, (unsigned int)c.src_hz,
+                     (unsigned int)c.iclk_hz, (unsigned int)c.pclka_hz);
+    tiku_uart_printf("cpuid=%x  tick=%u Hz reload=%u\n",
+                     (unsigned int)TIKU_REG32(RA8P1_SCB_CPUID),
+                     (unsigned int)TIKU_CLOCK_ARCH_SECOND,
+                     (unsigned int)TIKU_CLOCK_ARCH_INTERVAL);
+    /* SAU is readable only from the secure state, so a plausible region count
+     * here is direct evidence the image executes secure -- rather than the
+     * debugger's claim quoted back at itself. */
+    tiku_uart_printf("tz: sau_type=%x sau_ctrl=%x (secure-only port)\n",
+                     (unsigned int)TIKU_REG32(RA8P1_SAU_TYPE),
+                     (unsigned int)TIKU_REG32(RA8P1_SAU_CTRL));
+
+    /* Start the tick and let it drive the loop.  This is the whole point of
+     * the R2 smoke test: the interval between lines is measured by SysTick and
+     * by nothing else, so a line every second of WALL clock is proof the tick
+     * counts at the rate it claims.  A delay-loop heartbeat would prove only
+     * that the delay loop is self-consistent. */
+    tiku_clock_arch_init();
+    __asm__ volatile ("cpsie i" ::: "memory");
+
+    /* Prove the claim tiku_crit_arch.c makes in its header comment, rather
+     * than asserting it: hold a masked critical window across a whole tick
+     * period and show the counter advanced anyway.  It can, because SysTick is
+     * a core exception with no NVIC line for the mask to reach.  When R4 moves
+     * the tick to ULPT or AGT this test starts FAILING, which is exactly when
+     * someone needs to be told. */
+    {
+        tiku_clock_arch_time_t a, b;
+        /* Bounded by ITERATIONS, not by the tick.  Waiting on the tick would
+         * make a silenced tick spin here forever -- the FAIL branch would be
+         * unreachable and the test could only ever pass. */
+        unsigned long budget = 5000000UL;
+
+        a = tiku_clock_arch_time();
+        tiku_crit_arch_mask_irqs(0U);
+        while (budget-- != 0UL && (long)(tiku_clock_arch_time() - a) < 4) { }
+        b = tiku_clock_arch_time();
+        tiku_crit_arch_unmask_irqs();
+        tiku_uart_printf("crit: tick advanced %u ticks under NVIC mask (%s)\n",
+                         (unsigned int)(b - a),
+                         (b != a) ? "PASS" : "FAIL -- tick was silenced");
+    }
+
+    /* Is the busy-wait delay the length it claims?  Everything that paces
+     * itself without the tick -- notably a watchdog kick loop -- depends on
+     * this, and the answer is a measurement, not the spin constant. */
+    {
+        tiku_clock_arch_time_t a, b;
+
+        a = tiku_clock_arch_time();
+        tiku_cpu_ra8p1_delay_ms(1000U);
+        b = tiku_clock_arch_time();
+        tiku_uart_printf("delay: 1000 ms measured %u ticks (%u expected), "
+                         "spin=%u/ms\n",
+                         (unsigned int)(b - a),
+                         (unsigned int)TIKU_CLOCK_ARCH_SECOND,
+                         (unsigned int)tiku_cpu_ra8p1_spin_per_ms());
+    }
+
+    /* The clock, stated without a host stopwatch: CAC counts one on-chip
+     * clock against the board's crystal, so this is the port's own witness. */
+    {
+        uint16_t n = tiku_cpu_ra8p1_cac_measure(RA8P1_CAC_CLK_MOCO,
+                                                RA8P1_CAC_CLK_MAIN, 3U);
+
+        if (n != 0U) {
+            tiku_uart_printf("cac: moco=%u Hz (nominal %u)\n",
+                             (unsigned int)((unsigned long)n *
+                                            (TIKU_BOARD_MOSC_HZ / 8192UL)),
+                             (unsigned int)TIKU_RA8P1_MOCO_HZ);
+        } else {
+            tiku_uart_printf("cac: measurement did not complete\n");
+        }
+    }
+
+    tiku_cpu_freq_ra8p1_init(240U);
+    tiku_uart_printf("pll: core %u Hz, sciclk %u Hz, tick reload %u\n",
+                     (unsigned int)tiku_cpu_ra8p1_clock_get_hz(),
+                     (unsigned int)tiku_cpu_ra8p1_sciclk_get_hz(),
+                     (unsigned int)tiku_clock_arch_fine_max());
+    {
+        uint16_t n = tiku_cpu_ra8p1_cac_measure(RA8P1_CAC_CLK_PCLKB,
+                                                RA8P1_CAC_CLK_MAIN, 3U);
+        tiku_uart_printf("cac: pclkb=%u Hz (expect 60000000)\n",
+                         (unsigned int)((unsigned long)n *
+                                        (TIKU_BOARD_MOSC_HZ / 8192UL)));
+    }
+
+    tiku_uart_printf("cache: state=%u (bit0 I, bit1 D)\n",
+                     (unsigned int)tiku_ra8p1_cache_state());
+
+    tiku_clock_arch_time_t next = tiku_clock_arch_time() +
+                                  (tiku_clock_arch_time_t)TIKU_CLOCK_ARCH_SECOND;
+    uint32_t i = 0;
+    while (1) {
+        while ((long)(tiku_clock_arch_time() - next) < 0) {
+            __asm__ volatile ("wfi");
+        }
+        next += (tiku_clock_arch_time_t)TIKU_CLOCK_ARCH_SECOND;
+
+        tiku_uart_printf("TikuOS minimal: hello #%u  ticks=%u\n",
+                         (unsigned int)i,
+                         (unsigned int)tiku_clock_arch_time());
+
+        tiku_ra8p1_gpio_toggle(TIKU_MIN_LED_PORT, TIKU_MIN_LED_PIN);
         i++;
     }
 

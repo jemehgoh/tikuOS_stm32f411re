@@ -5,21 +5,11 @@
  *
  * Authors: Ambuj Varshney <ambuj@tiku-os.org>
  *
- * tiku_mem_arch.c - Apollo 510 memory architecture support + MRAM-backed NVM
+ * tiku_mem_arch.c - Apollo510 memory architecture and MRAM-backed NVM.
  *
- * Persistent state lives in the SRAM .uninit region (warm-reset durable). For
- * power-cycle durability it is mirrored to a 32 KB MRAM page reserved at the top
- * of MRAM (apollo510.ld __tiku_nvm_mram_*). tiku_mem_arch_nvm_flush() snapshots
- * .uninit (prefixed with a magic word) and programs the page via the on-chip
- * bootrom (nv_program_main2 -- MRAM is direct-write, NO erase, unlike NOR
- * flash). On boot, tiku_mem_arch_init() copies the page back into .uninit if the
- * magic matches; otherwise (fresh chip) .uninit keeps its NOLOAD value and each
- * subsystem's "no magic -> init fresh" logic runs.
- *
- * Mirrors the RP2350 flash-mirror design (arch/arm-rp2350/tiku_mem_arch.c),
- * substituting the MRAM bootrom for the QSPI boot-ROM, plus D-cache maintenance
- * around the SSRAM snapshot and the programmed page (Apollo5 has L1 cache). The
- * reserved page is far above the firmware code; the SBL (0x400000) is untouched.
+ * Persistent state lives in .uninit and is mirrored to a reserved MRAM page via
+ * the on-chip bootrom, restored at boot when the magic matches.  MRAM is
+ * direct-write with no erase; the M55's L1 cache means the snapshot needs maintenance.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -54,10 +44,9 @@ extern uint32_t __tiku_nvm_mram_start[]; /* base of the mirror page (linker
 /**
  * @brief On-chip bootrom MRAM programmer function type
  *
- * Fixed ROM entry at 0x0200ff20 (Thumb bit set) from the AmbiqSuite
- * bootrom helper table (g_am_hal_bootrom_helper.nv_program_main2).
- * Signature: nv_program_main2(key, op, src_addr, dst_word_offset, num_words).
- * MRAM is direct-write (no erase required, unlike NOR flash).
+ * Fixed ROM entry at 0x0200ff20 (Thumb bit set) from the AmbiqSuite bootrom
+ * helper table.  Signature: nv_program_main2(key, op, src_addr,
+ * dst_word_offset, num_words).  MRAM is direct-write, unlike NOR flash.
  */
 typedef int (*nv_program_main2_t)(uint32_t, uint32_t, uint32_t, uint32_t, uint32_t);
 #define NV_PROGRAM_MAIN2  ((nv_program_main2_t)(0x0200ff20UL + 1UL))
@@ -108,13 +97,12 @@ static size_t uninit_bytes(void) {
 /**
  * @brief Restore .uninit state from the MRAM mirror on boot
  *
- * Checks word[0] of the reserved MRAM page for TIKU_NVM_MAGIC. If the
- * magic matches, copies the stored .uninit image back into RAM, making
- * power-cycle-durable state visible to subsequent subsystem init code.
- * On a fresh chip the magic is absent and .uninit retains its NOLOAD
- * (uninitialized) value; each subsystem's "no magic -> init fresh"
- * guard handles that case. Cache is empty or off at this point, so the
- * MRAM read reflects current MRAM contents.
+ * Checks word[0] of the reserved MRAM page for TIKU_NVM_MAGIC and, on a match,
+ * copies the stored .uninit image back into RAM before subsystem init.  On a
+ * fresh chip each subsystem's "no magic -> init fresh" guard covers the case.
+ *
+ * @note The cache is empty or off at this point, so the MRAM read reflects
+ *       current MRAM contents.
  */
 void tiku_mem_arch_init(void) {
     /* Restore .uninit from the MRAM mirror. On a fresh boot the cache is
@@ -204,10 +192,9 @@ void tiku_mem_arch_nvm_read(uint8_t *dst, const uint8_t *src,
 /**
  * @brief Write bytes into the .uninit SRAM working copy
  *
- * Stores data into the in-RAM working copy only. The durable MRAM commit
- * happens when the matching tiku_mpu_lock_nvm() relock calls
- * tiku_mem_arch_nvm_flush(), so direct stores into .persistent inside an
- * unlock window are also captured by that flush.
+ * Stores into the in-RAM working copy only.  The durable MRAM commit happens
+ * when the matching tiku_mpu_lock_nvm() relock calls tiku_mem_arch_nvm_flush(),
+ * so direct stores into .persistent inside a window are captured too.
  *
  * @param dst  Destination address inside the .uninit region
  * @param src  Source SRAM buffer
@@ -229,13 +216,12 @@ void tiku_mem_arch_nvm_write(uint8_t *dst, const uint8_t *src,
     tiku_cpu_dcache_clean(dst, len);
 }
 
-/**
- * @brief Snapshot .uninit into the reserved MRAM page for power-cycle durability
+/*
+ * Snapshot .uninit into the reserved MRAM page for power-cycle durability.
  *
- * Composes a TIKU_NVM_MAGIC header followed by the entire .uninit image
- * into the SSRAM staging buffer g_nvm_snap, pads to a 16-byte boundary,
- * and programs the result into the reserved MRAM page via the on-chip
- * bootrom nv_program_main2 helper. Steps:
+ * Composes a TIKU_NVM_MAGIC header plus the whole .uninit image into the SSRAM
+ * staging buffer, pads to 16 bytes, and programs the reserved MRAM page via the
+ * on-chip bootrom nv_program_main2 helper.  Steps:
  *
  *   1. Fill g_nvm_snap: magic word + .uninit image + 0xFF pad.
  *   2. Clean the SSRAM D-cache lines covering g_nvm_snap so the bootrom
@@ -247,8 +233,8 @@ void tiku_mem_arch_nvm_write(uint8_t *dst, const uint8_t *src,
  *   5. Invalidate the D-cache lines covering the freshly-programmed page
  *      so same-session reads of the mirror see the new data.
  *
- * MRAM is direct-write (no erase unlike NOR flash). The bootrom helper
- * operates in units of 32-bit words and requires 16-byte-aligned source.
+ * @note MRAM is direct-write.  The bootrom helper works in 32-bit words and
+ *       requires a 16-byte-aligned source.
  */
 void tiku_mem_arch_nvm_flush(void) {
     size_t   n = uninit_bytes();
@@ -260,8 +246,8 @@ void tiku_mem_arch_nvm_flush(void) {
         n = TIKU_NVM_MRAM_BYTES - TIKU_NVM_MIRROR_HDR_BYTES;
     }
 
-    /* Compose the IMAGE first (header words filled only if we program:
-     * the CRC is the expensive part and a clean relock must stay free). */
+    /* Compose the IMAGE first (header words filled only when a program
+     * follows: the CRC is expensive and a clean relock must stay free). */
     memcpy((uint8_t *)&g_nvm_snap[4], &__uninit_start, n);
     snap_bytes = TIKU_NVM_MIRROR_HDR_BYTES + n;
     prog_bytes = (snap_bytes + 15U) & ~((size_t)15U);

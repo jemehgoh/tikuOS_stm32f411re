@@ -5,33 +5,20 @@
  *
  * Authors: Ambuj Varshney <ambuj@tiku-os.org>
  *
- * tiku_basic_ckpt.inl - F1: power-failure-transparent RUN.
+ * tiku_basic_ckpt.inl - power-failure-transparent RUN.
  *
- * NOT a standalone translation unit.  Included from tiku_basic.c AFTER
- * tiku_basic_persist.inl (it borrows the MPU-unlock discipline) and
- * tiku_basic_arena.inl (it needs BASIC_VAR_TABLE_LEN and the frame
- * struct sizes to bound the checkpoint buffer at compile time).
+ * The interpreter's whole machine state is reified in file-static globals, which
+ * makes it checkpointable: while PERSIST is armed each yield boundary writes that
+ * state to a durable file, and RUN RESUME continues mid-loop across a power cut.
  *
- * The single most important architectural fact about this interpreter is that
- * its entire machine state is reified in file-static globals: the program
- * counter (basic_pc), the FOR / GOSUB / loop stacks, the scalar + string
- * variables, and the error / DATA / PRNG state.  That makes it CHECKPOINTABLE.
- *
- *   PERSIST ON    arms checkpointing.
- *   <run>         at each yield boundary the reified state is written to a
- *                 durable NVM slot ("bck"), gate-last.
- *   RUN RESUME    restores that state and continues from basic_pc, mid-loop,
- *                 across a reset or power cut -- instead of restarting.
- *
- * This is distinct from SAVE / LOAD: those persist the PROGRAM TEXT, this
- * persists the RUNNING MACHINE ("energy scheduled, not survived", expressed as
- * a language feature).  No other embedded BASIC makes the claim.
- *
- * --- Why the serialization is pointer-free ------------------------------------
+ * SPDX-License-Identifier: Apache-2.0
+ */
+/*
+ --- Why the serialization is pointer-free ------------------------------------
  * Almost every piece of state is a value: basic_pc (u16), the stacks (line
  * numbers, var indices, longs), basic_vars[] (long[]), the named-var name
  * tables (fixed char[]).  The ONLY pointers are the string variables, which
- * point INTO basic_str_heap.  So we serialize the used heap prefix verbatim and
+ * point INTO basic_str_heap, so the used heap prefix is serialized verbatim and
  * store each string pointer as a HEAP OFFSET (ptr - basic_str_heap; 0xFFFF ==
  * NULL/unbound).  On resume the arena is freshly allocated (stable, in-order
  * sub-allocations), the heap prefix is copied back, and each offset is rebound
@@ -81,8 +68,8 @@
  * sector-erase wear, MRAM bootrom-call jitter).  The replay window after a
  * power cut grows accordingly -- see the config comment for the arithmetic.
  *
- * SPDX-License-Identifier: Apache-2.0
  */
+
 
 #if TIKU_BASIC_PERSIST_RUN_ENABLE
 
@@ -377,8 +364,7 @@ basic_crc32_step(uint32_t c, const uint8_t *p, size_t n)
  *
  * Folds the chunk into the running CRC on the way out, so the checksum is
  * computed once, incrementally, and never needs the whole payload resident.
- * The destination offset is derived from the cursor: w->pos already counts the
- * buffered bytes, so they belong at (pos - fill).
+ * The destination offset is (pos - fill), since w->pos already counts them.
  *
  * @return 0 on success, -1 if the backend refused the write (w->err is set).
  */
@@ -405,10 +391,11 @@ ckpt_flush(basic_ckpt_wr_t *w)
  *        text, in ascending line order -- the shape LIST / SAVE emit).
  *
  * The checkpoint stores the fingerprint of the program that was RUNNING when it
- * was captured; RESUME recomputes it against the program actually loaded and
- * rejects the slot on mismatch, so a basic_pc / GOSUB / FOR stack full of line
- * numbers is never replayed against a different or edited program (which would
- * jump to a line that means something else, or nothing).  Empty program -> 0.
+ * was captured, and RESUME recomputes it against what is actually loaded,
+ * rejecting a mismatch.  Empty program -> 0.
+ *
+ * @note That check is what keeps a basic_pc / GOSUB / FOR stack full of line
+ *       numbers from being replayed against a different or edited program.
  */
 static uint32_t
 basic_prog_identity(void)
@@ -613,10 +600,9 @@ basic_ckpt_write(basic_ckpt_wr_t *w)
 /**
  * @brief Restore the reified execution state from a serialized payload.
  *
- * The stack depths and heap length are validated against the compiled limits:
- * a value out of range means the checkpoint came from an incompatible build (or
- * is corrupt), so the whole restore fails and the caller falls back to a fresh
- * RUN rather than jumping with a bogus stack pointer.
+ * Stack depths and heap length are validated against the compiled limits: an
+ * out-of-range value means the checkpoint came from an incompatible build or is
+ * corrupt, so the restore fails rather than jumping with a bogus stack pointer.
  *
  * @return 0 on a clean restore, -1 if the payload is short or inconsistent.
  */
@@ -921,10 +907,9 @@ basic_ckpt_save(void)
 /**
  * @brief Restore state from the checkpoint file if it holds a valid one.
  *
- * Still reads IN PLACE: the store hands back a pointer straight into the
- * memory-mapped NVM, and because a file's slots are contiguous that remains ONE
- * pointer even when the image spans several of them.  Nothing is copied to RAM
- * to be parsed.
+ * Read IN PLACE: the store hands back a pointer straight into memory-mapped
+ * NVM, and because a file's slots are contiguous that stays ONE pointer even
+ * across several of them.  Nothing is copied to RAM to be parsed.
  *
  * @return 0 if a checkpoint was restored, -1 if none / stale / short / corrupt.
  */
@@ -1043,8 +1028,7 @@ static unsigned long basic_ckpt_last_s;
  *
  * Interval 0 (byte-writable FRAM-class NVM) checkpoints every batch; a nonzero
  * interval (flash sector-erase wear, MRAM bootrom-call jitter) allows at most
- * one save per TIKU_BASIC_CKPT_INTERVAL_S, counted from PERSIST ON / the last
- * save.  See the config comment for the endurance arithmetic.
+ * one save per TIKU_BASIC_CKPT_INTERVAL_S, counted from PERSIST ON.
  */
 static int
 basic_ckpt_due(void)

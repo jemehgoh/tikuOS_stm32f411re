@@ -5,23 +5,11 @@
  *
  * Authors: Ambuj Varshney <ambuj@tiku-os.org>
  *
- * tiku_gpu_arch.h - Apollo510 2.5D GPU (Think Silicon / Nema-class) driver.
+ * tiku_gpu_arch.h - Apollo510 2.5D GPU (Nema-class) driver.
  *
- * A from-scratch, register-level driver for the GPU block at 0x40090000 --
- * NO vendor blob, no NemaGFX library. The complete register map lives in the
- * vendored CMSIS header (GPU_Type, apollo510.h); this driver programs it
- * directly. apollo510/apollo510b only (Cortex-M55); compiled in behind
- * TIKU_DRV_GPU_ENABLE (the whole TU is omitted otherwise -- no in-file guard).
- *
- * The GPU is a non-coherent AHB bus master: every surface it reads (command
- * lists, source textures) MUST be cleaned from the M55 D-cache before a kick,
- * and every surface it writes (framebuffers) invalidated after completion, and
- * every GPU-visible buffer MUST live in SSRAM (.ssram) -- NEVER in DTCM/ITCM,
- * which are CPU-private and invisible to the GPU bus master.
- *
- * This header currently exposes the P0 (bring-up) surface: power, clocks,
- * identity, reset, and IRQ plumbing. Drawing / compute / async submission land
- * in later phases (see kintsugi GPU plan).
+ * The GPU is a non-coherent bus master: every surface it reads must be cleaned
+ * from the D-cache before a kick and every surface it writes invalidated after,
+ * and every GPU-visible buffer must live in SSRAM -- never DTCM or ITCM.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -40,12 +28,35 @@ typedef enum {
     TIKU_GPU_ERR_PARAM   = -4,   /**< invalid argument (e.g. non-power-of-two dim)*/
 } tiku_gpu_err_t;
 
-/** GFXPERFREQ performance-mode knob (PWRCTRL->GFXPERFREQ). */
+/**
+ * @brief GFXPERFREQ performance-mode knob (PWRCTRL->GFXPERFREQ).
+ *
+ * FOUR modes, not three; HP3 is the one the SDK's deprecated
+ * "HIGH_PERFORMANCE" alias actually names.  Two run off HFRC and two off
+ * HFRC2, and only HP3 moves the GFX domain onto the VDDF rail.
+ */
 typedef enum {
-    TIKU_GPU_PERF_LP_96MHZ   = 0,   /**< low-power, 96 MHz (bring-up default)   */
-    TIKU_GPU_PERF_HP1_192MHZ = 1,   /**< high-performance 1, 192 MHz            */
-    TIKU_GPU_PERF_HP2_125MHZ = 2,   /**< high-performance 2, 125 MHz            */
+    TIKU_GPU_PERF_LP_96MHZ   = 0,   /**< HFRC   96 MHz, VDDC (bring-up default) */
+    TIKU_GPU_PERF_HP1_192MHZ = 1,   /**< HFRC  192 MHz, VDDC                    */
+    TIKU_GPU_PERF_HP2_125MHZ = 2,   /**< HFRC2 125 MHz, VDDC                    */
+    TIKU_GPU_PERF_HP3_250MHZ = 3,   /**< HFRC2 250 MHz, VDDF -- needs SIMOBUCK  */
 } tiku_gpu_perf_t;
+
+/**
+ * @brief Non-zero if @p perf requires the VDDF rail (and therefore the buck).
+ *
+ * Only HP3 does.  Transcribed from the SDK's am_hal_pwrctrl_gpu_mode_select,
+ * which compares against HIGH_PERFORMANCE == HFRC2_HP3: HP1 (192 MHz) and HP2
+ * (125 MHz) stay on VDDC despite being "high performance" by name.
+ */
+int tiku_gpu_perf_needs_vddf(tiku_gpu_perf_t perf);
+
+/** @brief Nominal GFX clock in Hz for @p perf (for work-rate denominators). */
+unsigned long tiku_gpu_perf_hz(tiku_gpu_perf_t perf);
+
+/** @brief Live GFXPERFREQ / GFXPWRSWSEL, for a probe to report actual state. */
+uint32_t tiku_gpu_perf_get(void);
+int      tiku_gpu_rail_is_vddf(void);
 
 /**
  * @brief Bring-up forensics snapshot.
@@ -68,14 +79,30 @@ typedef struct {
  *
  * Owns the full sequence (the boot path leaves GFX off): DEVPWREN.PWRENGFX +
  * wait DEVPWRSTATUS.PWRSTGFX, GFXPERFREQ select, SYSCLEAR, wait-idle, NVIC
- * enable. All waits are spin-bounded and fail closed.
+ * enable.  All waits are spin-bounded and fail closed.
  *
- * @param perf  Performance mode (LP 96 MHz for bring-up).
+ * @note ORDERING IS A HARDWARE REQUIREMENT.  Datasheet 4.3.2: GFX mode may only
+ *       be switched with the device powered OFF, and an HP transition must set
+ *       GFXPWRSWSEL.GFXVDDSEL before GFXPERFREQ.  Mode and rail are therefore
+ *       programmed with the domain DOWN, then the domain comes up.
+ * @param perf  Performance mode.  HP3 additionally requires the SIMO buck to be
+ *              ACT (the SDK refuses otherwise) -- so does this, with ERR_POWER.
  * @return TIKU_GPU_OK, or ERR_POWER / ERR_ID / ERR_TIMEOUT.
  */
 tiku_gpu_err_t tiku_gpu_init(tiku_gpu_perf_t perf);
 
-/** @brief Disable the NVIC line and power the GFX domain back off. */
+/**
+ * @brief Disable the NVIC line and power the GFX domain back off.
+ *
+ * CALL THIS AS SOON AS THE WORK IS DONE.  A powered-but-idle GFX domain costs
+ * ~6.4 mA -- more than twice this SoC's entire idle current -- charged for every
+ * microsecond the domain is up, drawing or not.
+ *
+ * @note The lifecycle is init -> batch -> deinit, not init-once-at-boot.  The
+ *       rail returns to the CPU-only baseline within a few uA, so releasing is
+ *       clean and re-init is cheap against the rent.  There is deliberately no
+ *       idle timeout inside the driver: only the caller knows what is coming.
+ */
 void tiku_gpu_deinit(void);
 
 /** @brief 1 if DEVPWRSTATUS.PWRSTGFX is set (domain powered). */
@@ -104,10 +131,9 @@ uint32_t tiku_gpu_irq_count(void);
 /**
  * @brief CPU-side IRQ plumbing self-test: NVIC-pend GPU_IRQn.
  *
- * Proves the vector slot, the strong-symbol override, and the ISR path with
- * ZERO GPU cooperation and no storm risk (a software-pended NVIC line is
- * one-shot -- there is no asserted hardware line to re-trigger). tiku_gpu_init
- * must have run (NVIC line enabled).
+ * Proves the vector slot, the strong-symbol override and the ISR path with ZERO
+ * GPU cooperation and no storm risk -- a software-pended NVIC line is one-shot.
+ * tiku_gpu_init must have run, so the NVIC line is enabled.
  */
 void tiku_gpu_irq_selftest_pend(void);
 
@@ -285,12 +311,25 @@ tiku_gpu_err_t tiku_gpu_fill_circle(const tiku_gpu_surface_t *dst,
 /* P2.4: async command-list submission                                       */
 /*---------------------------------------------------------------------------*/
 
-/**
- * @brief A GPU command list: a buffer of (register-offset, value) word pairs.
+/*
+ * A GPU command list: a buffer of (register-offset, value) word pairs.
  *
  * Built with tiku_gpu_cl_fill(), submitted asynchronously with
- * tiku_gpu_submit(), and awaited (CPU asleep) with tiku_gpu_wait(). @p buf
- * MUST be in SSRAM (the GPU reads it as a bus master) and 32-byte aligned.
+ * tiku_gpu_submit(), and awaited (CPU asleep) with tiku_gpu_wait().  @p buf MUST
+ * be in SSRAM (the GPU reads it as a bus master) and 32-byte aligned.
+ *
+ * PUT MANY DRAWS IN ONE LIST.  cl_fill() appends 24 words per draw, so a list of
+ * 24*N + 8 words carries N draws for one submit and one wake.  Batching is the
+ * only power lever this GPU has: the ~6.4 mA standing cost is architectural, no
+ * register reduces it, so the lever is time-powered.  Measured, solid fill of a
+ * 256x256 RGBA surface, energy per byte referenced to the GPU-off rail:
+ *
+ *     one draw per list   95 MB/s   52.6 pJ/B   1458 wakes  <- the anti-pattern
+ *     4 draws per list   218 MB/s   27.9 pJ/B    832 wakes
+ *     16 draws per list  321 MB/s   21.7 pJ/B    307 wakes
+ *
+ * One draw per list is worth nothing over a blocking loop (52.6 vs 52.5 pJ/B):
+ * the CPU sleeps, but rebuilding a list per draw costs the throughput back.
  */
 typedef struct {
     uint32_t *buf;         /**< command buffer (SSRAM, 32-byte aligned)       */
@@ -345,9 +384,8 @@ int32_t tiku_gpu_last_cl_id(void);
  * @brief Format-converting 2D copy: @p src (any format) -> @p dst (any format).
  *
  * The texture unit decodes the source to RGBA and the output stage repacks to
- * the destination format, so an RGBA8888 -> RGB565 or -> L8 conversion is one
- * blit pass with no CPU per-pixel work. @p src and @p dst must share
- * dimensions; a same-format convert is a plain 2D copy.
+ * the destination format, so RGBA8888 -> RGB565 or -> L8 is one blit pass with
+ * no CPU per-pixel work.  Dimensions must match; same-format is a plain copy.
  */
 tiku_gpu_err_t tiku_gpu_convert(const tiku_gpu_surface_t *dst,
                                 const tiku_gpu_surface_t *src);
@@ -387,9 +425,8 @@ tiku_gpu_err_t tiku_gpu_multiply(const tiku_gpu_surface_t *dst,
  * @brief Exact constant scale: dst = src * @p factor / 255, per channel.
  *
  * Fixed-function (ROP CONSTCOLOR factor + const-color register), so the
- * arithmetic is exact 8-bit -- the exact-scale building block that
- * tiku_gpu_scale_bias reuses under an added bias. @p factor packs 0x00BBGGRR
- * (0x80 = x0.502).
+ * arithmetic is exact 8-bit -- the building block tiku_gpu_scale_bias reuses
+ * under an added bias.  @p factor packs 0x00BBGGRR (0x80 = x0.502).
  */
 tiku_gpu_err_t tiku_gpu_scale_const(const tiku_gpu_surface_t *dst,
                                     const tiku_gpu_surface_t *src,
@@ -405,6 +442,24 @@ tiku_gpu_err_t tiku_gpu_scale_const(const tiku_gpu_surface_t *dst,
  * across the full surface: the hardware's nibble-swapped palette addressing
  * is inverted by a shadow permutation, and a zero-area priming draw absorbs
  * the first-draw-after-init missample (both silicon-calibrated).
+ *
+ * @warning KNOWN DEFECT, found by experiment 2 (GPU power), 2026-07-27, NOT YET
+ * FIXED.  This call leaves pipeline state that later ops assume is clean:
+ *   - a 16x MatMul SCALE MATRIX (gpu_load_matrix(16.0f, ...)) which
+ *     tiku_gpu_fill does not reset -- only the command-list path bypasses MMUL.
+ *     A blocking fill after a lut therefore draws into the wrong region and
+ *     leaves the surface's sampled pixels untouched while reporting SUCCESS:
+ *     measured, a 390-op fill did not change the destination checksum at all.
+ *   - DRAWCODEPTR at the LUT entry point and TEX2 bound to the shadow palette.
+ *   - state that stops ASYNC command lists completing: after a lut,
+ *     tiku_gpu_submit/tiku_gpu_wait never signals (0 completion IRQs) where the
+ *     same sequence does 1824 ops from a clean start.
+ * The only proven recovery is a GFX power-cycle (tiku_gpu_deinit +
+ * tiku_gpu_init), because gpu_processor_init() reloads the fill shader, resets
+ * the CL processor and clears INTERRUPTCTRL.  Until fixed, treat
+ * tiku_gpu_lut_apply as TERMINAL for a GPU session: re-init before any further
+ * fill, blit or async submission.  Diagnosis:
+ * experiments/power/apollo510b/experiment2/results.md.
  */
 tiku_gpu_err_t tiku_gpu_lut_apply(const tiku_gpu_surface_t *dst,
                                   const tiku_gpu_surface_t *index,
@@ -416,11 +471,11 @@ tiku_gpu_err_t tiku_gpu_lut_apply(const tiku_gpu_surface_t *dst,
  *
  * Two fixed-function ROP passes, each independently calibrated bit-exact: prime
  * dst with the constant @p bias (solid fill), then blend the source with the
- * CONSTCOLOR factor over a ONE destination factor -- i.e. the exact constant
- * scale of tiku_gpu_scale_const summed onto the primed bias with the saturating
- * semantics of TIKU_GPU_BLEND_ADD. @p scale packs 0x00BBGGRR (0x80 = x0.502,
- * as in tiku_gpu_scale_const); @p bias is a packed constant in the
- * destination's channel order (like a fill color). Same dimensions required.
+ * CONSTCOLOR factor over a ONE destination factor.
+ *
+ * @param scale  packed 0x00BBGGRR (0x80 = x0.502), as tiku_gpu_scale_const
+ * @param bias   packed constant in the destination's channel order (like a fill
+ *               color).  Both surfaces must share dimensions.
  */
 tiku_gpu_err_t tiku_gpu_scale_bias(const tiku_gpu_surface_t *dst,
                                    const tiku_gpu_surface_t *src,
@@ -430,9 +485,10 @@ tiku_gpu_err_t tiku_gpu_scale_bias(const tiku_gpu_surface_t *dst,
  * @brief Pairwise 50/50 average: dst = (dst + src)/2, per channel (saturating).
  *
  * Fixed-function: the ROP CONSTCOLOR factor (const-color 0x80 = x0.502) applied
- * to BOTH the source and the destination -> out = 0.502*src + 0.502*dst. A
- * two-surface cross-fade, and the fold primitive behind tiku_gpu_reduce_mean.
- * Same dimensions required. (0.502 vs 0.5 is absorbed by integer rounding.)
+ * to BOTH source and destination -> out = 0.502*src + 0.502*dst.  A two-surface
+ * cross-fade, and the fold primitive behind tiku_gpu_reduce_mean.
+ *
+ * @note Same dimensions required; 0.502 vs 0.5 is absorbed by integer rounding.
  */
 tiku_gpu_err_t tiku_gpu_avg(const tiku_gpu_surface_t *dst,
                             const tiku_gpu_surface_t *src);
@@ -441,14 +497,13 @@ tiku_gpu_err_t tiku_gpu_avg(const tiku_gpu_surface_t *dst,
  * @brief Reduce a surface to the mean of all its pixels, per channel.
  *
  * A balanced fold tree: repeatedly average the two halves (a 1:1 translate blit
- * with TIKU_GPU_BLEND_AVG -- disjoint read/write halves, so no scale-downsample
- * and no read/write hazard), halving width then height until one pixel remains.
- * That pixel -- the equal-weight grand mean -- is returned in @p out_mean
- * (packed RGBA8888). Avoids the SX>1 downscale entirely.
+ * with TIKU_GPU_BLEND_AVG -- disjoint read/write halves, so no downsample and no
+ * hazard), halving width then height until one pixel remains.
  *
- * @p surf dimensions MUST be powers of two, and the fold OVERWRITES @p surf
- * (pass a scratch copy if the data is still needed). @return TIKU_GPU_OK, or
- * TIKU_GPU_ERR_PARAM for a non-power-of-two dimension.
+ * @param surf      dimensions MUST be powers of two; the fold OVERWRITES it, so
+ *                  pass a scratch copy if the data is still needed
+ * @param out_mean  the surviving pixel, the equal-weight grand mean (RGBA8888)
+ * @return TIKU_GPU_OK, or TIKU_GPU_ERR_PARAM for a non-power-of-two dimension.
  */
 tiku_gpu_err_t tiku_gpu_reduce_mean(const tiku_gpu_surface_t *surf,
                                     uint32_t *out_mean);

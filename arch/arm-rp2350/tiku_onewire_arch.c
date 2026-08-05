@@ -5,19 +5,11 @@
  *
  * Authors: Ambuj Varshney <ambuj@tiku-os.org>
  *
- * tiku_onewire_arch.c - 1-Wire bus driver for RP2350 (GPIO bit-bang)
+ * tiku_onewire_arch.c - 1-Wire bus driver for RP2350 (GPIO bit-bang).
  *
- * Implements the Dallas/Maxim 1-Wire protocol on top of the SIO-direct
- * GPIO path. Pin chosen at compile time via TIKU_BOARD_OW_PIN in the
- * board header (default GP15 on Pico 2 W). External 4.7 kohm pull-up
- * to 3V3 is required on the data line — the driver releases the line
- * by floating it as a high-impedance input and lets the pull-up bring
- * it high.
- *
- * Timing: tiku_cpu_rp2350_delay_us() spins on the TIMER0 microsecond
- * counter, so accuracy is +/- 1 us regardless of CPU clock. ARM IRQs
- * are masked across each timing-critical bit slot to keep an unrelated
- * interrupt from stretching the slot past the 1-Wire spec window.
+ * Bit-bangs the Dallas/Maxim protocol over the SIO-direct GPIO path, releasing
+ * the line as a high-impedance input so the required external pull-up drives it.
+ * Timing spins on the 1 us TIMER0 counter, so it is invariant to clk_sys.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -114,12 +106,11 @@ void tiku_onewire_arch_close(void) {
 /**
  * @brief Issue a 1-Wire reset pulse and detect a presence response.
  *
- *  Master pulls the bus low for 480 us then releases.  The external
- *  pull-up restores the line in <15 us; any attached device pulls it low
- *  for 60-240 us within that recovery window.  The full reset cycle
- *  occupies 480 us low + 480 us recovery.  IRQs are masked throughout
- *  to preserve timing accuracy.
+ *  The master pulls the bus low for 480 us then releases; the external pull-up
+ *  restores the line in <15 us and any attached device pulls it low for
+ *  60-240 us within that window.  The full cycle is 480 us low + 480 recovery.
  *
+ * @note IRQs are masked throughout to preserve timing accuracy.
  * @return TIKU_OW_OK if a device presence pulse was detected,
  *         TIKU_OW_ERR_NO_DEVICE if the bus stayed high.
  */
@@ -136,7 +127,7 @@ int tiku_onewire_arch_reset(void) {
     tiku_cpu_rp2350_delay_us(70U);
     presence = ow_read();
 
-    /* Finish the 480 us recovery window so the bus is idle when we
+    /* Finish the 480 us recovery window so the bus is idle on
      * return. */
     tiku_cpu_rp2350_delay_us(410U);
 
@@ -149,10 +140,9 @@ int tiku_onewire_arch_reset(void) {
 /**
  * @brief Write one bit onto the 1-Wire bus.
  *
- *  Write-1: pull low 6 us, release, idle 64 us.
- *  Write-0: pull low 60 us, release, idle 10 us.
- *  Total slot is >= 70 us in either case.  IRQs are masked across the
- *  slot to prevent timing violations.
+ *  Write-1 pulls low 6 us, releases, idles 64 us; write-0 pulls low 60 us,
+ *  releases, idles 10 us.  The slot is >= 70 us either way, and IRQs are masked
+ *  across it to prevent timing violations.
  *
  * @param bit  Value to write; only the LSB is used (0 or non-zero).
  */

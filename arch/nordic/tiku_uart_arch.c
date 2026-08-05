@@ -5,26 +5,11 @@
  *
  * Authors: Ambuj Varshney <ambuj@tiku-os.org>
  *
- * tiku_uart_arch.c - UARTE console backend (nRF54L, EasyDMA)
+ * tiku_uart_arch.c - UARTE console backend (nRF54L, EasyDMA).
  *
- * The nRF54L UARTE has no byte FIFO register: every transfer goes through
- * EasyDMA against a RAM buffer.  For a console this means:
- *   TX -- copy one byte into a RAM bounce buffer, point DMA.TX at it, trigger
- *         TASKS_DMA.TX.START, spin on EVENTS_DMA.TX.END.
- *   RX -- a single-byte DMA into a RAM bounce byte; the DMARXEND ISR copies
- *         the byte into a software ring and re-arms the DMA itself (software
- *         re-arm, NOT the DMA_RX_END->DMA_RX_START hardware short).  The
- *         deliberate tradeoff: the short's zero-gap re-arm keeps receiving
- *         during an IRQ blackout but silently overwrites the bounce byte --
- *         loss with no trace.  With software re-arm, blackout bytes back up
- *         into the UARTE's internal RX buffer and a genuine hardware overrun
- *         raises ERRORSRC.OVERRUN, which the ISR counts -- loss is DETECTED
- *         (the uart overrun-provocation C-unit verifies exactly this).  The
- *         re-arm gap is ISR-latency-sized (~us) against 86 us/byte at 115200,
- *         so no bytes are lost on the normal path.
- *
- * EasyDMA can only reach RAM (0x2000_0000), so the bounce buffers are static
- * .bss and word-aligned.
+ * No byte FIFO, so both directions move through EasyDMA against static aligned
+ * bounce buffers.  RX re-arms in software, not via the hardware short, so an IRQ
+ * blackout raises a countable overrun instead of silently overwriting.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -75,7 +60,7 @@ static volatile uint8_t tiku_uart_txb __attribute__((aligned(4)));
  * for tens to ~100+ ms, and a 256 B ring holds only ~22 ms at 115200 -- it
  * overflowed on nearly every crypto pause (30 hardware overruns in one HTTPS
  * run), dropping mid-flight bytes and turning big RSA-chain server flights
- * into TCP-retransmit crawls until the peer RST us.  4 KB rides out those
+ * into TCP-retransmit crawls until the peer RSTs the link.  4 KB rides out those
  * pauses with room for SLIP escaping + retransmit duplicates (the ambiq port
  * documents the same failure and sizes its ring 8 KB).  Power of two;
  * override with -DTIKU_UART_RX_RING=<N>. */
@@ -178,12 +163,13 @@ void tiku_uart_printf(const char *fmt, ...)
 /**
  * @brief Console UARTE ISR: drain the DMA'd byte into the ring, re-arm.
  *
- * Overrides the weak alias installed by the crt vector table (SERIAL20 IRQn
- * 198 for UARTE20, SERIAL30 260 for UARTE30 -- the crt wires both to here,
- * only the console's is NVIC-enabled).  Copies the bounce byte into the
- * software ring, re-arms the 1-byte DMA (software re-arm -- the gap is what
- * lets a genuine blackout overrun surface in ERRORSRC), then folds any
- * latched hardware overrun into the same overrun counter the ring uses.
+ * Overrides the weak alias installed by the crt vector table.  Copies the
+ * bounce byte into the software ring, re-arms the 1-byte DMA, then folds any
+ * latched hardware overrun into the same counter the ring uses.
+ *
+ * @note The crt wires both SERIAL20 (198) and SERIAL30 (260) here, but only the
+ *       console's is NVIC-enabled.  The re-arm is in software, and that gap is
+ *       what lets a genuine blackout overrun surface in ERRORSRC.
  */
 void tiku_nordic_uart_console_isr(void)
 {

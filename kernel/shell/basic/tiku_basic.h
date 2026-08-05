@@ -7,29 +7,9 @@
  *
  * tiku_basic.h - public API of the Tiku BASIC interpreter engine.
  *
- * The engine is structured as a complex extension of the kernel
- * shell rather than a single shell command.  It owns its own
- * arena, FRAM-backed persistence, REPL, and embedded autorun
- * paths; the `basic` shell command is just a thin dispatch stub
- * over these entry points (see kernel/shell/commands/
- * tiku_shell_cmd_basic.{c,h}).
- *
- * Three entry points are exposed:
- *
- *   tiku_basic_repl()       - run the interactive REPL over the
- *                             active tiku_shell_io backend.
- *   tiku_basic_autorun()    - load the saved program from FRAM and
- *                             RUN it once (no REPL).
- *   tiku_basic_run_source() - parse a multi-line source string
- *                             (build-time BASIC_PROGRAM=foo.bas
- *                             firmware path) and RUN it.
- *
- * Plus the FRAM-backed persistence is also exposed as a VFS file
- * node so the saved program text can be read / written through the
- * normal `read /data/basic` / `write /data/basic` shell commands:
- *
- *   tiku_basic_vfs_read()   - read handler for /data/basic.
- *   tiku_basic_vfs_write()  - write handler for /data/basic.
+ * The engine is a complex extension of the shell rather than one command: it owns
+ * its arena, its durable persistence and its REPL, and the `basic` command is a
+ * thin dispatch stub over the entry points declared here.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -104,17 +84,13 @@ void tiku_basic_autorun(void);
 /**
  * @brief Parse a multi-line BASIC source string and RUN it.
  *
- * Used by the build-time BASIC_PROGRAM=foo.bas mechanism: the .bas
- * file is converted to a NUL-terminated C string literal that is
- * baked into the firmware, and main.c calls this on boot.  Numbered
- * lines are stored; un-numbered direct commands (LIST / RUN / NEW
- * / SAVE / ...) execute immediately as they would at the REPL.  An
- * implicit RUN fires after parsing unless the source already issued
- * one explicitly.
+ * The build-time BASIC_PROGRAM=foo.bas path: the .bas file becomes a
+ * NUL-terminated C string baked into the firmware and main.c calls this at
+ * boot.  Numbered lines are stored, un-numbered ones execute as at the REPL.
  *
- * Pair with tiku_shell_io_set_backend() so PRINT output reaches the
- * active transport (UART, TCP, ...).
- *
+ * @note An implicit RUN fires after parsing unless the source already issued
+ *       one.  Pair with tiku_shell_io_set_backend() so PRINT reaches the active
+ *       transport.
  * @param source NUL-terminated source text; '\n' separates lines.
  */
 void tiku_basic_run_source(const char *source);
@@ -163,9 +139,8 @@ typedef void (*tiku_basic_error_sink_t)(int cat, const char *msg);
  * @brief Install a custom error sink so BASIC can run headless.
  *
  * By default interpreter errors print to the shell console as a red
- * "? message".  Installing a sink redirects them to a buffer/callback
- * instead, so BASIC can run with no shell or UART attached (the
- * agent/library direction).  Pass NULL to restore the console default.
+ * "? message".  A sink redirects them to a buffer or callback instead, so BASIC
+ * runs with no shell or UART attached.
  *
  * @param sink  Callback to receive errors, or NULL for the default.
  */

@@ -5,15 +5,11 @@
  *
  * Authors: Ambuj Varshney <ambuj@tiku-os.org>
  *
- * tiku_vfs_tree_data.h - /data VFS nodes (user-data / persisted state)
+ * tiku_vfs_tree_data.h - /data VFS nodes (user data and persisted state).
  *
- * The /data directory holds user-facing persisted content (as
- * opposed to /sys system state and /dev hardware).  Currently its
- * only member is the BASIC program store, so the module compiles
- * away entirely unless the shell's BASIC interpreter is enabled.
- * The declaration below is unconditional so the root assembly can
- * guard the call with the same build flags instead of needing this
- * header to know the configuration.
+ * Holds user-facing persisted content, as opposed to /sys system state and /dev
+ * hardware.  The declaration is unconditional so the root assembly guards the
+ * call with build flags rather than this header knowing the configuration.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -28,12 +24,9 @@
 /**
  * @brief Get the fully-formed /data directory node.
  *
- * Mirrors tiku_proc_vfs_get(): returns a pointer to a static,
- * fully-initialised DIR node named "data"; the root assembly
- * copies it by value into the mutable FRAM root-children array at
- * init time.  Only defined when TIKU_SHELL_ENABLE and
- * TIKU_SHELL_CMD_BASIC are both set — callers must guard with the
- * same condition.
+ * Returns a static, fully-initialised DIR node named "data"; the root assembly
+ * copies it by value into the mutable FRAM root-children array.  Defined only
+ * when TIKU_SHELL_ENABLE and TIKU_SHELL_CMD_BASIC are both set.
  *
  * @return Pointer to the static /data directory node
  */
@@ -68,19 +61,15 @@ int tiku_vfs_tree_data_df(tiku_data_df_t *out);
 /**
  * @brief The mounted /data store itself (mounts on first use).
  *
- * The VFS nodes above are one VIEW of the store; callers that need whole
- * objects rather than path reads -- tiku_blob (weights, firmware, module
- * images) and, in time, BASIC's own slots -- work against the store
- * directly.  Returns NULL when no store is available (region absent or too
- * small, or the mount failed).
+ * The VFS nodes above are one view of the store; callers needing whole objects
+ * rather than path reads -- tiku_blob, for weights, firmware and module images
+ * -- work against the store directly.
  *
- * NOTE (layering, temp/memlayout-fix-plan.md): the store is currently
- * compiled only under TIKU_SHELL_ENABLE, because /data began life as the
- * BASIC program store.  That gate has to go once modules and radio
- * firmware become store tenants -- the store is a kernel facility, and
- * /data is merely its VFS presentation.
- *
- * @return The mounted store, or NULL.
+ * @note The store compiles only under TIKU_SHELL_ENABLE because /data began as
+ *       the BASIC program store.  It is a kernel facility, and that gate has to
+ *       go once modules and radio firmware become tenants.
+ * @return The mounted store, or NULL when none is available (region absent or
+ *         too small, or the mount failed).
  */
 tiku_tfs_t *tiku_vfs_tree_data_store(void);
 

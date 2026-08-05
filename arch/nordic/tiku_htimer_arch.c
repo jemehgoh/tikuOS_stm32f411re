@@ -5,22 +5,11 @@
  *
  * Authors: Ambuj Varshney <ambuj@tiku-os.org>
  *
- * tiku_htimer_arch.c - nRF54L hardware one-shot timer (TIMER20)
+ * tiku_htimer_arch.c - nRF54L hardware one-shot timer (TIMER20).
  *
- * The kernel htimer expresses deadlines as a 16-bit tick that wraps every
- * 65.536 ms at 1 MHz (tiku_htimer_clock_t == unsigned short).  We map that
- * onto TIMER20 run in 16-bit BITMODE at 1 MHz: the hardware counter *is* the
- * kernel's 16-bit clock, so a deadline maps straight onto a compare register
- * with no delta arithmetic.  now() captures the live count into CC[0];
- * schedule() arms CC[1] and unmasks its COMPARE interrupt.  The COMPARE1 ISR
- * masks itself (single-shot) and dispatches the pending callback through
- * tiku_htimer_run_next().  The counter free-runs the whole time so now()
- * always reflects real elapsed microseconds.
- *
- * TIMER20 sits in the main peripheral domain; its base clock is 16 MHz, so a
- * PRESCALER of 4 (divide-by-16) yields exactly 1 MHz.  TIMER00/TIMER10 are the
- * high-speed timers (used elsewhere / reserved for the tick fallback), so
- * TIMER20 is a conflict-free choice for the htimer.
+ * TIMER20 runs in 16-bit BITMODE at 1 MHz, so the hardware counter IS the kernel's
+ * 16-bit clock and a deadline maps onto a compare register with no delta
+ * arithmetic.  The COMPARE1 ISR masks itself, giving single-shot semantics.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -56,9 +45,10 @@ typedef tiku_htimer_clock_t htimer_t;
  *
  * Stops the timer, clears all interrupt masks, selects Timer mode / 16-bit
  * width / divide-by-16 prescaler, zeroes the counter, then enables the NVIC
- * line and starts the counter.  Priority 1 keeps htimer callbacks ahead of
- * the console (2) and the kernel tick (3), matching the microsecond-class
- * intent of the htimer API.  No compare is armed until schedule() runs.
+ * line and starts counting.  No compare is armed until schedule() runs.
+ *
+ * @note Priority 1 keeps htimer callbacks ahead of the console (2) and the
+ *       kernel tick (3), matching the microsecond-class intent of the API.
  */
 void tiku_htimer_arch_init(void)
 {
@@ -95,12 +85,12 @@ htimer_t tiku_htimer_arch_now(void)
 /**
  * @brief Arm a single-shot compare to fire at the 16-bit absolute tick @p t.
  *
- * Because the counter runs in 16-bit mode, the kernel's absolute deadline
- * maps directly onto CC[1]: the COMPARE1 event fires once when the counter
- * next equals @p t (the kernel guarantees @p t is at least the htimer guard
- * time ahead, so the match has not already passed).  The stale event is
- * cleared before unmasking so a previous fire cannot re-trigger immediately.
+ * With the counter in 16-bit mode the kernel's absolute deadline maps directly
+ * onto CC[1], so COMPARE1 fires once when the counter next equals @p t -- the
+ * kernel guarantees @p t is at least the htimer guard time ahead.
  *
+ * @note The stale event is cleared before unmasking, so a previous fire cannot
+ *       re-trigger immediately.
  * @param t  Target 16-bit tick value (kernel htimer_clock_t domain).
  */
 void tiku_htimer_arch_schedule(htimer_t t)
@@ -118,10 +108,9 @@ void tiku_htimer_arch_schedule(htimer_t t)
 /**
  * @brief TIMER20 COMPARE1 ISR: dispatch the expired htimer callback.
  *
- * Overrides the weak alias installed by the crt vector table (TIMER20_IRQn
- * 202).  Clears the compare event, masks the compare interrupt so a callback
- * that does not reschedule leaves the htimer idle, then runs the kernel's
- * pending-callback dispatcher in ISR context.
+ * Overrides the weak alias installed by the crt vector table.  Clears the
+ * compare event, masks the compare interrupt so a callback that does not
+ * reschedule leaves the htimer idle, then runs the pending-callback dispatcher.
  */
 void tiku_nordic_timer20_isr(void)
 {

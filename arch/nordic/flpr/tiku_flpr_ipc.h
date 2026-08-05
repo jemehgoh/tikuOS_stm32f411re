@@ -5,22 +5,24 @@
  *
  * Authors: Ambuj Varshney <ambuj@tiku-os.org>
  *
- * tiku_flpr_ipc.h - shared-memory layout between the Cortex-M33 app core
- *                   and the FLPR RISC-V coprocessor.
+ * tiku_flpr_ipc.h - shared-memory layout between the M33 app core and FLPR.
  *
- * Included by BOTH builds (arm-none-eabi and riscv-none-elf), so it must
- * stay plain C99 + <stdint.h>.  The FLPR image lives in a carve at the top
- * of SRAM; the LAST kilobyte of the carve is this shared page.  SRAM is
- * uncached for both masters, so `volatile` plus write-payload-then-flag
- * ordering is the whole coherency story.
+ * Included by both the arm-none-eabi and riscv-none-elf builds, so it stays plain
+ * C99 plus <stdint.h>.  The shared page is the last kilobyte of the FLPR SRAM
+ * carve; the layout contract is below.
  *
+ * SPDX-License-Identifier: Apache-2.0
+ */
+/*
  * Layout contract (see also the app linker script and tiku_flpr.ld):
  *   0x2003C000  FLPR .text/.rodata/.data/.bss   (image, loader-placed)
  *   ...         FLPR stack (grows down from the shared page)
  *   0x2003FC00  tiku_flpr_shared_t              (this header)
  *
- * SPDX-License-Identifier: Apache-2.0
+ * SRAM is uncached for both masters, so `volatile` plus
+ * write-payload-then-flag ordering is the whole coherency story.
  */
+
 
 #ifndef TIKU_FLPR_IPC_H_
 #define TIKU_FLPR_IPC_H_
@@ -48,8 +50,8 @@
  * whole page comfortably inside 1 KB. */
 #define TIKU_FLPR_MSG_CAP  240u
 
-/* Data Length Extension: the max LL data-PDU payload we negotiate (Phase F1).
- * 80 comfortably fits our largest L2CAP PDU (the 69-byte SMP Public Key, the
+/* Data Length Extension: the max LL data-PDU payload negotiated (Phase F1).
+ * 80 comfortably fits the largest L2CAP PDU (the 69-byte SMP Public Key, the
  * 68-byte long-read response) in a SINGLE LL PDU -- no fragmentation -- while
  * an 80-byte-payload packet stays ~728 us on 1M PHY, inside the connection
  * event's existing ~900 us TX/RX window (no timing re-tune).  Bounds the RADIO
@@ -107,11 +109,11 @@ typedef struct {
     volatile uint8_t  conn_chm[5];
     /* Peer identity captured from the CONNECT_IND (Phase E / SMP): the SMP
      * f5/f6 key derivation binds the LTK to both device addresses.  InitA is
-     * the central (initiator, address A); AdvA is us (peripheral, responder,
+     * the central (initiator, address A); AdvA is local (peripheral, responder,
      * address B) -- echoed so the host needn't remember what it advertised.
      * conn_addr_types: bit0 = InitA type, bit1 = AdvA type (1 = random). */
     volatile uint8_t  conn_inita[6];    /* initiator (central) address = A  */
-    volatile uint8_t  conn_adva[6];     /* advertiser (our) address     = B  */
+    volatile uint8_t  conn_adva[6];     /* advertiser (local) address   = B  */
     volatile uint8_t  conn_addr_types;  /* bit0 InitA, bit1 AdvA (1=random)  */
 
     /* LL encryption startup (Phase E3).  The FLPR has no AES, so the session
@@ -123,8 +125,8 @@ typedef struct {
     volatile uint32_t enc_rsp_seq;      /* M33: SKDs/IVs/sk/iv ready          */
     volatile uint8_t  enc_skdm[8];      /* FLPR->M33: central's SKD (LSO)     */
     volatile uint8_t  enc_ivm[4];       /* FLPR->M33: central's IV (LSO)      */
-    volatile uint8_t  enc_skds[8];      /* M33->FLPR: our SKD (MSO)           */
-    volatile uint8_t  enc_ivs[4];       /* M33->FLPR: our IV (MSO)            */
+    volatile uint8_t  enc_skds[8];      /* M33->FLPR: local SKD (MSO)         */
+    volatile uint8_t  enc_ivs[4];       /* M33->FLPR: local IV (MSO)          */
     volatile uint8_t  enc_sk[16];       /* M33->FLPR: session key (CCM00)     */
     volatile uint8_t  enc_iv[8];        /* M33->FLPR: IV = IVm||IVs (CCM00)   */
     volatile uint32_t enc_on;           /* FLPR: 1 once encryption is active  */
@@ -164,9 +166,19 @@ typedef struct {
      * and run ATT/GATT.  TX: the host's response/notification, fragmented, ->
      * a2f with a2f_llid, flow-controlled via a2f_ack; the controller wraps
      * each in a data PDU with that LLID.  The FLPR never parses ATT. */
+
+    /* Compute-only load (power characterisation).  The coprocessor's other
+     * sustained workloads are unusable as a POWER reference: the pulse engine
+     * drives VIO bit 7, which is DK LED3, so its current is mostly the LED, and
+     * the beacon/conn paths run the radio.  This one touches nothing outside
+     * the register file, so what it measures is the VPR core.  spin_passes is
+     * the WORK done -- current over a fixed window cannot tell "draws less"
+     * from "executed less" (see experiments/power/experiment1). */
+    volatile uint32_t spin_iters;       /* M33->FLPR: outer passes requested   */
+    volatile uint32_t spin_passes;      /* FLPR->M33: outer passes retired     */
 } tiku_flpr_shared_t;
 
-/* CMD_CONN_ADV input (in a2f_buf): connectable ADV PDU + our AdvA. */
+/* CMD_CONN_ADV input (in a2f_buf): connectable ADV PDU + the AdvA. */
 typedef struct {
     uint32_t adv_len;                   /* bytes in adv[] ([S0][LEN][S1]..) */
     uint8_t  addr[6];                   /* AdvA to match in the CONNECT_IND */
@@ -207,9 +219,17 @@ typedef struct {
  * conn_* fields (step 1a); step 1b then holds the link.  Same NS handoff. */
 #define TIKU_FLPR_CMD_CONN_ADV    7u
 #define TIKU_FLPR_CMD_CONN_STOP   8u
+/* Compute-only load (power characterisation): run .spin_iters outer passes of a
+ * register-only loop, publish the count in .spin_passes, then raise
+ * RSP_SPIN_DONE.  Deliberately touches no pin, no radio and no shared memory
+ * inside the loop, so the current it draws is the VPR core and nothing else.
+ * The M33 times it against its own clock -- the VPR's mcycle proved unusable as
+ * a timebase (see the pacing note in tiku_flpr_main.c). */
+#define TIKU_FLPR_CMD_SPIN        9u
 #define TIKU_FLPR_RSP_PARKED  1u
 #define TIKU_FLPR_RSP_PULSE_DONE 2u
 #define TIKU_FLPR_RSP_BEACON_STOPPED 3u
+#define TIKU_FLPR_RSP_SPIN_DONE      4u
 
 typedef struct {
     uint32_t half_cycles;           /* FLPR cycles per half-period (128/us) */

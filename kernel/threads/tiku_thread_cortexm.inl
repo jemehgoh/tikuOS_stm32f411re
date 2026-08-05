@@ -5,44 +5,11 @@
  *
  * Authors: Ambuj Varshney <ambuj@tiku-os.org>
  *
- * tiku_thread_cortexm.inl - generic Cortex-M worker-thread switcher
+ * tiku_thread_cortexm.inl - generic Cortex-M worker-thread switcher.
  *
- * The one context-switch implementation shared by every Cortex-M part
- * TikuOS threads on: Apollo510 (M55, ARMv8.1-M), Apollo4 Lite/Plus
- * (M4F, ARMv7E-M) and RP2350 (M33, ARMv8-M).  The mechanics are pure
- * architectural Cortex-M -- the register block (SCB/DWT/FPCCR), the
- * PendSV/PSP model, lazy FP stacking and the {s16-s31} callee-saved FP
- * set are identical across those cores -- so the body below is written
- * once here and pulled in by one thin per-platform shim.
- *
- * A shim is a two-liner: it names the PendSV handler that its vector
- * table expects and includes this file --
- *
- *     #define TIKU_THREAD_ARCH_PENDSV  tiku_ambiq_pendsv_handler
- *     #include "kernel/threads/tiku_thread_cortexm.inl"
- *
- * so the strong handler here overrides that vector's weak alias.  Only
- * one shim is compiled per build, so the fixed-name backend functions
- * (tiku_thread_arch_boot/_pend/_cycles/_frame_init) never collide.
- *
- * The model: threads run on PSP; every exception runs on MSP (a small
- * dedicated ISR stack installed at boot).  The kernel context is
- * migrated from MSP to PSP once, in place -- same stack, same frame,
- * execution simply continues -- so main()/tiku_sched_loop() never know
- * anything happened.
- *
- * FPU: lazy stacking (FPCCR.ASPEN/LSPEN, the reset default) means the
- * hardware stacks S0-S15/FPSCR only for threads that actually touched
- * the FPU; the switcher checks EXC_RETURN bit 4 and saves/restores
- * S16-S31 only then.  On the M55 the MVE/Helium predication state (VPR)
- * rides that same extended frame -- {s16-s31} names the identical
- * callee-saved encoding -- so vector-using workers are covered by the
- * one sequence with no core-specific code.
- *
- * PendSV runs at the LOWEST exception priority: it never preempts an
- * ISR, only thread mode -- and because tiku_atomic_enter() masks
- * PRIMASK, it can never fire inside a kernel critical section either.
- * That single fact is the safety argument for the whole hybrid model.
+ * The one context-switch body shared by every Cortex-M part: threads run on PSP,
+ * exceptions on MSP, and the kernel context migrates to PSP once at boot.  A
+ * per-platform shim names its PendSV handler and includes this file.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -113,11 +80,9 @@ uint32_t tiku_thread_arch_cycles(void)
 /**
  * @brief Dedicated exception stack (MSP) once threading starts.
  *
- * Before threading, MSP serves both the kernel and every ISR from the
- * big boot stack.  The migration hands that whole region to the kernel
- * thread (as PSP) and points MSP here.  2 KB comfortably covers the
- * lean ISR set (tick, UART RX, GPIO, radio) with no nesting deeper than
- * the NVIC preemption levels in use.
+ * Before threading, MSP serves the kernel and every ISR from the boot stack.
+ * Migration hands that region to the kernel thread as PSP and points MSP here.
+ * 2 KB covers the lean ISR set at the NVIC preemption levels in use.
  */
 static uint32_t s_isr_stack[512] __attribute__((aligned(8)));
 
@@ -184,11 +149,9 @@ void tiku_thread_arch_pend(void)
 /**
  * @brief Build a worker's initial frames on its stack.
  *
- * Layout (descending): 8-word hardware frame (R0=arg, LR=exit
- * trampoline, PC=entry, xPSR=Thumb), then the 9-word software frame the
- * PendSV handler pops (R4-R11 zeroed, EXC_RETURN=0xFFFFFFFD: thread
- * mode, PSP, standard frame -- the FPU frame appears only after the
- * worker's first FP instruction, via lazy stacking).
+ * Descending: the 8-word hardware frame (R0=arg, LR=exit trampoline, PC=entry,
+ * xPSR=Thumb), then the 9-word software frame PendSV pops, EXC_RETURN set for
+ * thread mode on PSP -- the FPU frame appears only on the first FP instruction.
  *
  * @return Initial sp (what the switcher's LDMIA expects)
  */
@@ -227,13 +190,9 @@ extern uint32_t *tiku_thread_switch(uint32_t *old_sp);
 /**
  * @brief PendSV handler (strong override of the vector's weak alias).
  *
- * Saves the outgoing thread's software frame on its PSP stack --
- * S16-S31 first when the extended (FP) frame is live (EXC_RETURN bit 4
- * clear) -- asks the policy layer for the next sp, and unwinds the
- * incoming thread the same way.  EXC_RETURN travels in the software
- * frame, so standard- and FP-frame threads interleave freely.  The
- * symbol name is supplied by the including shim so each part's vector
- * table binds to it.
+ * Saves the outgoing software frame on its PSP stack, S16-S31 first when the FP
+ * frame is live, asks the policy layer for the next sp, then unwinds the incoming
+ * thread the same way.  EXC_RETURN travels in the frame, so the two kinds mix.
  */
 __attribute__((naked))
 void TIKU_THREAD_ARCH_PENDSV(void)

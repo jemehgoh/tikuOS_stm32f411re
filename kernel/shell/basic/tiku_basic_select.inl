@@ -5,29 +5,11 @@
  *
  * Authors: Ambuj Varshney <ambuj@tiku-os.org>
  *
- * tiku_basic_select.inl - SELECT CASE / CASE / END SELECT helpers.
+ * tiku_basic_select.inl - SELECT CASE, CASE and END SELECT helpers.
  *
- * NOT a standalone translation unit.  Included from tiku_basic.c.
- *
- * Multi-line case-selection construct:
- *
- *   SELECT CASE expr
- *   CASE 1                 -- match exact value
- *      ...body...
- *   CASE 2, 3              -- match any in comma-separated list
- *      ...body...
- *   CASE 4 TO 6            -- inclusive numeric range
- *      ...body...
- *   CASE ELSE              -- catch-all (must be last arm)
- *      ...body...
- *   END SELECT
- *
- * On entry to SELECT CASE we evaluate the controlling expression,
- * scan forward for the first matching CASE arm (or CASE ELSE, or
- * END SELECT), and jump to the line after that arm.  Reaching a
- * CASE / CASE ELSE / END SELECT during normal flow means the
- * current arm has finished, so we jump past END SELECT.  Nested
- * SELECT CASE is supported via depth-aware scanning.
+ * Evaluates the controlling expression once, scans forward for the first matching
+ * arm and jumps past it; reaching another CASE during normal flow means the arm
+ * finished.  Nesting works through depth-aware scanning.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -112,11 +94,9 @@ case_arm_matches(const char *t, long value)
  * @brief Find the prog[] index of the matching arm for SELECT CASE
  *        starting at @p select_line.
  *
- * Walks forward in line-number order tracking nested SELECT CASE
- * depth.  Returns the index of:
- *   - the first CASE arm whose pattern matches @p value, OR
- *   - the CASE ELSE arm if none matched, OR
- *   - the END SELECT line if neither.
+ * Walks forward in line-number order tracking nested SELECT CASE depth, and
+ * returns the first CASE arm whose pattern matches @p value, else the CASE ELSE
+ * arm, else the END SELECT line.
  *
  * @return prog index, or -1 if no END SELECT found.
  */
@@ -163,7 +143,7 @@ find_select_arm(uint16_t select_line, long value)
  *        (open) SELECT CASE that contains @p start_line.
  *
  * Used when execution reaches a CASE / CASE ELSE during normal
- * flow (= "previous arm just finished"); we jump past END SELECT.
+ * flow (= "previous arm just finished"); the jump goes past END SELECT.
  *
  * @return prog index of END SELECT, or -1 if not found.
  */
@@ -231,7 +211,7 @@ exec_select_case(const char **p)
 /**
  * @brief CASE encountered as a statement during normal flow.
  *
- * Means the previous arm has just finished and we're about to
+ * Means the previous arm has just finished and control is about to
  * start the next arm by accident; jump past the matching END
  * SELECT so only the dispatched arm runs.
  */

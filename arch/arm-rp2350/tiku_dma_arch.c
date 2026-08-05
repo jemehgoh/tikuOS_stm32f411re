@@ -5,17 +5,11 @@
  *
  * Authors: Ambuj Varshney <ambuj@tiku-os.org>
  *
- * tiku_dma_arch.c - RP2350 DMA driver (channel 0)
+ * tiku_dma_arch.c - RP2350 DMA driver (channel 0).
  *
- * Programs DMA channel 0 for word-aligned memory-to-memory
- * transfers with no DREQ pacing (TREQ_PERMANENT).  The channel
- * runs at full AHB rate, so a 1 KB memcpy completes in roughly
- * 256 clk_sys cycles -- about 1.7 us at 150 MHz, ~10x faster than
- * a CPU-driven word-by-word memcpy.
- *
- * DMA_IRQ_0 fires on transfer completion.  The ISR clears the
- * channel's IRQ flag, marks the driver not-busy, and invokes the
- * caller's completion callback.
+ * Word-aligned memory-to-memory transfers with no DREQ pacing, running at full
+ * AHB rate -- roughly 1.7 us for 1 KB at 150 MHz.  DMA_IRQ_0 clears the flag,
+ * marks the driver idle and invokes the caller's completion callback.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -63,10 +57,9 @@ static void              *g_dma_done_ctx;
 /**
  * @brief Initialise the RP2350 DMA block and enable DMA_IRQ_0
  *
- * Releases the DMA peripheral from reset, enables the channel-0 IRQ
- * source in the DMA interrupt-enable register, and unmasks DMA_IRQ_0 in
- * the NVIC.  Idempotent: subsequent calls return immediately without
- * re-programming hardware.  Must be called once before any memcpy.
+ * Releases the DMA peripheral from reset, enables the channel-0 IRQ source and
+ * unmasks DMA_IRQ_0 in the NVIC.  Idempotent, and must be called once before
+ * any memcpy.
  */
 void tiku_dma_arch_init(void) {
     if (g_dma_initialised) {
@@ -85,17 +78,13 @@ void tiku_dma_arch_init(void) {
 /**
  * @brief Start a word-aligned DMA memory-to-memory copy on channel 0
  *
- * Programs DMA channel 0 for an unpaced (TREQ_PERMANENT) 32-bit-wide
- * transfer from @p src to @p dst, then kicks the channel by writing
- * CTRL_TRIG.  Returns immediately; completion is signalled through the
- * DMA_IRQ_0 handler which invokes @p on_done (if non-NULL).
- *
- * Both @p dst and @p src must be 4-byte aligned.  @p word_cnt is the
- * number of 32-bit words to transfer, not the byte count.
+ * Programs channel 0 for an unpaced (TREQ_PERMANENT) 32-bit transfer and kicks
+ * it via CTRL_TRIG.  Returns immediately; completion is signalled through the
+ * DMA_IRQ_0 handler, which invokes @p on_done when non-NULL.
  *
  * @param dst       Destination address (must be 4-byte aligned, non-NULL)
  * @param src       Source address (must be 4-byte aligned, non-NULL)
- * @param word_cnt  Number of 32-bit words to transfer (must be > 0)
+ * @param word_cnt  Number of 32-bit WORDS to transfer, not bytes (must be > 0)
  * @param on_done   Completion callback invoked from DMA_IRQ_0 context,
  *                  or NULL if no notification is required
  * @param ctx       Opaque pointer forwarded verbatim to @p on_done
@@ -182,10 +171,9 @@ int tiku_dma_arch_busy(void) {
 /**
  * @brief Abort an in-flight DMA transfer and reset driver state
  *
- * Halts the channel by clearing the EN bit in CTRL (without strobing
- * TRIG), acknowledges any latched IRQ in INTS0, and resets the busy
- * flag and callback pointers.  The partial destination contents after
- * an abort are undefined.
+ * Halts the channel by clearing EN in CTRL without strobing TRIG, acknowledges
+ * any latched IRQ in INTS0, and resets the busy flag and callback pointers.
+ * The partial destination contents after an abort are undefined.
  *
  * @return TIKU_DMA_OK if the transfer was successfully aborted;
  *         TIKU_DMA_ERR_NOT_READY if no transfer was in flight
@@ -198,7 +186,7 @@ int tiku_dma_arch_abort(void) {
     /* Disable the channel by clearing EN bit in CTRL (without TRIG). */
     _RP2350_REG(RP2350_DMA_CHAN_CTRL_TRIG(DMA_CHAN_MEMCPY)) = 0U;
 
-    /* Acknowledge any latched IRQ before we wipe the callback. */
+    /* Acknowledge any latched IRQ before wiping the callback. */
     _RP2350_REG(RP2350_DMA_INTS0) = (1U << DMA_CHAN_MEMCPY);
 
     g_dma_busy     = 0U;
@@ -211,11 +199,11 @@ int tiku_dma_arch_abort(void) {
 /**
  * @brief DMA_IRQ_0 interrupt handler — transfer completion ISR
  *
- * Invoked by the Cortex-M33 NVIC when channel 0 finishes its transfer.
  * Clears the channel's IRQ flag (W1C in INTS0), snapshots and nulls the
- * callback and context, marks the driver idle, then calls the snapshot
- * callback if non-NULL.  Snapshotting before the call allows the callback
- * to immediately launch a new memcpy without corrupting state.
+ * callback and context, marks the driver idle, then calls the snapshot.
+ *
+ * @note Snapshotting before the call lets the callback immediately launch a new
+ *       memcpy without corrupting state.
  */
 void tiku_rp2350_dma_irq0_handler(void) {
     /* W1C the channel's IRQ flag in INTS0 (the post-enable status

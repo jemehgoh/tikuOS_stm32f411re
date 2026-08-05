@@ -5,12 +5,11 @@
  *
  * Authors: Ambuj Varshney <ambuj@tiku-os.org>
  *
- * tiku_timer_arch.h - Apollo 510 system-tick (Cortex-M SysTick)
+ * tiku_timer_arch.h - Apollo510 system tick.
  *
- * Mirrors arch/arm-rp2350/tiku_timer_arch.h. The system clock runs at
- * TIKU_CLOCK_ARCH_SECOND ticks/second (128 Hz by default). The SysTick
- * reload is derived from TIKU_MAIN_CPU_HZ (96 MHz / 128 = 750000, well
- * within SysTick's 24-bit reload limit).
+ * The system clock runs at TIKU_CLOCK_ARCH_SECOND ticks per second.  The source is
+ * the always-on STIMER, not SysTick, which freezes during WFI on this part -- see
+ * tiku_timer_arch.c.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -65,10 +64,9 @@ typedef unsigned int tiku_clock_arch_counter_t;
 /**
  * @brief SysTick reload value.
  *
- * SysTick is clocked from the core clock; reload = core_hz / TICK_HZ.
- * TIKU_MAIN_CPU_HZ tracks MAIN_CPU_FREQ so the tick stays accurate
- * when the core frequency changes. At 96 MHz and 128 Hz this is
- * 750000 — well within SysTick's 24-bit reload limit (16777215).
+ * SysTick is clocked from the core clock, so reload = core_hz / TICK_HZ, and
+ * TIKU_MAIN_CPU_HZ tracks MAIN_CPU_FREQ so the tick stays accurate across a
+ * frequency change.  At 96 MHz and 128 Hz this is 750000 (24-bit limit).
  */
 #define TIKU_CLOCK_ARCH_INTERVAL  (TIKU_MAIN_CPU_HZ / TIKU_CLOCK_ARCH_SECOND)
 
@@ -171,5 +169,26 @@ int                    tiku_clock_arch_fine_max(void);
  */
 #define TIKU_CLOCK_ARCH_TICKS_TO_MS(ticks) \
     ((unsigned long)(((ticks) * 1000) / TIKU_CLOCK_ARCH_SECOND))
+
+/*---------------------------------------------------------------------------*/
+/* STIMER TIMEBASE RECLOCK (tiku_htimer_arch.c) -- deep-sleep support        */
+/*---------------------------------------------------------------------------*/
+
+/**
+ * @brief Switch the STIMER timebase: XTAL 32.768 kHz <-> LFRC ~900 Hz.
+ *
+ * The crystal dies under real (debugger-free) deep sleep on this port, freezing
+ * the STIMER and turning a tickless stretch into a sleep with no alarm, so the
+ * deep path reclocks to the LFRC around the sleep window.
+ *
+ * @note Verified switch (reverts to XTAL on a dead source); tick accounting
+ *       stays continuous; refuses while a tickless stretch is open.
+ * @param use_lfrc  non-zero: to LFRC (rate measured against DWT); 0: to XTAL
+ * @return new rate in Hz, or 0 on failure (timebase left on XTAL)
+ */
+uint32_t tiku_ambiq_stimer_reclock(int use_lfrc);
+
+/** @brief Current STIMER timebase rate in Hz (32768 on XTAL). */
+uint32_t tiku_ambiq_stimer_rate_hz(void);
 
 #endif /* TIKU_AMBIQ_TIMER_ARCH_H_ */

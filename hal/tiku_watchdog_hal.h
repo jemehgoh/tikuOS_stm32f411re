@@ -25,6 +25,10 @@
 #include "arch/ambiq/tiku_cpu_watchdog_arch.h"
 #elif defined(PLATFORM_NORDIC)
 #include "arch/nordic/tiku_cpu_watchdog_arch.h"
+#elif defined(PLATFORM_STM32N6)
+#include "arch/stm32n6/tiku_cpu_watchdog_arch.h"
+#elif defined(PLATFORM_RA8P1)
+#include "arch/ra8p1/tiku_cpu_watchdog_arch.h"
 #endif
 
 /*---------------------------------------------------------------------------*/
@@ -62,8 +66,8 @@
 
 /*
  * Semantic timeout aliases. The MSP430 divider model only naturally
- * yields four time points when paired with a 32 kHz ACLK, so we
- * surface those four with names that read like wall-clock timeouts:
+ * yields four time points when paired with a 32 kHz ACLK, so those four
+ * carry names that read like wall-clock timeouts:
  *
  *   TIKU_WDT_TIMEOUT_2MS    ~  1.95 ms  (divider /64)
  *   TIKU_WDT_TIMEOUT_16MS   ~ 15.6  ms  (divider /512)
@@ -134,6 +138,32 @@
     tiku_cpu_nordic_watchdog_pause_arch()
 #define tiku_watchdog_arch_resume(kick) \
     tiku_cpu_nordic_watchdog_resume_arch(kick)
+#elif defined(PLATFORM_STM32N6)
+#define TIKU_WATCHDOG_INTERVAL_SUPPORTED 0
+#define tiku_watchdog_arch_on(src, isel) \
+    tiku_cpu_stm32n6_watchdog_on_arch((src), (isel))
+#define tiku_watchdog_arch_off() \
+    tiku_cpu_stm32n6_watchdog_off_arch()
+#define tiku_watchdog_arch_kick() \
+    tiku_cpu_stm32n6_watchdog_kick_arch()
+#define tiku_watchdog_arch_pause() \
+    tiku_cpu_stm32n6_watchdog_pause_arch()
+#define tiku_watchdog_arch_resume(kick) \
+    tiku_cpu_stm32n6_watchdog_resume_arch(kick)
+#elif defined(PLATFORM_RA8P1)
+/* The IWDT has no interrupt-on-timeout mode, so interval mode is absent
+ * rather than emulated. */
+#define TIKU_WATCHDOG_INTERVAL_SUPPORTED 0
+#define tiku_watchdog_arch_on(src, isel) \
+    tiku_cpu_ra8p1_watchdog_on_arch((src), (isel))
+#define tiku_watchdog_arch_off() \
+    tiku_cpu_ra8p1_watchdog_off_arch()
+#define tiku_watchdog_arch_kick() \
+    tiku_cpu_ra8p1_watchdog_kick_arch()
+#define tiku_watchdog_arch_pause() \
+    tiku_cpu_ra8p1_watchdog_pause_arch()
+#define tiku_watchdog_arch_resume(kick) \
+    tiku_cpu_ra8p1_watchdog_resume_arch(kick)
 #endif
 
 #endif /* TIKU_WATCHDOG_HAL_H_ */

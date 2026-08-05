@@ -5,19 +5,11 @@
  *
  * Authors: Ambuj Varshney <ambuj@tiku-os.org>
  *
- * tiku_dc_arch.c - Apollo510 display path: NemaDC + DSI host + CO5300 panel.
+ * tiku_dc_arch.c - Apollo510 display path: NemaDC, DSI host and CO5300 panel.
  *
- * From-scratch, register-level, no vendor code linked. Provenance of every
- * sequence below (three independent sources, cross-checked):
- *   [TSI]  open MIT-granted ThinkSi sources: nema_dc_regs.h/_intern/_mipi/_dsi
- *          register map + the fully-open Ambiq port layer nema_dc_hal.c
- *          (configure / command-send / frame-transfer orchestration).
- *   [DIS]  disassembly of the vendored blobs (lib_nema_apollo510_nemagfx.a
- *          nema_dc*.o primitives; libam_hal.a am_hal_dsi/clkgen/pwrctrl).
- *   [CAP]  J-Link register capture of the vendor demo running on this exact
- *          board (2026-07-23) -- the golden values quoted in comments. Where
- *          an algorithm was not recovered bit-exact (D-PHY timing), the
- *          captured words are carried as constants for the shipped frequency.
+ * From-scratch and register-level, with no vendor code linked.  Every sequence
+ * was cross-checked against three sources: the MIT-granted ThinkSi register map,
+ * disassembly of the vendored blobs, and a J-Link capture of the vendor demo.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -38,7 +30,7 @@
 #define DSI_RD(off)     REG32(DSI_BASE + (off))
 #define DSI_WR(off, v)  (REG32(DSI_BASE + (off)) = (v))
 
-/* Blocks the CMSIS header names but whose members we address by offset so
+/* Blocks the CMSIS header names but whose members are addressed by offset so
  * every write maps 1:1 onto the recovered sequences. */
 #define CLKGEN_DISPCLKCTRL   REG32(CLKGEN_BASE + 0x84u)
 #define CLKGEN_CLKCTRL       REG32(CLKGEN_BASE + 0x120u)
@@ -115,7 +107,7 @@
 /*
  * D-PHY timing words for FREQ_TRIM_X20 (240 MHz PLL, 480 Mbps/lane). The
  * vendor computes these from D-PHY spec targets in double-precision at run
- * time; the selection logic is not recovered bit-exact, so we carry the
+ * time; the selection logic is not recovered bit-exact, so this carries the
  * words [CAP]tured from this board at this trim. Recompute/redump if the
  * trim ever changes.
  */

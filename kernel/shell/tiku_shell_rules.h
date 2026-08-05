@@ -5,21 +5,11 @@
  *
  * Authors: Ambuj Varshney <ambuj@tiku-os.org>
  *
- * tiku_shell_rules.h - Reactive rule engine for the shell
+ * tiku_shell_rules.h - reactive rule engine for the shell.
  *
- * A reactive rule is a stored "if VFS_path OP value then run COMMAND"
- * triple.  Rules are evaluated on every shell tick: the configured
- * VFS path is read, the relation is checked against the right-hand
- * side, and the action is dispatched through the shell parser
- * exactly when the condition transitions from false to true
- * (edge-triggered).  This makes rules safe to combine with side-
- * effecting actions: a rule that turns on an LED when a temperature
- * threshold is crossed will not fire repeatedly while the temperature
- * stays above threshold.
- *
- * Rule storage today is SRAM-only; the structure leaves room for a
- * later FRAM-backed migration with a magic-number ring like the
- * history subsystem.
+ * A rule is "if VFS_path OP value then run COMMAND", evaluated every shell tick
+ * and dispatched only on a false-to-true transition, so an action with side
+ * effects fires once per crossing rather than every tick.  Storage is SRAM-only.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -73,27 +63,22 @@ typedef enum {
     TIKU_SHELL_RULE_OP_CHANGED   /**< value[] holds the last seen reading */
 } tiku_shell_rule_op_t;
 
-/** A single reactive rule.
+/** @brief A single reactive rule.
  *
- * Field semantics depend on @c op:
- *   - Comparison ops: @c value is the user-supplied right-hand side
- *     (immutable); @c last_match tracks the previous tick's match
- *     state for false->true edge detection.
- *   - OP_CHANGED:     @c value is the last seen VFS reading
- *     (overwritten on every change); @c last_match is the "baseline
- *     established" flag (0 before the first read, 1 thereafter).
+ * Field semantics depend on @c op: for a comparison, @c value is the immutable
+ * right-hand side and @c last_match tracks the previous match state for edge
+ * detection.  For OP_CHANGED, @c value holds the last seen reading and
+ * @c last_match is the "baseline established" flag.
  */
 typedef struct {
     tiku_shell_rule_state_t state;
     tiku_shell_rule_op_t    op;
     uint8_t                 last_match;
     uint8_t                 _reserved;
-    /** Resolved node, cached at (re-)arm time.  Non-NULL with a
-     *  write handler means the rule is event-armed (evaluated on
-     *  TIKU_EVENT_VFS, skipped by the poll tick); non-NULL without
-     *  a write handler means a sensor-side rule that stays on the
-     *  poll path; NULL means the path did not resolve at arm time
-     *  (the poll path retries it, matching pre-watch behaviour). */
+    /** @brief Resolved node, cached at (re-)arm time.
+      *  Non-NULL with a write handler = event-armed; non-NULL
+      *  without one = a sensor-side rule on the poll path; NULL
+      *  = the path did not resolve, and the poll path retries. */
     const tiku_vfs_node_t  *node;
     char                    path[TIKU_SHELL_RULES_PATH_MAX];
     char                    value[TIKU_SHELL_RULES_VALUE_MAX];
@@ -152,14 +137,9 @@ const char *tiku_shell_rules_op_name(tiku_shell_rule_op_t op);
 /**
  * @brief Convenience for the `on` command: parse argv, validate, register.
  *
- * Two grammars are accepted:
- *   - Comparison: argv[1] = path, argv[2] = op, argv[3] = value,
- *                 argv[4..] = action.
- *   - Change:     argv[1] = "changed", argv[2] = path,
- *                 argv[3..] = action.
- *
- * Action tokens are joined with single spaces.  Diagnostics printed
- * via SHELL_PRINTF on error.
+ * Comparison grammar: argv[1] = path, argv[2] = op, argv[3] = value, argv[4..]
+ * = action.  Change grammar: argv[1] = "changed", argv[2] = path, argv[3..] =
+ * action.  Action tokens join with single spaces; errors print via SHELL_PRINTF.
  *
  * @return Slot id (>= 0) on success, -1 on error (message printed).
  */
@@ -168,15 +148,13 @@ int8_t tiku_shell_rules_add_argv(uint8_t argc, const char *argv[]);
 /**
  * @brief Periodic dispatcher; called from the shell main loop.
  *
- * Walks every active rule on the POLL path — sensor-side rules whose
- * nodes change without writes, plus rules whose path did not resolve
- * at arm time.  Rules on writable nodes are event-armed via
- * tiku_vfs_watch() and are skipped here; they evaluate in
- * tiku_shell_rules_on_vfs() the moment the node is written instead
- * of up to a poll period later.  Evaluation semantics are identical
- * on both paths: read the path, evaluate the relation, dispatch the
- * action on a false->true edge.  A rule whose VFS read fails is
- * treated as non-matching; transitions back to non-match are silent.
+ * Walks every active rule on the POLL path -- sensor-side rules whose nodes
+ * change without writes, plus rules whose path did not resolve at arm time.
+ * Rules on writable nodes are event-armed and skipped here.
+ *
+ * @note Semantics match the event path exactly: read, evaluate, dispatch on a
+ *       false->true edge.  A failed read is treated as non-matching, and
+ *       transitions back to non-match are silent.
  */
 void tiku_shell_rules_tick(void);
 

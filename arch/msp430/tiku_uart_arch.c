@@ -5,14 +5,11 @@
  *
  * Authors: Ambuj Varshney <ambuj@tiku-os.org>
  *
- * tiku_uart_arch.c - Compiler-aware UART backend (MSP430)
+ * tiku_uart_arch.c - compiler-aware UART backend (MSP430).
  *
- * Under GCC: initializes one of eUSCI_A0 or eUSCI_A1 (selected by
- * TIKU_BOARD_UART_MODULE) as a 9600-baud UART on the board-specific
- * pins and provides a lightweight printf replacement for debug output.
- *
- * Under CCS: all functions are empty stubs because CIO semihosting
- * already routes printf() through the JTAG debugger connection.
+ * Under GCC, brings up the board's eUSCI_A instance as a 9600-baud UART and
+ * provides a lightweight printf.  Under CCS every entry point is a stub, because
+ * CIO semihosting already routes printf over the debugger.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -97,7 +94,7 @@ TIKU_ISR(TIKU_UART_VECTOR, tiku_uart_isr)
 {
     if (TIKU_UART_IFG & UCRXIFG) {
         /* Check for hardware overrun (byte lost inside the UART shift
-         * register before we could read RXBUF).  Reading RXBUF clears
+         * register before RXBUF could be read).  Reading RXBUF clears
          * UCOE, so sample it first. */
         if (TIKU_UART_STATW & UCOE) {
             rx.overrun_count++;
@@ -119,10 +116,9 @@ TIKU_ISR(TIKU_UART_VECTOR, tiku_uart_isr)
 /**
  * @brief Initialize the kernel UART at 9600 baud, 8N1.
  *
- * Drives the eUSCI module selected by TIKU_BOARD_UART_MODULE
- * (0 = eUSCI_A0, default; 1 = eUSCI_A1). Enables the RX interrupt so
- * incoming bytes are buffered in a software ring buffer regardless of
- * when the application polls.
+ * Drives the eUSCI instance the board header selects, and enables the RX
+ * interrupt so incoming bytes land in a software ring whatever the application
+ * is doing.
  */
 void
 tiku_uart_init(void)

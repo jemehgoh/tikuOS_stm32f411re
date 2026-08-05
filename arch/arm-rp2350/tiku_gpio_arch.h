@@ -5,15 +5,11 @@
  *
  * Authors: Ambuj Varshney <ambuj@tiku-os.org>
  *
- * tiku_gpio_arch.h - RP2350 GPIO port access
+ * tiku_gpio_arch.h - RP2350 GPIO port access.
  *
- * The RP2350 has a single bank of 30+ pins. To stay shell/VFS-compatible
- * with the MSP430 layout (/dev/gpio/{1..4}/{0..7}) we expose four
- * virtual ports of 8 pins each:
- *   port 1 -> GP0..GP7
- *   port 2 -> GP8..GP15
- *   port 3 -> GP16..GP23
- *   port 4 -> GP24..GP31
+ * The part has one bank of 30+ pins.  To stay compatible with the shell and VFS
+ * layout inherited from MSP430, it is presented as four virtual ports of eight
+ * pins each: port 1 is GP0-GP7, port 2 GP8-GP15, and so on.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -97,10 +93,9 @@ int8_t tiku_gpio_arch_get_dir(uint8_t port, uint8_t pin);
 /**
  * @brief Per-pin direct GPIO helpers used by the LED macros.
  *
- * These operate on the absolute RP2350 pin number (0..29) and bypass
- * the virtual-port layer. They are called directly from the board
- * LED macros (TIKU_BOARD_LEDn_INIT/ON/OFF/TOGGLE) and must not be
- * used for pins that are also managed via the port-based API.
+ * These take the absolute RP2350 pin number (0..29) and bypass the virtual-port
+ * layer.  Called directly from the board LED macros, and not to be used for
+ * pins that are also managed through the port-based API.
  */
 
 /**

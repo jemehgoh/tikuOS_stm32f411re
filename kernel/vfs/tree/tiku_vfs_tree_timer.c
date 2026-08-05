@@ -5,22 +5,11 @@
  *
  * Authors: Ambuj Varshney <ambuj@tiku-os.org>
  *
- * tiku_vfs_tree_timer.c - /sys/timer, /sys/clock, /sys/htimer VFS nodes
+ * tiku_vfs_tree_timer.c - /sys/timer, /sys/clock and /sys/htimer VFS nodes.
  *
- * Read-only observability for the timer subsystem:
- *
- *   /sys/timer/count      active software timers
- *   /sys/timer/fired      expirations since boot
- *   /sys/timer/next       ticks until the next expiration
- *   /sys/timer/list/<n>   per-slot detail (mode, remaining, interval)
- *   /sys/clock/ticks      raw system tick counter (16-bit, wraps)
- *   /sys/htimer/now       hardware timer free-running count
- *   /sys/htimer/scheduled whether a one-shot htimer is pending
- *
- * Everything here is a snapshot taken at read time from the public
- * tiku_timer / tiku_clock / tiku_htimer accessors — no state is
- * kept in this module and nothing is writable, so the handlers are
- * safe to call from any process context.
+ * Read-only observability for the timer subsystem: active timers, expirations,
+ * ticks to the next one, per-slot detail, the raw tick counter and the hardware
+ * timer.  Every value is a snapshot taken at read time; nothing is kept here.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -43,18 +32,9 @@
 /**
  * @brief Shared renderer for one software-timer slot.
  *
- * Looks up slot @p idx in the timer registry and renders one line:
- *
- *   "evt rem=12 int=128\n"        event timer, 12 ticks remaining
- *   "cb rem=0 int=64 (no target)\n"  callback timer, orphaned
- *   "(none)\n"                     slot is empty
- *
- * "evt"/"cb" is the timer mode (post TIKU_EVENT_TIMER vs invoke a
- * function pointer), "rem" is ticks until expiry, "int" is the
- * reload interval in ticks, and "(no target)" flags a timer whose
- * owning process pointer is NULL.  The macro-generated wrappers
- * below bind idx so each /sys/timer/list entry can use the plain
- * tiku_vfs_read_fn signature.
+ * Renders slot @p idx as "evt rem=12 int=128\n" -- mode (post TIKU_EVENT_TIMER
+ * vs invoke a callback), ticks to expiry, reload interval -- with "(no target)"
+ * appended when the owning process is NULL, or "(none)\n" for an empty slot.
  *
  * @param idx  Timer slot index (0..3)
  * @param buf  Output buffer for the rendered text
@@ -128,15 +108,9 @@ timer_fired_read(char *buf, size_t max)
 /**
  * @brief Read handler for /sys/timer/next.
  *
- * Renders the distance to the next software-timer expiration in
- * system ticks: "none\n" when no timer is armed, "0\n" when the
- * earliest deadline already passed (driver runs on the next tick),
- * otherwise the remaining tick count as a decimal line.
- *
- * The subtraction is plain (not wraparound-safe) because the
- * driver re-arms within one tick; a stale deadline can only be in
- * the immediate past, which the next > now guard already maps to
- * "0\n".
+ * Renders the distance to the next software-timer expiry in ticks: "none\n"
+ * when nothing is armed, "0\n" when the earliest deadline has passed (the
+ * driver re-arms within one tick), else the remaining count.
  *
  * @param buf  Output buffer for the rendered text
  * @param max  Capacity of @p buf in bytes
@@ -167,10 +141,9 @@ timer_next_read(char *buf, size_t max)
 /**
  * @brief Read handler for /sys/clock/ticks.
  *
- * Renders the raw system tick counter as a decimal line.  This is
- * the 16-bit wrapping value (~8.5 minute period at the default
- * 128 Hz tick) — useful for short interval measurements and for
- * verifying the tick is alive; use /sys/uptime for elapsed time.
+ * Renders the raw system tick counter, a 16-bit wrapping value (~8.5 minute
+ * period at the default 128 Hz).  Useful for short interval measurements and
+ * for checking the tick is alive; /sys/uptime gives elapsed time.
  *
  * @param buf  Output buffer for the rendered text
  * @param max  Capacity of @p buf in bytes
@@ -190,11 +163,9 @@ clock_ticks_read(char *buf, size_t max)
 /**
  * @brief Read handler for /sys/htimer/now.
  *
- * Renders the hardware timer's free-running counter (Timer A1 on
- * MSP430) as a decimal line.  Resolution depends on the active
- * preset in tiku_htimer_config.h (~1 us in the high-accuracy
- * default).  Two successive reads give a quick sanity check that
- * the counter is advancing.
+ * Renders the hardware timer's free-running counter (Timer A1 on MSP430).
+ * Resolution follows the active preset in tiku_htimer_config.h, ~1 us in the
+ * high-accuracy default; two successive reads show the counter advancing.
  *
  * @param buf  Output buffer for the rendered text
  * @param max  Capacity of @p buf in bytes
@@ -229,12 +200,10 @@ htimer_scheduled_read(char *buf, size_t max)
 /* NODE TABLES                                                               */
 /*---------------------------------------------------------------------------*/
 
-/**
- * /sys/timer/list directory table — one read-only file per slot.
- *
- * Private to this module; only the parent tiku_vfs_tree_timer_children
- * table references it.  Slot count is fixed at four to match the
- * TIMER_DETAIL() expansions above.
+/*
+ * /sys/timer/list directory table -- one read-only file per slot.  Private to
+ * this module; only tiku_vfs_tree_timer_children references it.  The slot count
+ * is fixed at four to match the TIMER_DETAIL() expansions above.
  */
 static const tiku_vfs_node_t sys_timer_list_children[] = {
     { "0", TIKU_VFS_FILE, timer_detail_0, NULL, NULL, 0 },
@@ -243,11 +212,9 @@ static const tiku_vfs_node_t sys_timer_list_children[] = {
     { "3", TIKU_VFS_FILE, timer_detail_3, NULL, NULL, 0 },
 };
 
-/**
- * /sys/timer directory table.
- *
- * Exported so tiku_vfs_tree_sys.c can attach it as the "timer"
- * directory; the entry count travels as TIKU_VFS_TREE_TIMER_NCHILD
+/*
+ * /sys/timer directory table, exported so tiku_vfs_tree_sys.c can attach it as
+ * the "timer" directory; the entry count travels as TIKU_VFS_TREE_TIMER_NCHILD
  * (asserted below).
  */
 const tiku_vfs_node_t tiku_vfs_tree_timer_children[] = {

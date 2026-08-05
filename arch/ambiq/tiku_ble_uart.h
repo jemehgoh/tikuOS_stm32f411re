@@ -5,15 +5,10 @@
  *
  * Authors: Ambuj Varshney <ambuj@tiku-os.org>
  *
- * tiku_ble_uart.h - Minimal connectable GATT peripheral (BLE UART service)
+ * tiku_ble_uart.h - minimal connectable GATT peripheral (BLE UART service).
  *
- * Layers a tiny host stack on the EM9305 HCI transport (tiku_em9305): a polled
- * HCI event/ACL pump, LE connection handling, an L2CAP-LE + ATT server, and the
- * BLE UART -- the wireless-shell transport (M3). No Cordio, no
- * AmbiqSuite. Built only for the BLE config (TIKU_DRV_BLE_EM9305_ENABLE).
- *
- * Bring-up is staged; this header is the whole M3 API, implemented stage by
- * stage: connect (M3.1), ATT discovery (M3.2), BLE UART data + shell wiring (M3.3).
+ * The wireless-shell transport: a tiny host stack over the EM9305 HCI transport,
+ * built only for the BLE configuration.  No Cordio, no AmbiqSuite.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -122,7 +117,7 @@ void tiku_ble_uart_tx_credit_reset(void);
 /** @brief Snapshot of the current (or most recent) LE connection. */
 typedef struct {
     uint16_t handle;       /**< HCI connection handle (0xFFFF if none)      */
-    uint8_t  role;         /**< 0 = we are peripheral (expected)            */
+    uint8_t  role;         /**< 0 = peripheral (expected)                   */
     uint8_t  peer_type;    /**< peer address type                           */
     uint8_t  peer[6];      /**< peer address, LSB first (as HCI delivers)   */
 } tiku_ble_uart_conn_t;

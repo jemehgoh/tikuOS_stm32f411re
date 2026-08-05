@@ -5,14 +5,11 @@
  *
  * Authors: Ambuj Varshney <ambuj@tiku-os.org>
  *
- * tiku_htimer_arch.c - RP2350 hardware-timer driver (TIMER0 alarm 0)
+ * tiku_htimer_arch.c - RP2350 hardware-timer driver (TIMER0 alarm 0).
  *
- * The kernel htimer uses a 16-bit clock that wraps every 65.5 ms
- * (at 1 MHz). We compose a 32-bit absolute target by extending the
- * 16-bit delta against the current timer reading. ALARM0 fires when
- * TIMELR matches; clearing the ARMED bit in the ISR (and then
- * re-arming on the next schedule call) gives us the single-shot
- * semantics the kernel expects.
+ * The kernel htimer uses a 16-bit clock, so a 32-bit absolute target is composed
+ * by extending the delta against the current reading.  Clearing ARMED in the ISR
+ * and re-arming on the next schedule gives the single-shot semantics expected.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -27,11 +24,10 @@
  *         throughout the driver. */
 typedef tiku_htimer_clock_t htimer_t;
 
-/** @brief ISR-fire counter, exposed for diagnostics.  The htimer test
- *         fleet was failing every "callback fired" assertion on this
- *         port; having a live counter the test can read tells us whether
- *         the ISR is even running, instead of guessing.  Also useful for
- *         any future "did the ISR storm during this op?" check. */
+/** @brief ISR-fire counter, exposed for diagnostics.  A live counter the
+ *         htimer test can read shows whether the ISR is running at all,
+ *         rather than leaving a failed "callback fired" assertion to guess.
+ *         Also serves any future "did the ISR storm during this op?" check. */
 volatile uint32_t tiku_htimer_arch_isr_count;
 
 /** @brief Initialise the RP2350 TIMER0 alarm-0 hardware for single-shot

@@ -5,14 +5,11 @@
  *
  * Authors: Ambuj Varshney <ambuj@tiku-os.org>
  *
- * tiku_shell_cmd_trng.c - "trng" command implementation
+ * tiku_shell_cmd_trng.c - "trng" command implementation.
  *
- * Reads bytes from the platform entropy source and prints them as hex, so
- * the randomness behind the cert-TLS handshake can be sanity-checked on the
- * bench (non-zero, varying across reads).  Platform-gated: RP2350 and Ambiq
- * Apollo, and Nordic nRF54L (CRACEN) expose a hardware-TRNG HAL, and MSP430 a
- * software entropy source
- * (when the crypto kit is built); other builds print an "unsupported" line.
+ * Reads bytes from the platform entropy source and prints them as hex, so the
+ * randomness behind the TLS handshake can be sanity-checked on the bench.
+ * Platform-gated; builds without a source print an unsupported line.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -29,6 +26,10 @@
 #elif defined(PLATFORM_NORDIC)
 /* nRF54L CRACEN ring-oscillator TRNG (AES-conditioned). */
 #include <arch/nordic/tiku_trng_arch.h>
+#define TIKU_SHELL_TRNG_HAVE 1
+#elif defined(PLATFORM_STM32N6)
+/* STM32N6 RNG block: ring oscillators, NIST-configured by reset default. */
+#include <arch/stm32n6/tiku_trng_arch.h>
 #define TIKU_SHELL_TRNG_HAVE 1
 #elif defined(PLATFORM_MSP430) && TIKU_KIT_CRYPTO_ENABLE
 /* Software entropy source; only linked when the crypto kit (SHA-256

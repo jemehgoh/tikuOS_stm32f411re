@@ -5,12 +5,10 @@
  *
  * Authors: Ambuj Varshney <ambuj@tiku-os.org>
  *
- * tiku_board_apollo4l_evb.h - Ambiq Apollo4 Lite EVB board definitions
+ * tiku_board_apollo4l_evb.h - Ambiq Apollo4 Lite EVB board definitions.
  *
- * Pin assignments from the AmbiqSuite R4.5.0 apollo4l_evb BSP:
- *   - User LEDs: LED0 = pad 12, LED1 = pad 13, LED2 = pad 14.
- *   - Console UART (COM, instance 2): TX = pad 54, RX = pad 11.
- *   - Default console transport is SWO/ITM.
+ * Pin assignments from the AmbiqSuite apollo4l_evb BSP: three user LEDs and the
+ * COM UART on instance 2.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -35,10 +33,9 @@
 /**
  * @brief LED definitions for the Apollo4 Lite EVB.
  *
- * Three EVB user LEDs: LED0 = pad 12, LED1 = pad 13, LED2 = pad 14 (the
- * TIKU_BOARD_LED1/LED2/LED3 macros are 1-indexed and surface as /dev/led0..2).
- * Assumed active-low (ON drives the pad low), matching the Apollo510 EVB
- * convention; flip the ON/OFF macros if first-light shows inverted polarity.
+ * Three EVB user LEDs: LED0 = pad 12, LED1 = pad 13, LED2 = pad 14.  The
+ * TIKU_BOARD_LED1/LED2/LED3 macros are 1-indexed and surface as /dev/led0..2.
+ * Assumed active-low, matching the Apollo510 EVB convention.
  */
 #define TIKU_BOARD_LED_COUNT        3
 
@@ -74,10 +71,9 @@
 /**
  * @brief Console UART pin assignments.
  *
- * The Apollo4 Lite EVB routes its COM/console to UART instance 2 on pads
- * TX=54, RX=11. The default console transport is SWO/ITM; these pins are used
- * when a wire-UART backend is selected. Pin mux is performed by the UART
- * backend at init time, so the board-level init macro is a no-op.
+ * The Apollo4 Lite EVB routes its COM/console to UART instance 2 on pads TX=54,
+ * RX=11.  Pin mux is performed by the UART backend at init time, so the
+ * board-level init macro is a no-op.
  */
 #define TIKU_BOARD_UART_TX_PIN      54U     /**< UART2 TX pad number. */
 #define TIKU_BOARD_UART_RX_PIN      11U     /**< UART2 RX pad number. */

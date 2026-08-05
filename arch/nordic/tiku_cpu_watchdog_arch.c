@@ -5,29 +5,18 @@
  *
  * Authors: Ambuj Varshney <ambuj@tiku-os.org>
  *
- * tiku_cpu_watchdog_arch.c - nRF54L watchdog backend (WDT30)
+ * tiku_cpu_watchdog_arch.c - nRF54L watchdog backend (WDT30).
  *
- * WDT30 is a 32.768 kHz down-counter: CRV is the timeout in ticks, RREN
- * enables reload-request channel RR[0], and writing the reload key to RR[0]
- * kicks it.  On timeout the WDT issues a system reset (the reset-reason layer
- * decodes RESETREAS.DOG0 as a watchdog reset).
- *
- * Stopping (the trap that reset-looped the watchdog tests): unlike the classic
- * nRF WDT, WDT30 has TASKS_STOP -- but it is DOUBLE-GATED.  CONFIG.STOPEN must
- * be set when the dog is started, AND the magic key 0x6E524635 must be written
- * to TSEN immediately before each TASKS_STOP.  Without both, TASKS_STOP is
- * silently ignored: pause/off appear to work, then the "stopped" dog resets
- * the system one timeout later.
- *
- * Clock note: WDT30 counts on the 32.768 kHz low-frequency clock.  If neither
- * LFXO nor LFRC is running the counter may not advance; starting LFCLK is a
- * bring-up follow-up.  Kick/off/configure are register-correct regardless.
+ * A 32.768 kHz down-counter: CRV is the timeout in ticks, RREN enables reload
+ * channel RR[0], and the reload key kicks it.  Stopping is double-gated -- see
+ * wdt30_stop().  The counter needs LFCLK running to advance.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
 
 #include "tiku_cpu_watchdog_arch.h"
 #include <arch/nordic/tiku_nordic_mdk.h>
+#include <arch/nordic/tiku_nordic_core.h>   /* tiku_nordic_system_reset()    */
 
 #define TIKU_WDT30                NRF_WDT30_S
 #define TIKU_WDT_RR_RELOAD_KEY    0x6E524635UL   /* WDT_RR_RR_Reload          */
@@ -39,8 +28,9 @@
 /**
  * @brief Stop the running watchdog (both gates: TSEN key, then TASKS_STOP).
  *
- * Only effective when the dog was started with CONFIG.STOPEN set (all starts
- * from this backend are).  Safe to call when already stopped.
+ * DOUBLE-GATED, unlike the classic nRF WDT: CONFIG.STOPEN must have been set at
+ * start and the TSEN key must be written immediately before TASKS_STOP.  Miss
+ * either and the stop is silently ignored.  Safe to call when already stopped.
  */
 static void wdt30_stop(void)
 {
@@ -86,4 +76,24 @@ void tiku_cpu_nordic_watchdog_resume_arch(int kick_on_resume)
 void tiku_cpu_nordic_watchdog_kick_arch(void)
 {
     TIKU_WDT30->RR[0] = TIKU_WDT_RR_RELOAD_KEY;
+}
+
+/*---------------------------------------------------------------------------*/
+/* HANG-DETECTOR RESET                                                       */
+/*---------------------------------------------------------------------------*/
+
+/**
+ * @brief Arch reset for the check-in hang detector (overrides the weak spin).
+ *
+ * tiku_hang.c's fallback spins forever on the theory that a hardware watchdog
+ * still catches it -- but this port stops WDT30 at boot, so a detected hang
+ * becomes an infinite 128 MHz spin at ~5.9 mA with a dead console.
+ *
+ * @note AIRCR.SYSRESETREQ is a warm reset, so the .persistent.warm culprit
+ *       record written just before this call survives into the next boot and
+ *       shows up at /sys/boot/hang.
+ */
+void tiku_hang_arch_reset(void)
+{
+    tiku_nordic_system_reset();   /* does not return */
 }

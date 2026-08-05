@@ -5,17 +5,11 @@
  *
  * Authors: Ambuj Varshney <ambuj@tiku-os.org>
  *
- * tiku_crit.c - Critical execution window implementation
+ * tiku_crit.c - critical execution window implementation.
  *
- * Two flavours: defer-only (no IE masking) and masked
- * (selective IE masking via preserve_mask). End restores whatever
- * begin set up; the mode is recorded so end can short-circuit the
- * unmask path when nothing was masked in the first place.
- *
- * The masked flavour delegates the actual IE-bit save/clear/restore
- * to the platform via hal/tiku_crit_hal.h. Everything in this file
- * is platform-agnostic: held flag, mode, accounting, htimer-based
- * duration measurement, and the post-window timer-process drain.
+ * Two flavours: defer-only, which masks nothing, and masked, which delegates the
+ * IE save/clear/restore to hal/tiku_crit_hal.h.  Everything here is
+ * platform-agnostic: held flag, mode, accounting and the post-window drain.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -54,12 +48,10 @@ static uint8_t             crit_mode;
 /* INTERNAL HELPERS                                                          */
 /*---------------------------------------------------------------------------*/
 
-/**
- * Convert microseconds to htimer ticks at compile-time-known rate.
- *
- * Two-step division avoids 32-bit overflow at 1 MHz htimer × 65 535 us
- * (which would be 6.5e10, larger than 2^32). Requires htimer >= 1 kHz,
- * which is true for every preset in tiku_htimer_config.h.
+/*
+ * Convert microseconds to htimer ticks at a compile-time-known rate.  The
+ * two-step division avoids 32-bit overflow at 1 MHz x 65535 us, and requires
+ * an htimer of at least 1 kHz -- true for every preset.
  */
 static inline tiku_htimer_clock_t
 crit_us_to_ticks(uint16_t us)

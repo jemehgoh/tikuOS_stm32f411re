@@ -7,23 +7,9 @@
  *
  * tiku_ble_smp_pair.h - LE Secure Connections "Just Works" pairing engine.
  *
- * A transport-agnostic state machine that drives the SMP exchange on L2CAP
- * CID 0x0006 to a shared Long Term Key.  It consumes and produces raw SMP
- * PDUs (opcode || payload); the caller wraps them in L2CAP + moves them over
- * its own path (the M33 host mailbox as responder, the RADIO central engine
- * as initiator).  The crypto (P-256 ECDH, AES-CMAC, f4/f5/f6) lives in
- * tiku_ble_smp.{c,h}; this file is only the protocol.
- *
- * Flow (Core Spec Vol 3, Part H, 2.3.5.6 -- LE SC, Just Works / no MITM):
- *   I -> R  Pairing Request                R -> I  Pairing Response
- *   I -> R  Pairing Public Key (PKa)       R -> I  Pairing Public Key (PKb)
- *                                          R -> I  Pairing Confirm (Cb)
- *   I -> R  Pairing Random (Na)            R -> I  Pairing Random (Nb)
- *   I -> R  DHKey Check (Ea)               R -> I  DHKey Check (Eb)
- * Both ends derive (MacKey, LTK) = f5(DHKey, Na, Nb, A, B) and cross-check the
- * DHKey checks with f6; a match on both sides means matching LTKs.
- *
- * One pairing at a time (single connection); all state is static.
+ * A transport-agnostic state machine driving the SMP exchange to a shared LTK.
+ * It handles raw SMP PDUs only; the caller wraps them in L2CAP and moves them.
+ * The crypto lives in tiku_ble_smp.{c,h}.  One pairing at a time, all state static.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -47,7 +33,7 @@ typedef enum {
     TIKU_BLE_SMP_STATE_FAILED            /* aborted / verification mismatch  */
 } tiku_ble_smp_state_t;
 
-/** Largest SMP PDU we emit/consume: Pairing Public Key = 1 + 64 = 65 bytes. */
+/** Largest SMP PDU emitted or consumed: Pairing Public Key = 1 + 64 = 65 bytes. */
 #define TIKU_BLE_SMP_PDU_MAX  65u
 
 /** @brief Clear all pairing state back to IDLE. */
@@ -56,7 +42,7 @@ void tiku_ble_smp_pair_reset(void);
 /**
  * @brief Begin a pairing.  Generates the P-256 keypair + local nonce; the
  *        initiator also stages the first Pairing Request for next().
- * @param role  our role.
+ * @param role  the local role.
  * @param a,at  initiator (central) address A (6 B, little-endian) + type.
  * @param b,bt  responder (peripheral) address B (6 B) + type (1 = random).
  *        Both callers pass A then B (initiator-first), regardless of role.

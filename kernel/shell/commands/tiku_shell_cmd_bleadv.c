@@ -5,50 +5,11 @@
  *
  * Authors: Ambuj Varshney <ambuj@tiku-os.org>
  *
- * tiku_shell_cmd_bleadv.c - BLE beacon/scan shell command (broadcast facade).
+ * tiku_shell_cmd_bleadv.c - BLE beacon and scan command (broadcast facade).
  *
- * Opt-in (TIKU_SHELL_CMD_BLEADV=1 via EXTRA_CFLAGS); needs a broadcast-
- * capable radio (TIKU_HAS_BLE_ADV -- the nRF54L15 on-die RADIO today).
- * Thin veneer over interfaces/bluetooth/tiku_ble_adv.h; the same facade
- * backs the BASIC BLEBEACON/BLESCAN$ words and the /sys/radio VFS nodes,
- * so anything proven here holds for those too.
- *
- *   bleadv <name> [secs]   demo beacon for ~secs (100 ms bursts, auto-stop)
- *   bleadv on <name> [ms]  background beacon (kernel timer; system sleeps
- *                          between bursts) until `bleadv off`
- *   bleadv off             stop the background beacon
- *   bleadv scan [secs] [prefix]
- *                          passive scan; lists addr/rssi/type/name.  With a
- *                          prefix only advertisers whose name starts with it
- *                          are kept (insert-time filter, so ambient traffic
- *                          cannot flood the table -- the TikuBench
- *                          reverse-nonce oracle's knob)
- *   bleadv observe [secs]  BACKGROUND observer: the IRQ+hw-window engine
- *                          scans while the shell stays interactive; live
- *                          results in /sys/radio/scan (cat it, watch it,
- *                          or hang a rule on it).  secs 0/absent = until
- *                          `bleadv observe off`
- *   bleadv ext <name> [secs]
- *                          extended advertising (R8.3a): ADV_EXT_IND +
- *                          hardware-timed AUX_ADV_IND carrying >31-byte
- *                          AdvData; dbg_aux_us proves the AuxPtr timing
- *   bleadv conn [secs]     L3: advertise connectably, accept a central,
- *                          and HOLD the link (empty-PDU keepalive, CSA#1
- *                          hopping, SN/NESN, supervision).  Blocking;
- *                          connect from nRF Connect.  Reports events/held-ms
- *   bleadv connprobe [secs]
- *                          L1/L2: connectable ADV_IND, hardware-T_IFS
- *                          SCAN_RSP to scanners, and capture+decode a
- *                          central's CONNECT_IND LLData
- *   bleadv csa1            L3 self-test: CSA#1 hops vs an independent ref
- *   bleadv ackfsm          L3 self-test: SN/NESN ack window incl. resend
- *   bleadv phy             probe all four BLE PHYs (1M/2M/S8/S2) with one
- *                          3-channel burst each; prints TX-window iteration
- *                          counts + ratios vs 1M.  ON-DIE proof only:
- *                          legacy adv is 1M-only by spec, so 2M/coded
- *                          bursts are inaudible to compliant scanners
- *                          (kintsugi/radio.md R8.1)
- *   bleadv dbg             silicon + clock + radio readbacks (bring-up)
+ * A thin veneer over the broadcast facade, which also backs the BASIC words and
+ * the /sys/radio nodes, so anything proven here holds for those.  Opt-in, and
+ * needs a broadcast-capable radio.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -405,10 +366,10 @@ static void bleadv_ext(const char *name, unsigned secs)
                  bursts, rc, aux_last);
 }
 
-/* L1 bring-up: connectable advertising until a central sends us a
+/* L1 bring-up: connectable advertising until a central sends a
  * CONNECT_IND, then decode its LLData -- the first packet of the
  * link-layer ladder, captured off the air from a real central
- * (`bluetoothctl connect <addr>` on the host).  We do not accept the
+ * (`bluetoothctl connect <addr>` on the host).  This does not accept the
  * connection yet; the central will retry and time out. */
 static void bleadv_connprobe(unsigned secs)
 {
@@ -517,7 +478,7 @@ static void bleadv_csa1(void)
 
 /* L3 two-board harness: this board is the CENTRAL -- scan for TIKU-CONN,
  * connect, drive the link.  Run `bleadv conn` on the peer (peripheral).
- * We impose lenient params so the link establishes while timing is tuned;
+ * Lenient params, so the link establishes while timing is tuned;
  * reports events, peripheral responses heard, and the measured peripheral
  * T_IFS (the ground truth the phone could never give). */
 static void bleadv_central(unsigned secs, uint8_t updates)
@@ -1072,7 +1033,7 @@ static void bleadv_flprnus(uint8_t req_cpu)
                (tiku_clock_time_t)(TIKU_CLOCK_SECOND * 15u)) {
             /* Pump: L2CAP fragment in -> recombine + ATT/GATT on the M33 ->
              * response fragmented out.  A (possibly multi-fragment) NUS RX
-             * write surfaces bytes we echo back as a notification. */
+             * write surfaces bytes echoed back as a notification. */
             uint8_t llid_in;
             int n;
             uint32_t dm = tiku_flpr_arch_dle_max();   /* F1: DLE negotiated?  */
@@ -1243,7 +1204,7 @@ static void bleadv_flprpair(uint8_t bond_mode)
     advlen = tiku_radio_arch_adv_build(adv, addr, ad, adlen);
     adv[0] = 0x40u;                               /* ADV_IND, random TxAdd    */
 
-    {   /* Print our AdvA so a peer can connect scan-BY-ADDRESS to it. */
+    {   /* Print the AdvA so a peer can connect scan-BY-ADDRESS to it. */
         char astr[18];
         bleadv_fmt_addr(astr, addr);
         SHELL_PRINTF("FLPR SMP pair: advertising 'TIKU-PAIR' as %s -- run "
@@ -1297,10 +1258,10 @@ static void bleadv_flprpair(uint8_t bond_mode)
                 tiku_ble_host_rx(frame, (uint16_t)n, llid_in);
                 bleadv_flpr_drain_tx();            /* send the SMP response(s) */
             }
-            /* On DONE, mark success but KEEP serving: our final DHKey Check
+            /* On DONE, mark success but KEEP serving: the final DHKey Check
              * must still go over the air, and a central that lost it will
-             * re-request (dup Ea -> engine re-emits Eb).  We exit when the
-             * central tears the link down, not the instant we finish. */
+             * re-request (dup Ea -> engine re-emits Eb).  It exits when the
+             * central tears the link down, not the instant pairing ends. */
             if (tiku_ble_host_smp_state() >= 2 && !paired) {
                 paired = 1;
                 (void)tiku_ble_host_smp_ltk(ltk);
@@ -1312,7 +1273,7 @@ static void bleadv_flprpair(uint8_t bond_mode)
                 bond_saved = 1;
             }
             /* Phase E3: once paired, derive the session key when the central
-             * starts LL encryption (the FLPR forwards SKDm/IVm to us). */
+             * starts LL encryption (the FLPR forwards SKDm/IVm here). */
             if (paired && !enc_done && tiku_flpr_arch_enc_service(ltk)) {
                 enc_done = 1;
                 tiku_flpr_arch_enc_sk(sk);
@@ -1328,7 +1289,7 @@ static void bleadv_flprpair(uint8_t bond_mode)
                         TIKU_BLE_ENC_DEMO_PT;
                     uint8_t nonce[13], aad = TIKU_BLE_ENC_DEMO_AAD;
                     uint8_t pt[TIKU_BLE_ENC_DEMO_PT_LEN];
-                    tiku_ble_enc_nonce(nonce, 0u, 1u, iv);   /* central->us    */
+                    tiku_ble_enc_nonce(nonce, 0u, 1u, iv);   /* central->local */
                     /* Decrypt + MIC-verify on CCM00 (the RADIO-companion
                      * hardware engine) -- the same over-the-air ciphertext
                      * the software path proved, now through CCM00 end to
@@ -1506,9 +1467,9 @@ void tiku_shell_cmd_bleadv(uint8_t argc, const char *argv[])
             uint8_t rx_sn, rx_nesn, newd, ackd, sn, nesn;
         } seq[4] = {
             { 0, 0, 1, 0, 0, 1 },   /* first packet: new, no ack yet     */
-            { 1, 1, 1, 1, 1, 0 },   /* acks us + new data                */
+            { 1, 1, 1, 1, 1, 0 },   /* peer acks + sends new data        */
             { 1, 1, 0, 0, 1, 0 },   /* peer RE-SENDS: not new, not acked */
-            { 0, 0, 1, 1, 0, 1 },   /* acks us + new data                */
+            { 0, 0, 1, 1, 0, 1 },   /* peer acks + sends new data again  */
         };
         tiku_radio_ll_ack_t a = { 0u, 0u };
         int i, fails = 0;

@@ -5,12 +5,11 @@
  *
  * Authors: Ambuj Varshney <ambuj@tiku-os.org>
  *
- * tiku_i2c_arch.c - I2C master driver for MSP430 eUSCI_B0
+ * tiku_i2c_arch.c - I2C master driver for MSP430 eUSCI_B0.
  *
- * Implements blocking I2C master transactions on the eUSCI_B0 peripheral.
- * Pin routing and clock prescaler values come from the board header via
- * TIKU_BOARD_I2C_* macros. All busy-wait loops are guarded by a timeout
- * counter to prevent infinite hangs on bus errors.
+ * Blocking master transactions, with pin routing and clock prescaler taken from
+ * the board header's TIKU_BOARD_I2C_* macros.  Every busy-wait is bounded by a
+ * timeout so a stuck bus cannot hang the caller.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -90,10 +89,8 @@ i2c_wait_stop(void)
 /**
  * @brief Initialize eUSCI_B0 for I2C master operation.
  *
- * Clock source is SMCLK. The prescaler is selected from board macros
- * based on the requested speed mode:
- *   - Standard mode (100 kHz): TIKU_BOARD_I2C_BRW_100K
- *   - Fast mode (400 kHz):     TIKU_BOARD_I2C_BRW_400K
+ * Clocked from SMCLK, with the prescaler taken from the board's macro for the
+ * requested speed mode -- standard 100 kHz or fast 400 kHz.
  */
 int
 tiku_i2c_arch_init(const tiku_i2c_config_t *config)
@@ -247,11 +244,9 @@ tiku_i2c_arch_read(uint8_t addr, uint8_t *buf, uint16_t len)
 /**
  * @brief Probe a slave address (presence check, no data transferred).
  *
- * Sequence: START → addr+W → sample ACK → STOP.  The address phase
- * completes with UCTXIFG0 when the slave ACKs; if nobody answers,
- * i2c_wait_flag() observes UCNACKIFG, issues STOP and returns
- * TIKU_I2C_ERR_NACK.  No data byte is loaded, so this is a true
- * zero-byte bus-scan probe (the eUSCI_B supports it natively).
+ * START, address with write bit, sample the ACK, STOP.  No data byte is loaded,
+ * so this is a true zero-byte bus-scan probe, which the eUSCI_B supports
+ * natively; a NACK issues STOP and reports ERR_NACK.
  */
 int
 tiku_i2c_arch_probe(uint8_t addr)

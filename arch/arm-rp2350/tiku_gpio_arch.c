@@ -5,12 +5,11 @@
  *
  * Authors: Ambuj Varshney <ambuj@tiku-os.org>
  *
- * tiku_gpio_arch.c - RP2350 GPIO driver
+ * tiku_gpio_arch.c - RP2350 GPIO driver.
  *
- * Maps the (port, pin) tuple onto a flat GP index (0..31) and drives
- * SIO + IO_BANK0 + PADS_BANK0 directly. We do not touch pins above
- * GP29 — the QSPI bank is excluded so a `gpio 4 7` shell command can't
- * accidentally short the flash chip.
+ * Maps a (port, pin) tuple onto a flat GP index and drives SIO, IO_BANK0 and
+ * PADS_BANK0 directly.  Pins above GP29 are excluded so a stray shell command
+ * cannot reach the QSPI bank and short the flash chip.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -50,10 +49,9 @@ static inline int8_t gp_index(uint8_t port, uint8_t pin) {
 /**
  * @brief Initialise a GP pin as a push-pull SIO output, driven low.
  *
- * Configures PADS_BANK0 (4 mA, input-enable kept on so SIO_GPIO_IN
- * reflects the driven level), routes IO_BANK0 to SIO, clears the
- * output latch, then enables the output-enable bit via the SIO
- * dedicated SET register.  Silently ignores pins above MAX_GP_PIN.
+ * Configures PADS_BANK0 at 4 mA with input-enable kept on so SIO_GPIO_IN
+ * reflects the driven level, routes IO_BANK0 to SIO, clears the output latch,
+ * then enables output via the SIO SET register.  Pins above MAX_GP_PIN ignored.
  *
  * @param pin  GP pin number (0..MAX_GP_PIN).
  */

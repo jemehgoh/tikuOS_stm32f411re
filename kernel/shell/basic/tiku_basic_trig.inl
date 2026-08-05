@@ -5,18 +5,11 @@
  *
  * Authors: Ambuj Varshney <ambuj@tiku-os.org>
  *
- * tiku_basic_trig.inl - SIN / COS via 65-entry quarter-circle LUT.
+ * tiku_basic_trig.inl - SIN and COS via a 65-entry quarter-circle LUT.
  *
- * NOT a standalone translation unit.  Included from tiku_basic.c.
- *
- * Inputs and outputs are Q.3 fixed point (radians x 1000, sin
- * output x 1000).  Reduces the argument modulo 2*pi, maps it to
- * [0, pi/2] via reflection, then linearly interpolates between LUT
- * samples.  Max error ~5e-4, well inside Q.3 precision.  ~130 bytes
- * of rodata.
- *
- * TAN is implemented as SIN/COS at the call site in expr_call() so
- * we don't need a separate tan() helper here.
+ * Q.3 fixed point in and out: reduce modulo 2*pi, reflect into the first quadrant,
+ * then interpolate between samples.  Max error ~5e-4, inside Q.3 precision, for
+ * about 130 bytes of rodata.  TAN is SIN/COS at the call site.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -50,10 +43,9 @@ static const int16_t basic_sin_lut[65] = {
 /**
  * @brief Compute sin(x) in Q.3 fixed point.
  *
- * Reduces the argument modulo 2*pi, maps it to [0, pi/2] via the
- * usual sign / reflection identities, then linearly interpolates
- * between two adjacent LUT samples.  Negative arguments work
- * naturally: SIN(-PI/2) = -1000.
+ * Reduces the argument modulo 2*pi, maps it to [0, pi/2] via the usual sign and
+ * reflection identities, then linearly interpolates between two adjacent LUT
+ * samples.  Negative arguments work naturally: SIN(-PI/2) = -1000.
  *
  * @param angle_q3  Angle in radians, scaled by 1000.
  * @return          sin(angle) x 1000 (range -1000..+1000).

@@ -5,12 +5,10 @@
  *
  * Authors: Ambuj Varshney <ambuj@tiku-os.org>
  *
- * tiku_lcd_arch.h - MSP430 LCD_C peripheral arch interface
+ * tiku_lcd_arch.h - MSP430 LCD_C peripheral arch interface.
  *
- * Implemented in tiku_lcd_arch.c. Compiled only when the active
- * device declares TIKU_DEVICE_HAS_LCD_C and the active board
- * declares TIKU_BOARD_HAS_LCD; on parts/boards without an LCD
- * the arch unit is omitted from the build entirely.
+ * Implemented in tiku_lcd_arch.c, compiled only when the device declares LCD_C
+ * and the board declares a panel; otherwise the unit leaves the build entirely.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -34,10 +32,9 @@ void tiku_lcd_arch_clear(void);
 /**
  * @brief Render one ASCII character at a position.
  *
- * Caller has already validated that pos < TIKU_BOARD_LCD_NUM_CHARS.
- * Bits reserved for icons in byte1 (per
- * TIKU_BOARD_LCD_DIGIT_BYTE1_PRESERVE_MASK) are preserved across
- * the write so a digit overwrite does not clobber lit icons.
+ * The caller has already bounds-checked the position.  Bits reserved for icons
+ * are preserved across the write, so overwriting a digit does not clobber a lit
+ * icon.
  */
 void tiku_lcd_arch_putchar(uint8_t pos, char ch);
 
