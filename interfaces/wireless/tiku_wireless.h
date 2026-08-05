@@ -5,27 +5,11 @@
  *
  * Authors: Ambuj Varshney <ambuj@tiku-os.org>
  *
- * tiku_wireless.h - Board-independent wireless-interface API
+ * tiku_wireless.h - board-independent wireless-interface API.
  *
- * Mirrors the pattern set by interfaces/led/ and interfaces/adc/:
- * the kernel declares the API + types here; one driver (today the
- * CYW43439 at drivers/wifi/cyw43/) supplies the implementation.
- * Application code, shell commands, and future network stacks call
- * `tiku_wireless_*` instead of any driver-specific name, so adding a
- * second wireless driver (e.g. ESP32 over UART, Nordic over SPI)
- * doesn't require rewriting consumers.
- *
- * The API is intentionally small. A single-radio system at a time
- * is assumed; if/when TikuOS gains concurrent radios, a per-radio
- * handle becomes the first argument and this file evolves
- * compatibly.
- *
- * Events posted by the implementation via
- * tiku_process_post(TIKU_PROCESS_BROADCAST, ev, data):
- *   TIKU_WIRELESS_EVT_SCAN_COMPLETE  (uintptr_t) ap_count
- *   TIKU_WIRELESS_EVT_AP_FOUND       (tiku_wireless_ap_t *) discovered AP
- *   TIKU_WIRELESS_EVT_LINK_UP        (uintptr_t) reason code (future)
- *   TIKU_WIRELESS_EVT_LINK_DOWN      (uintptr_t) reason code (future)
+ * The kernel declares the API and types here and one driver supplies them, so
+ * consumers call tiku_wireless_* rather than a driver name.  A single radio is
+ * assumed; concurrent radios would add a per-radio handle as the first argument.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -120,12 +104,9 @@ typedef struct {
 /**
  * @brief Trigger an active scan (non-blocking).
  *
- * Returns TIKU_DRV_OK if the scan was queued; TIKU_DRV_ERR_INVALID
- * if the radio isn't up yet; TIKU_DRV_ERR_TIMEOUT if a scan is
- * already in flight or the runner's event queue is full.
- *
- * Subscribers receive AP_FOUND events as each unique AP is
- * discovered and one SCAN_COMPLETE event when the scan ends.
+ * Subscribers get an AP_FOUND event per unique access point and one
+ * SCAN_COMPLETE when it ends.  Fails if the radio is not up, or if a scan is
+ * already in flight or the runner's queue is full.
  */
 int tiku_wireless_scan_start(void);
 
@@ -185,16 +166,11 @@ int tiku_wireless_connect_auth(const char *ssid, const char *psk,
 int tiku_wireless_disconnect(void);
 
 /**
- * @brief Forget the persistent WPA credentials cached after the
- *        last successful join. After this call:
+ * @brief Forget the persistent WPA credentials cached after the last join.
  *
- *          - the current association (if any) is torn down
- *          - the FRAM-backed SSID/PSK record is cleared
- *          - cold-boot rejoin will NOT trigger on the next reboot
- *
- * Useful for "factory reset" flows or before handing a device to
- * someone else. Idempotent — calling on a device with no stored
- * credentials is a no-op.
+ * Tears down any current association, clears the stored SSID and PSK, and stops
+ * cold-boot rejoin on the next reboot.  Idempotent, so it is safe on a device
+ * that has none.
  *
  * @return TIKU_DRV_OK on success.
  */

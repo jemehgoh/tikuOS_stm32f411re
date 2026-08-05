@@ -5,24 +5,11 @@
  *
  * Authors: Ambuj Varshney <ambuj@tiku-os.org>
  *
- * tiku_mpu_arch.c - nRF54L NVM write-gate + MPU HAL
+ * tiku_mpu_arch.c - nRF54L NVM write-gate and MPU HAL.
  *
- * The nRF54L stores code and persistent data in RRAM, which is byte-writable
- * in place behind the RRAMC controller's CONFIG.WEN write-enable gate -- the
- * exact same "NVM behind a gate" model as MSP430 FRAM.  The kernel's
- * tiku_mpu_arch_unlock_nvm()/lock_nvm() pair therefore maps to WEN=1/restore,
- * and every persistent write (persist cells, boot counter, hang record, the
- * mem NVM writer) brackets itself in that window.
- *
- * The MSP430-modelled segment-access-mask (SAM) entry points are a SOFTWARE
- * SHADOW, the same bookkeeping model the rp2350 and ambiq ports use: the SAM
- * word and MPUCTL0 password-write sequence are tracked so the portable MPU
- * semantics tests exercise one state machine on every port, while the real
- * enforcement on this part is the WEN gate (a store through the closed gate
- * is a precise bus fault -- fault-not-flag, so the violation-flag queries
- * honestly return 0).  unlock/lock are nest-safe the same way as ambiq: the
- * saved SAM's write bits say whether an outer window is still open, and the
- * WEN restore follows them.
+ * Enforcement here is the RRAMC WEN gate, which unlock_nvm()/lock_nvm() map onto;
+ * a store through a closed gate is a precise bus fault.  The MSP430-style segment
+ * mask is a software shadow so the portable MPU tests run one state machine.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -71,11 +58,12 @@ static void rramc_wen_set(uint32_t open)
 /**
  * @brief Open an NVM write window: SAM bookkeeping + the real WEN flip.
  *
- * ORs the write bits into the SAM shadow (MSP430-path parity) and enables
- * RRAM writes.  Returns the prior SAM word; passing it to lock_nvm()
- * restores both the shadow and the gate, nest-safely (an inner lock inside
- * a still-open outer window sees write bits in the saved SAM and keeps the
- * gate open).
+ * ORs the write bits into the SAM shadow for MSP430-path parity and enables
+ * RRAM writes.  Returns the prior SAM word; passing it to lock_nvm() restores
+ * both the shadow and the gate, nest-safely.
+ *
+ * @note An inner lock inside a still-open outer window sees write bits in the
+ *       saved SAM and keeps the gate open.
  */
 uint16_t tiku_mpu_arch_unlock_nvm(void)
 {
@@ -309,10 +297,9 @@ uint32_t tiku_stack_arch_bottom(void)
 /**
  * @brief No RAM execution window on this port -- the module runs XIP from NVM.
  *
- * Kept as an explicit no-op rather than omitted so the portable call site needs
- * no #ifdef, and so a future port that DOES gain a window has an obvious place
- * to implement it.  See kernel/shell/basic/tiku_basic_module.h for why every
- * part except apollo510 executes in place.
+ * An explicit no-op rather than an omission, so the portable call site needs no
+ * #ifdef and a future port that DOES gain a window has an obvious place to
+ * implement it.  See tiku_basic_module.h for why only apollo510 differs.
  */
 void tiku_mpu_arch_module_window_exec(int enable)
 {

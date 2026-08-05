@@ -5,29 +5,11 @@
  *
  * Authors: Ambuj Varshney <ambuj@tiku-os.org>
  *
- * tiku_shell_cmd_axonsprobe.c - Axon NPU (nRF54LM20B) bring-up probe.
+ * tiku_shell_cmd_axonsprobe.c - Axon NPU bring-up probe.
  *
- * The nRF54LM20B carries the Axon NPU as peripheral NRF_AXONS @ 0x50056000
- * (IRQn 86, MCU power domain).  The PUBLIC register model is only a power
- * wrapper -- ENABLE.EN @ +0x400 and STATUS.READY @ +0x404 ("AXONS is
- * accessible") -- with the first 1 KB reserved and no nrfx HAL, no SVD block
- * and no documentation for the engine itself (the programming model lives in
- * Nordic's Neuton toolchain).  This probe is the on-die recon tool for that
- * unknown, the same role cryptoprobe played for CRACEN:
- *
- *   axonsprobe            ENABLE/STATUS + FICR identity
- *   axonsprobe en         enable, spin READY (bounded), report time-to-ready
- *   axonsprobe off        disable
- *   axonsprobe dump [o n] hex-dump n words of the 4 KB slot from offset o
- *                         (prints each address BEFORE reading: a bus fault
- *                         parks the core and the last line marks the edge)
- *   axonsprobe diff       snapshot the reserved window, enable, wait, then
- *                         print every word that CHANGED (finds live registers
- *                         without a single write)
- *   axonsprobe irq        NVIC-enable IRQ 86 + count what fires on enable
- *
- * READ-ONLY by design: no blind writes into an undocumented engine.  Findings
- * gate the Axon support plan's next phases.
+ * The public register model is only a power wrapper, with no HAL, SVD block or
+ * documentation for the engine itself, so this is on-die recon: enable, dump and
+ * diff the reserved window.  READ-ONLY by design -- no blind writes.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -37,6 +19,7 @@
 #if TIKU_SHELL_CMD_AXONSPROBE
 
 #include <kernel/shell/tiku_shell_io.h>
+#include <kernel/cpu/tiku_hang.h>   /* check-in during hold/busy loops */
 #include <arch/nordic/tiku_device_select.h>
 #include <arch/nordic/tiku_cpu_common.h>
 #include <string.h>
@@ -209,7 +192,7 @@ static void axons_diff(void)
  */
 #if defined(TIKU_AXON_MODEL_FROM_STORE) && TIKU_AXON_MODEL_FROM_STORE
 /* NO MODEL TRANSLATION UNIT IS COMPILED in this configuration, so the four
- * globals it used to define live here instead -- same names, same types, same
+ * globals it would otherwise define live here -- same names, same types, same
  * (non-static) linkage.  Nordic's inference sources are untouched and cannot
  * tell the difference; they were already written against these as externs.
  *
@@ -262,15 +245,12 @@ static uint8_t axons_store_pout[AXONS_STORE_POUT_MAX]
  * @brief Publish the firmware addresses a packed model's table may name.
  *
  * Registered as &thing, never as a number: a relocation against a code symbol
- * resolves Thumb-tagged, and taking the address in C is what supplies that bit
- * (see tiku_model.h).  A hand-written constant would be one short, and the
- * symptom is a single corrupt word in the command stream.
+ * resolves Thumb-tagged, and taking the address in C supplies that bit.  A
+ * hand-written constant would be one short -- a single corrupt command word.
  *
- * @packed_out is registered here rather than resolved by the loader because it
- * is neither in the file nor a fixed firmware address -- it is a buffer this
- * caller lends the model.  The loader owns the names for the model's own parts
- * and lets everything else fall through to the registry, which is exactly the
- * seam that makes that possible.
+ * @note @packed_out is registered here rather than resolved by the loader
+ *       because it is neither in the file nor a fixed firmware address -- it is
+ *       a buffer this caller lends the model.
  */
 static int axons_store_register_syms(void)
 {
@@ -399,16 +379,13 @@ static int axons_kat_load(tiku_tfs_t *fs, const char *name,
 /**
  * @brief Compare the descriptor built from the store against the linked one.
  *
- * Only possible in a baked build, and that is the point: this is the on-device
- * counterpart of the packer's host-side reconstruction gate.  The packer proves
- * the FILE reproduces the linker's bytes; this proves the DEVICE does, using
- * the same model, at the addresses it will actually run at.
+ * The on-device counterpart of the packer's host-side reconstruction gate: the
+ * packer proves the FILE reproduces the linker's bytes, this proves the DEVICE
+ * does, using the same model at the addresses it will actually run at.
  *
- * The pointer fields are expected to differ -- they are the whole reason the
- * model was relocated -- so they are reported rather than failed.  Everything
- * else is a scalar the store must reproduce exactly, and a mismatch there means
- * the packed descriptor does not describe the same model.
- *
+ * @note The pointer fields are expected to differ -- that is what relocation is
+ *       for -- so they are reported rather than failed.  Everything else is a
+ *       scalar the store must reproduce exactly.
  * @return the number of differing scalar fields (0 is the pass).
  */
 static unsigned axons_store_desc_check(const nrf_axon_nn_compiled_model_s *got,
@@ -650,6 +627,12 @@ void tiku_shell_cmd_axonsprobe(uint8_t argc, const char *argv[])
         return;
     }
     if (argc >= 2 && strcmp(argv[1], "off") == 0) {
+#if defined(TIKU_AXON_ENABLE) && TIKU_AXON_ENABLE
+        /* Close the driver session first: writing ENABLE=0 while the platform
+         * refcount is still non-zero leaves the two views disagreeing, and the
+         * refcount is the one that wins the moment anything reserves again. */
+        nrf_axon_platform_close();
+#endif
         AXONS_ENABLE = 0u;
         SHELL_PRINTF("disabled (ENABLE=%x STATUS=%x)\n",
                      (unsigned)AXONS_ENABLE, (unsigned)AXONS_STATUS);
@@ -688,7 +671,9 @@ void tiku_shell_cmd_axonsprobe(uint8_t argc, const char *argv[])
         if (!axon_inited && argc >= 2 &&
             (strcmp(argv[1], "hw") == 0 ||
              strcmp(argv[1], "acc") == 0 ||
-             strcmp(argv[1], "fir") == 0)) {
+             strcmp(argv[1], "fir") == 0 ||
+             strcmp(argv[1], "hold") == 0 ||
+             strcmp(argv[1], "busy") == 0)) {
             nrf_axon_result_e rc = nrf_axon_platform_init();
             SHELL_PRINTF("nrf_axon_platform_init -> %d\n", (int)rc);
             if (rc != NRF_AXON_RESULT_SUCCESS) {
@@ -735,6 +720,87 @@ void tiku_shell_cmd_axonsprobe(uint8_t argc, const char *argv[])
                      (rc == NRF_AXON_RESULT_SUCCESS && hw_out == sw_out)
                          ? "MATCH" : "MISMATCH",
                      (unsigned)(t1 - t0));
+        return;
+    }
+    if (argc >= 2 && (strcmp(argv[1], "busy") == 0 ||
+                      strcmp(argv[1], "hold") == 0) && argc >= 3) {
+        /*
+         * SUSTAINED STATES FOR A CONTROLLED POWER MEASUREMENT.
+         *
+         * A single inference is ~200 ms and a single intrinsic ~50 us, so
+         * neither can be averaged by an external instrument without a marker
+         * channel to bound the window.  These two hold the NPU in a KNOWN
+         * state for a caller-chosen duration instead, so a plain average over
+         * the window is the figure:
+         *
+         *   hold <ms>  block powered and reserved, doing NOTHING  (static)
+         *   busy <ms>  the same, issuing MAC ops back to back     (dynamic)
+         *
+         * The pair is what makes the measurement controlled: subtracting them
+         * isolates the NPU's dynamic cost from its static cost, and
+         * subtracting `hold` from a run with the block DISABLED isolates what
+         * merely powering it costs.  Every difference is immune to any fixed
+         * offset on the supply rail, which matters because ~380 uA of what the
+         * rail shows is not the SoC's at all.
+         */
+        enum { DOT_LEN = 512 };
+        static int32_t bx[DOT_LEN] __attribute__((aligned(4)));
+        static int32_t by[DOT_LEN] __attribute__((aligned(4)));
+        int busy = (strcmp(argv[1], "busy") == 0);
+        uint32_t ms = 0u, t0, i, ops = 0u;
+        const char *p = argv[2];
+
+        while (*p >= '0' && *p <= '9') { ms = ms * 10u + (uint32_t)(*p++ - '0'); }
+        if (ms == 0u) {
+            SHELL_PRINTF("Usage: axonsprobe %s <ms>\n", argv[1]);
+            return;
+        }
+        for (i = 0u; i < DOT_LEN; i++) {
+            bx[i] = (int32_t)(((i * 2654435761u) >> 20) & 0x7Fu) - 64;
+            by[i] = (int32_t)(((i * 40503u) >> 6) & 0x7Fu) - 64;
+        }
+        if (!nrf_axon_platform_reserve_for_user()) {
+            SHELL_PRINTF("reserve failed\n");
+            return;
+        }
+        SHELL_PRINTF("%s %lu ms: ENABLE=%x -- starting\n", argv[1],
+                     (unsigned long)ms, (unsigned)AXONS_ENABLE);
+        t0 = NRF_GRTC_S->SYSCOUNTER[0].SYSCOUNTERL;
+        do {
+            if (busy) {
+                int32_t out = 0;
+                /* keep_reservation = FALSE.  The outer reserve_for_user()
+                 * above already holds the block powered for the whole loop, so
+                 * a per-op release never drops the refcount to zero and the
+                 * engine does not power-cycle between ops.  Passing TRUE leaks
+                 * one reference PER OP instead: measured, that left the block
+                 * still drawing 2367 uA after the loop against an 834 uA
+                 * baseline, and the experiment's own drift check caught it. */
+                (void)axon_mar_24_24_32(bx, by, &out, DOT_LEN, 0u,
+                                        NRF_AXON_SYNC_MODE_BLOCKING_POLLING,
+                                        false);
+                ops++;
+            } else {
+                /* Powered and reserved, core asleep: the block's STATIC cost
+                 * with nothing issued to it. */
+                __asm__ volatile ("wfi" ::: "memory");
+            }
+            /* Both arms block this process deliberately for the whole window.
+             * Check in so the detector does not read a legitimate long block as
+             * a wedge -- unhandled, that is an 8 s cliff (see the note on
+             * tiku_hang_arch_reset in tiku_cpu_watchdog_arch.c). */
+            tiku_hang_checkin();
+        } while ((uint32_t)(NRF_GRTC_S->SYSCOUNTER[0].SYSCOUNTERL - t0)
+                 < ms * 1000u);
+        nrf_axon_platform_free_reservation_from_user();
+        /* Then FORCE the session closed.  A measurement state is only useful
+         * if it can be left, and "balanced" is not the same as "off": any
+         * stray reservation anywhere keeps the engine powered and silently
+         * contaminates the next reading.  close() zeroes the refcount and
+         * disables the hardware, so the baseline is genuinely restorable. */
+        nrf_axon_platform_close();
+        SHELL_PRINTF("%s done: %lu ops, ENABLE=%x\n", argv[1],
+                     (unsigned long)ops, (unsigned)AXONS_ENABLE);
         return;
     }
     if (argc >= 2 && strcmp(argv[1], "fir") == 0) {

@@ -5,29 +5,11 @@
  *
  * Authors: Ambuj Varshney <ambuj@tiku-os.org>
  *
- * tiku_board_fr5994_launchpad.h - MSP430FR5994 LaunchPad board definitions
+ * tiku_board_fr5994_launchpad.h - MSP430FR5994 LaunchPad board definitions.
  *
- * This header defines the PCB-level GPIO pin assignments for the
- * MSP430FR5994 LaunchPad development board: LEDs, buttons, UART
- * back-channel routing, BoosterPack I2C / SPI / ADC / 1-Wire mappings,
- * and the bit-bang test pin used by tiku_bitbang demos.
- *
- * Board layout (per TI MSP-EXP430FR5994 schematic):
- *   - LED1 (Red)   -> P1.0
- *   - LED2 (Green) -> P1.1
- *   - Button S1    -> P5.6 (Active low)
- *   - Button S2    -> P5.5 (Active low)
- *   - UART back-channel: P2.0 = TXD, P2.1 = RXD (eUSCI_A0)
- *
- * Notes vs the FR5969 LaunchPad:
- *   - LEDs swapped to P1.0 / P1.1 (FR5969 has them on P4.6 / P1.0)
- *     so ADC channels A0 / A1 are NOT usable on the FR5994 board
- *     because the same pins drive the LEDs.
- *   - Buttons moved to P5.5 / P5.6.
- *   - Otherwise the BoosterPack pin standard matches: I2C on P1.6/P1.7,
- *     SPI on P2.5/P2.6/P2.7, OneWire on P1.2, bit-bang on P1.4.
- *   - 256 KB FRAM with HIFRAM at 0x10000+ — kernel + shell + every
- *     TikuKits library fits in `MEMORY_MODEL=large`.
+ * PCB-level assignments for the MSP-EXP430FR5994: LEDs, buttons, the UART
+ * back-channel, the BoosterPack I2C/SPI/ADC/1-Wire mappings and the bit-bang test
+ * pin, per the TI schematic.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -84,13 +66,10 @@
         P2SEL0 &= (uint8_t)~(BIT0 | BIT1);                                     \
     } while(0)
 
-/** UART baud-rate selection from 8 MHz SMCLK (oversampling).
- *  Values from TI SLAU367 Table 30-5 for eUSCI_A @ 8 MHz.
- *
- *  Override at compile time:
- *    make MCU=msp430fr5994 UART_BAUD=115200
- *
- *  Supported: 9600 (default), 19200, 38400, 57600, 115200.
+/*
+ * UART baud-rate selection from an 8 MHz SMCLK, oversampled; values from TI
+ * SLAU367 Table 30-5.  9600 by default, with 19200, 38400, 57600 and 115200
+ * selectable at build time through UART_BAUD.
  */
 #define TIKU_BOARD_UART_CLK_SEL     UCSSEL__SMCLK
 
@@ -145,12 +124,11 @@
 /* I2C on eUSCI_B0: P1.6 = SDA, P1.7 = SCL                                   */
 /*---------------------------------------------------------------------------*/
 
-/** Configure P1.6 and P1.7 for eUSCI_B0 I2C function.
- *  On FR5994 the PxSEL -> peripheral mapping is per-pin (see datasheet
- *  SLASE54 pinmux table); for P1.6/P1.7 the eUSCI_B0 I2C is the
- *  SECONDARY function (PSEL = 10: SEL1=1, SEL0=0).  The primary
- *  (PSEL=01) on these pins is TA0.1/TA1.0 -- choosing it would
- *  silently route SDA/SCL into a timer module. */
+/*
+ * Configure P1.6 and P1.7 for eUSCI_B0 I2C.  The mapping is per-pin on this
+ * part, and I2C is the SECONDARY function here -- the primary is a timer, so
+ * choosing it would silently route SDA and SCL into TA0/TA1.
+ */
 #define TIKU_BOARD_I2C_PINS_INIT() \
     do { P1SEL1 |= BIT6 | BIT7; P1SEL0 &= ~(BIT6 | BIT7); } while(0)
 
@@ -181,11 +159,11 @@
 
 #define TIKU_BOARD_SPI_MODULE       1
 
-/** Configure P5.0/P5.1/P5.2 for eUSCI_B1 SPI function.
- *  UCB1SIMO/UCB1SOMI/UCB1CLK are the PRIMARY function on these pins
- *  (PxSEL = 01: SEL0=1, SEL1=0). The secondary function (PxSEL=10)
- *  is Timer B0 capture/output -- selecting that instead silently
- *  routes SPI traffic into TB0 registers and the bus never clocks. */
+/*
+ * Configure P5.0/P5.1/P5.2 for eUSCI_B1 SPI, which is the PRIMARY function on
+ * these pins.  The secondary is Timer B0 capture/output, and selecting it
+ * instead routes SPI traffic into TB0 registers so the bus never clocks.
+ */
 #define TIKU_BOARD_SPI_PINS_INIT() \
     do { P5SEL0 |=  (BIT0 | BIT1 | BIT2); \
          P5SEL1 &= ~(BIT0 | BIT1 | BIT2); } while(0)
@@ -206,14 +184,10 @@
 /* ADC12_B                                                                   */
 /*---------------------------------------------------------------------------*/
 
-/**
- * ADC12_B is available on the FR5994 LaunchPad.
- * External channels A2-A5 (P1.2-P1.5) and A8-A15 (P4.0-P4.3, P3.0-P3.3)
- * are accessible on the BoosterPack headers.
- *
- * Note: A0 (P1.0) AND A1 (P1.1) are unavailable because they drive the
- * on-board LEDs. Internal channels: ch30 = temperature sensor,
- * ch31 = battery monitor.
+/*
+ * ADC12_B is available.  External channels A2-A5 and A8-A15 reach the
+ * BoosterPack headers; A0 and A1 are unavailable because they drive the
+ * on-board LEDs.  Channel 30 is temperature and 31 the battery monitor.
  */
 #define TIKU_BOARD_ADC_AVAILABLE    1
 
@@ -221,12 +195,9 @@
 /* 1-Wire on P1.2 (BoosterPack J1 pin 4)                                    */
 /*---------------------------------------------------------------------------*/
 
-/**
- * 1-Wire (Dallas/Maxim) bit-banged on P1.2.
- * Requires an external 4.7 kohm pull-up resistor from P1.2 to 3.3V.
- *
- * Note: P1.2 is also ADC channel A2. If using both 1-Wire and ADC,
- * choose a different pin for one of them.
+/*
+ * 1-Wire bit-banged on P1.2, which needs an external 4.7 kohm pull-up to 3V3.
+ * P1.2 is also ADC channel A2, so a design using both must move one of them.
  */
 #define TIKU_BOARD_OW_AVAILABLE     1
 #define TIKU_BOARD_OW_DIR           P1DIR
@@ -240,15 +211,10 @@
 /* Bit-bang test pin (tiku_bitbang demos / backscatter prototyping)          */
 /*---------------------------------------------------------------------------*/
 
-/**
- * Default pin for tiku_bitbang transmitters on this board: P1.4.
- *
- * P1.4 is brought out on BoosterPack header J1.5 (with GND on J1.20)
- * which makes it a good logic-analyzer probe point. It does not
- * conflict with the LEDs (P1.0/P1.1), buttons (P5.5/P5.6), UART (P2.x),
- * I2C (P1.6/P1.7), SPI (P2.5-7), or 1-Wire (P1.2) pins declared above.
- * Override at compile time by passing
- * -DTIKU_BOARD_BSCAT_PORT=<n> -DTIKU_BOARD_BSCAT_PIN=<n>.
+/*
+ * Default pin for tiku_bitbang transmitters on this board: P1.4, brought out on
+ * a BoosterPack header next to a ground pin, which makes it a convenient
+ * logic-analyser probe point and clashes with nothing declared above.
  */
 #ifndef TIKU_BOARD_BSCAT_PORT
 #define TIKU_BOARD_BSCAT_PORT       1

@@ -5,26 +5,11 @@
  *
  * Authors: Ambuj Varshney <ambuj@tiku-os.org>
  *
- * tiku_i2c_arch.c - nRF54L I2C master (TWIM, EasyDMA)
+ * tiku_i2c_arch.c - nRF54L I2C master (TWIM, EasyDMA).
  *
- * Blocking, polled I2C master for the nRF54L15.  The nRF54L TWIM uses the
- * "new" EasyDMA model: a transaction is described by DMA.TX/RX.PTR +
- * DMA.TX/RX.MAXCNT, kicked off by TASKS_DMA.TX.START / TASKS_DMA.RX.START,
- * and terminated on the bus by a STOP condition wired up through the SHORTS
- * register (LASTTX->STOP for a write, LASTRX->STOP for a read, and
- * LASTTX->STARTRX + LASTRX->STOP for a combined write-then-read).  Completion
- * is the EVENTS_STOPPED event; a slave NACK additionally latches ERRORSRC
- * (ANACK = address NACK, DNACK = data NACK) and auto-stops the transfer, so
- * polling EVENTS_STOPPED catches both success and NACK.  EasyDMA can only
- * reach RAM; the interface passes the caller's RAM buffers straight through.
- *
- * Instance + pins (see the block below): TWIM22 on P1.12 (SCL) / P1.11 (SDA).
- * TWIM20 is *not* used because it aliases the console UARTE20 (SERIAL20).
- * The pin choice is a documented placeholder to confirm against the DK
- * schematic; override it from the board header without touching this file.
- *
- * Field names were taken from the vendored MDK (nrf54l15_types.h,
- * NRF_TWIM_Type) -- this is the new DMA layout, not the older nRF52 TWIM.
+ * Blocking polled master on the new EasyDMA model: pointers and counts describe
+ * the transaction and SHORTS wire the STOP condition, so EVENTS_STOPPED catches
+ * both success and a NACK.  EasyDMA reaches only RAM, so caller buffers pass through.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -99,7 +84,7 @@
 #define TIKU_TWIM_SH_RX_STOP        TWIM_SHORTS_LASTRX_STOP_Msk
 #define TIKU_TWIM_SH_TX_STARTRX     TWIM_SHORTS_LASTTX_DMA_RX_START_Msk
 
-/** @brief All defined ERRORSRC bits (used to clear the W1C register). */
+/** @brief All defined ERRORSRC bits, for clearing the W1C register. */
 #define TIKU_TWIM_ERR_ALL           (TWIM_ERRORSRC_OVERRUN_Msk | \
                                      TWIM_ERRORSRC_ANACK_Msk   | \
                                      TWIM_ERRORSRC_DNACK_Msk)
@@ -111,13 +96,13 @@
 /**
  * @brief Upper bound on the completion spin.
  *
- * Not a calibrated timeout -- just a backstop so a wedged bus (SDA held low,
- * no clock) cannot hang the kernel.  A live transfer breaks out the instant
- * EVENTS_STOPPED asserts, so the common path costs microseconds and this bound
- * is irrelevant to it; the value only governs how fast a *broken* bus fails.
- * At ~11 cycles/iteration on the 128 MHz core, 100000 iterations is ~9 ms --
- * ample for any short probe/read yet quick enough that a full 112-address scan
- * of an empty bus completes in a couple of seconds instead of tens.
+ * Not a calibrated timeout -- a backstop so a wedged bus (SDA held low, no
+ * clock) cannot hang the kernel.  A live transfer breaks out the instant
+ * EVENTS_STOPPED asserts, so this bound only governs how fast a BROKEN bus fails.
+ *
+ * @note At ~11 cycles/iteration on the 128 MHz core, 100000 iterations is ~9 ms
+ *       -- ample for any short probe or read, yet quick enough that a full
+ *       112-address scan of an empty bus finishes in seconds, not tens.
  */
 #define TIKU_TWIM_SPIN_LIMIT        100000UL
 
@@ -144,13 +129,13 @@ static uint8_t twim_probe_byte;
 /**
  * @brief Configure one SDA/SCL pin as open-drain input-with-pull-up.
  *
- * Mirrors nrfx's TWIM_PIN_INIT: DIR = Input, input buffer Connected (so the
- * peripheral can sample the line), PULL = Pull-up, DRIVE = S0D1 (standard
- * drive for '0', disconnect for '1') so the pin is only ever actively driven
- * low -- the required open-drain behaviour for I2C.  The TWIM drives the pin
- * through its PSEL connection; PIN_CNF supplies the electrical characteristics.
- * External 4.7 kohm pull-ups are recommended -- the internal pull-up is weak.
+ * Mirrors nrfx's TWIM_PIN_INIT: DIR = Input, input buffer Connected so the
+ * peripheral can sample the line, PULL = Pull-up, DRIVE = S0D1 so the pin is
+ * only ever actively driven low -- the required open-drain behaviour.
  *
+ * @note The TWIM drives the pin through its PSEL connection; PIN_CNF supplies
+ *       the electrical characteristics.  External 4.7 kohm pull-ups are
+ *       recommended, the internal one being weak.
  * @param port  Physical port (0 = P0, 1 = P1, 2 = P2).
  * @param pin   Pin number within the port (0..31).
  */
@@ -180,11 +165,9 @@ static void twim_cfg_pin(uint8_t port, uint8_t pin)
 /**
  * @brief Run one blocking TWIM transaction (write, read, or write-then-read).
  *
- * Programs ADDRESS, the requested SHORTS, and the TX/RX EasyDMA descriptors,
- * kicks off the transfer (STARTTX when there are bytes to send, otherwise
- * STARTRX), then spins on EVENTS_STOPPED.  On a wedged bus it forces a STOP
- * and reports a timeout.  The latched ERRORSRC (cleared here, W1C) is returned
- * through @p err_out so the caller can classify address/data NACKs.
+ * Programs ADDRESS, the requested SHORTS and the TX/RX EasyDMA descriptors,
+ * starts the transfer (STARTTX when there are bytes to send, else STARTRX),
+ * then spins on EVENTS_STOPPED, forcing a STOP on a wedged bus.
  *
  * @param addr     7-bit slave address (unshifted).
  * @param shorts   SHORTS bitmask selecting the closing bus condition(s).
@@ -192,7 +175,8 @@ static void twim_cfg_pin(uint8_t port, uint8_t pin)
  * @param txlen    Bytes to transmit (0 for a pure read).
  * @param rx       RX buffer, or NULL when @p rxlen is 0.
  * @param rxlen    Bytes to receive (0 for a pure write).
- * @param err_out  Receives the raw ERRORSRC bits (may be NULL).
+ * @param err_out  Receives the raw ERRORSRC bits, cleared here (may be NULL),
+ *                 so the caller can classify address and data NACKs.
  * @return TIKU_I2C_OK once the bus reached STOP, TIKU_I2C_ERR_TIMEOUT if it
  *         never did.
  */
@@ -270,8 +254,7 @@ static int twim_run(uint8_t addr, uint32_t shorts,
  *
  * Parks SDA/SCL as open-drain pull-up pins, routes them to the TWIM via PSEL,
  * selects 100 kHz (Standard) or 400 kHz (Fast), and enables the peripheral.
- * No separate clock gate is programmed: the TWIM shares the peripheral power
- * domain with the console UARTE, which runs without one on this port.
+ * No separate clock gate: the TWIM shares the domain with the console UARTE.
  *
  * @param config  Bus configuration (speed).  Must be non-NULL.
  * @return TIKU_I2C_OK on success, TIKU_I2C_ERR_PARAM if @p config is NULL.
@@ -389,10 +372,8 @@ int tiku_i2c_arch_read(uint8_t addr, uint8_t *buf, uint16_t len)
  * @brief Probe an address for a bus scan (presence check).
  *
  * The nRF TWIM will not clock the address for a zero-length transfer, so the
- * probe is a real 1-byte write.  Presence is decided solely by the address
- * ACK: an address NACK (ANACK) means no device answered.  A data NACK (DNACK,
- * address ACKed but the byte NACKed) still proves the device is present, so it
- * is deliberately not treated as absence here.
+ * probe is a real 1-byte write and presence is decided solely by the address
+ * ACK.  A data NACK still proves the device is present.
  *
  * @param addr  7-bit slave address.
  * @return TIKU_I2C_OK if the device acknowledged its address,

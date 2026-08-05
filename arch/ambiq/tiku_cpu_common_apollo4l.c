@@ -5,12 +5,11 @@
  *
  * Authors: Ambuj Varshney <ambuj@tiku-os.org>
  *
- * tiku_cpu_common_apollo4l.c - Apollo4 Lite common CPU helpers (delays, IDs)
+ * tiku_cpu_common_apollo4l.c - Apollo4 Lite common CPU helpers (delays, IDs).
  *
- * Mirrors arch/ambiq/tiku_cpu_common.c (Apollo510). Bare-metal delays spin on
- * the Cortex-M SysTick down-counter (core peripheral, identical on M4 and M55),
- * scaled by TIKU_MAIN_CPU_HZ. Falls back to a NOP spin when SysTick is not yet
- * configured (e.g. the minimal smoke build, which has no kernel tick).
+ * Mirrors the Apollo510 file: delays spin on the SysTick down-counter, which is
+ * identical on M4 and M55, and fall back to a NOP spin when SysTick is not yet
+ * configured -- as in the minimal smoke build, which has no kernel tick.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -32,9 +31,8 @@
  * @brief Spin-delay for a given number of microseconds.
  *
  * Uses the Cortex-M SysTick down-counter (clocked by the core) scaled by the
- * LIVE core clock, so the delay stays correct across an LP<->HP perf-mode
- * switch (96 vs 192 MHz). Falls back to a NOP spin loop when SysTick is not
- * yet configured.
+ * LIVE core clock, so the delay stays correct across an LP/HP perf-mode switch
+ * (96 vs 192 MHz).  Falls back to a NOP spin before SysTick is configured.
  *
  * @param us  Delay in microseconds
  */
@@ -102,15 +100,12 @@ uint8_t tiku_cpu_ambiq_unique_id(uint8_t *buf, uint8_t len) {
 /**
  * @brief Return the encoded reason for the last system reset.
  *
- * Reads the Apollo reset generator's status latch (RSTGEN->STAT) and
- * maps it to an MSP430-SYSRSTIV-compatible code, which is the contract
- * the /sys reset consumers expect (tiku_vfs_tree_boot.c buckets it into
- * watchdog / power / reboot / other).  Multiple causes can latch across
- * a chain of resets; the most specific / most recent is reported first.
+ * Reads the reset generator's status latch (RSTGEN->STAT) and maps it to an
+ * MSP430-SYSRSTIV-compatible code, the contract the /sys reset consumers
+ * expect.  Multiple causes can latch, so the most specific is reported first.
  *
- * Read-only: the STAT latch is left intact (the boot path samples it
- * once), so this never perturbs the reset generator.
- *
+ * @note Read-only -- the STAT latch is left intact, so this never perturbs the
+ *       reset generator.
  * @return SYSRSTIV-compatible reset-reason code (0 = clean power-on).
  */
 uint16_t tiku_cpu_ambiq_reset_reason(void) {

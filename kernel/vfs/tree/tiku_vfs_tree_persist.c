@@ -5,24 +5,11 @@
  *
  * Authors: Ambuj Varshney <ambuj@tiku-os.org>
  *
- * tiku_vfs_tree_persist.c - /sys/persist VFS nodes
+ * tiku_vfs_tree_persist.c - /sys/persist VFS nodes.
  *
- * Two read-only counters that make the persist-cell layer
- * observable from the namespace it serves:
- *
- *   /sys/persist/cells   cells validated by tiku_persist_cell_init()
- *                        this boot (the persistent footprint of the
- *                        running image)
- *   /sys/persist/primed  of those, how many had to be primed to
- *                        defaults because their gate did not
- *                        validate
- *
- * `primed` is the diagnostic: 0 on every boot of an established
- * device.  Non-zero exactly once after first flash, after a reflash
- * whose layout moved the `.persistent` cells, or after an NVM wipe
- * — and on any other boot it is a forensic signal that NVM content
- * was lost or corrupted in the field (`cat /sys/persist/primed` is
- * the first question to ask a device whose counters look wrong).
+ * Two read-only counters: how many magic-gated persist cells validated this boot,
+ * and how many had to be primed to defaults.  `primed` is the diagnostic -- 0 on
+ * an established device, so non-zero means NVM content was lost or moved.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -43,11 +30,9 @@
 /**
  * @brief Read handler for /sys/persist/cells.
  *
- * Renders the number of persist cells validated this boot as a
- * decimal line ("4\n" with the stock tree: boot counter, lifetime
- * accumulator, device name, RTC epoch).  A per-boot statistic from
- * tiku_persist_cell_count() — it counts cell_init() calls, not a
- * registry, so cells whose init has not run yet do not appear.
+ * Renders the number of persist cells validated this boot ("4\n" with the
+ * stock tree).  tiku_persist_cell_count() counts cell_init() calls rather than
+ * a registry, so a cell whose init has not run yet does not appear.
  *
  * @param buf  Output buffer for the rendered text
  * @param max  Capacity of @p buf in bytes
@@ -82,13 +67,11 @@ persist_primed_read(char *buf, size_t max)
 /* NODE TABLE                                                                */
 /*---------------------------------------------------------------------------*/
 
-/**
- * /sys/persist directory table.
- *
- * Exported so tiku_vfs_tree_sys.c can attach it as the "persist"
- * directory; the entry count travels as
- * TIKU_VFS_TREE_PERSIST_NCHILD (asserted below).  Both nodes are
- * read-only — the counters are facts about this boot, not knobs.
+/*
+ * /sys/persist directory table, exported so tiku_vfs_tree_sys.c can attach it
+ * as the "persist" directory; the entry count travels as
+ * TIKU_VFS_TREE_PERSIST_NCHILD (asserted below).  Both nodes are read-only --
+ * the counters are facts about this boot, not knobs.
  */
 const tiku_vfs_node_t tiku_vfs_tree_persist_children[] = {
     { "cells",  TIKU_VFS_FILE, persist_cells_read,  NULL, NULL, 0 },

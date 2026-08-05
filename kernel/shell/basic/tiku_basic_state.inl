@@ -7,14 +7,9 @@
  *
  * tiku_basic_state.inl - core types and module-level state.
  *
- * NOT a standalone translation unit.  Included from tiku_basic.c.
- *
- * Defines the line / FOR-frame / loop-frame / DEF-FN / array
- * structs, the arena-backed pointers (`prog`, `basic_vars`, ...),
- * the FRAM-backed persistent buffers, and all the interpreter
- * status flags (basic_running, basic_pc, basic_error, AUTO state,
- * ON ERROR handler, EVERY / ON CHANGE registries, TRACE, DATA
- * cursor).
+ * Defines the line, frame, function and array structs, the arena-backed pointers,
+ * the durable buffers, and every interpreter status flag -- the program counter,
+ * error state, reactive registries, trace and DATA cursor.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -34,7 +29,7 @@ typedef struct {
 
 /* FOR-loop frame. The loop body is the range of program lines
  * starting at `loop_line` (the line AFTER the FOR statement); on
- * NEXT we step the index var, compare against `target`, and either
+ * NEXT steps the index var, compares against `target`, and either
  * jump back to `loop_line` or pop. */
 typedef struct {
     uint16_t var_idx;       /* index into basic_vars[] (0..) */
@@ -222,7 +217,7 @@ static basic_ext_entry_t basic_ext_tab[TIKU_BASIC_EXT_MAX];
 #if TIKU_BASIC_ARRAYS_ENABLE
 /* 1D / 2D integer or string arrays. Stored row-major as a flat
  * buffer (long[] for numeric, char*[] for string). For 1D arrays
- * dim2 == 0 and we treat (i) as element [i]; for 2D, (i, j) is
+ * dim2 == 0 and (i) is element [i]; for 2D, (i, j) is
  * element [i * dim2 + j]. The numeric and string array tables are
  * separate so A and A$ can both be DIMmed independently. */
 typedef struct basic_array_s {

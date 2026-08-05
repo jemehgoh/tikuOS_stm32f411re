@@ -18,12 +18,20 @@
 /*---------------------------------------------------------------------------*/
 
 #include "tiku_boot.h"
+#if defined(PLATFORM_STM32N6)
+#include <arch/stm32n6/tiku_xspi_arch.h>
+#include <arch/stm32n6/tiku_sram_arch.h>
+#endif
 #include <kernel/cpu/tiku_stack.h>   /* stack-paint for /sys/mem/stack_free */
 #include "kernel/cpu/tiku_common.h"
 #include "kernel/memory/tiku_mem.h"
 #include "kernel/timers/tiku_clock.h"
 #include "kernel/scheduler/tiku_sched.h"
+<<<<<<< HEAD
 #include <hal/tiku_cpu.h>
+=======
+#include "hal/tiku_cpu.h"        /* tiku_cpu_irq_enable() at boot-complete */
+>>>>>>> main
 #if defined(PLATFORM_MSP430)
 #include "arch/msp430/tiku_uart_arch.h"
 #elif defined(PLATFORM_RP2350)
@@ -135,6 +143,21 @@ tiku_cpu_full_init(unsigned int cpu_freq)
     /* Mark boot as complete */
     current_boot_stage = TIKU_BOOT_STAGE_COMPLETE;
 
+#if defined(PLATFORM_AMBIQ) || defined(PLATFORM_RP2350) || \
+    defined(PLATFORM_NORDIC)
+    /* The ARM reset handlers mask IRQs (cpsid i in tiku_crt_early.c) so no
+     * ISR can fire into half-initialized kernel state.  Everything an ISR
+     * touches now exists -- tiku_sched_init() just built the process queue --
+     * so unmask HERE, not only at the top of tiku_sched_loop(): every build
+     * that runs work before (or instead of) the scheduler -- TEST_ENABLE,
+     * TIKU_TURBO_BENCH, the deep-sleep power autorun, embedded BASIC -- was
+     * otherwise running with a dead tick, and every WFI in it fell straight
+     * through (wake on pended IRQ, ISR never executed, time never advanced).
+     * The scheduler's own tiku_cpu_irq_enable() stays: it is idempotent.
+     * MSP430 is untouched -- its GIE discipline predates this and works. */
+    tiku_cpu_irq_enable();
+#endif
+
     boot_complete = 1;
     MAIN_PRINTF("Boot: complete\n");
 
@@ -192,11 +215,19 @@ tiku_boot_init_cpu(unsigned int cpu_freq)
 static int
 tiku_boot_init_memory(void)
 {
+#if defined(PLATFORM_STM32N6)
+    /* External NOR first: the durable mirror is restored from it inside
+     * tiku_mem_init(), so the controller has to be live before that runs. A
+     * failure is not fatal -- the image runs from SRAM and the durable region
+     * simply keeps its reset contents. */
+    (void)tiku_xspi_init();
+#endif
+
     /* Initialize memory subsystem (arch-specific setup + module state) */
     tiku_mem_init();
 
 #if defined(PLATFORM_AMBIQ) || defined(PLATFORM_RP2350) || \
-    defined(PLATFORM_NORDIC)
+    defined(PLATFORM_NORDIC) || defined(PLATFORM_STM32N6)
     /* Bring up the tier allocator at boot so tier-backed allocations (per-
      * process memory, etc.) work without relying on a lazy first-touch init.
      * tiku_tier_init is idempotent, so BASIC's later lazy call is a no-op.
@@ -224,6 +255,12 @@ tiku_boot_init_peripherals(void)
     /* UART must be initialized before clock so printf is available
      * as early as possible (GPIO is already unlocked by init_cpu). */
     tiku_uart_init();
+
+#if defined(PLATFORM_STM32N6) && defined(TIKU_N6_SRAM_PROBE)
+    /* After the console exists: the probe reports as it walks, and nothing
+     * owns the banks it writes to yet. */
+    tiku_stm32n6_sram_probe();
+#endif
 
 #if defined(TIKU_CONSOLE_USB)
     /* Native USB CDC-ACM console (TIKU_CONSOLE=usb/both). Polled: serviced

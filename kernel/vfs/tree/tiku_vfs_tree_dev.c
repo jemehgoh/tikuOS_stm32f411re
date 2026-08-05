@@ -5,26 +5,11 @@
  *
  * Authors: Ambuj Varshney <ambuj@tiku-os.org>
  *
- * tiku_vfs_tree_dev.c - /dev subtree (files + assembly)
+ * tiku_vfs_tree_dev.c - /dev subtree (files and assembly).
  *
- * Hardware-facing nodes:
- *
- *   /dev/led0..ledN     (rw) board LEDs; count from TIKU_BOARD_LED_COUNT
- *   /dev/console        (rw) raw UART access (non-blocking read)
- *   /dev/null           (rw) data sink, reads empty
- *   /dev/zero           (r)  NUL-byte source
- *   /dev/uart/overruns  (r)  RX overrun counter
- *   /dev/uart/baud      (r)  configured baud rate
- *   /dev/adc/temp       (r)  raw internal temperature conversion
- *   /dev/adc/battery    (r)  raw supply-voltage conversion
- *   /dev/i2c/scan       (r)  bus scan — probing happens at read time!
- *   /dev/spi/config     (r)  active SPI mode/order/prescaler
- *   /dev/gpio, gpio_dir      stitched in from tiku_vfs_tree_gpio.c
- *
- * LED nodes drive real hardware via the tiku_led_*() API and keep
- * a shadow state in SRAM because PxOUT cannot be read back
- * uniformly across boards (active-low wiring would invert the
- * answer).  Everything else queries its driver live at read time.
+ * Hardware-facing nodes: board LEDs, console, null, zero, and the small static
+ * subtrees for uart, adc, i2c and spi.  LED nodes keep an SRAM shadow because
+ * PxOUT cannot be read back uniformly; everything else queries its driver live.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -52,24 +37,20 @@
 
 #if TIKU_BOARD_LED_COUNT > 0
 
-/**
- * Shadow of each LED's logical state (1 = lit), maintained by the
- * write handlers and cleared in tiku_vfs_tree_dev_init().  Reads
- * serve this mirror instead of the output register because board
- * wiring (active-high vs active-low) would make a raw PxOUT read
- * ambiguous; the cost is that direct tiku_led_*() calls from
- * application code bypass the mirror and go unnoticed here.
+/*
+ * Shadow of each LED's logical state (1 = lit), maintained by the write
+ * handlers and cleared in tiku_vfs_tree_dev_init().  Reads serve the mirror
+ * because board wiring (active-high vs active-low) makes a raw PxOUT read
+ * ambiguous; direct tiku_led_*() calls therefore go unnoticed here.
  */
 static uint8_t led_state[TIKU_BOARD_LED_COUNT];
 
 /**
  * @brief Generate the read/write handler pair for LED index N.
  *
- * Read renders the shadow state as "0\n" or "1\n".  Write decodes
- * the first payload byte: '1' on, '0' off, 't' toggle — anything
- * else is silently ignored (return 0) so trailing whitespace from
- * shell input is harmless.  Both the hardware (via tiku_led_*())
- * and the shadow are updated together.
+ * Read renders the shadow state as "0\n" or "1\n".  Write decodes the first
+ * payload byte -- '1' on, '0' off, 't' toggle, anything else ignored so
+ * trailing shell whitespace is harmless -- updating hardware and shadow together.
  */
 #define LED_VFS_FUNCS(N)                                                      \
 static int                                                                    \
@@ -115,11 +96,9 @@ LED_VFS_FUNCS(3)
 /**
  * @brief Read handler for /dev/uart/overruns.
  *
- * Renders the count of RX bytes dropped because the ring buffer
- * was full when they arrived, as a decimal line.  A non-zero,
- * growing value means the consumer (usually the shell) is not
- * draining fast enough for the incoming line rate — the first
- * thing to check when pasted text arrives mangled.
+ * Renders the count of RX bytes dropped because the ring buffer was full.  A
+ * growing value means the consumer is not draining fast enough for the line
+ * rate -- the first thing to check when pasted text arrives mangled.
  *
  * @param buf  Output buffer for the rendered text
  * @param max  Capacity of @p buf in bytes
@@ -136,11 +115,9 @@ uart_overruns_read(char *buf, size_t max)
 /**
  * @brief Read handler for /dev/uart/recoveries (nRF54L only).
  *
- * Counts the RX-engine wedge self-heals the UART driver performed since
- * boot (a lost DMA re-arm silences RX until re-started; the driver
- * detects the captured-but-unmoved-byte signature and repairs it).
- * Non-zero after a heavy SLIP/TLS session means the wedge recurred and
- * was healed in place.
+ * Counts RX-engine wedge self-heals since boot: a lost DMA re-arm silences RX,
+ * and the driver detects the captured-but-unmoved-byte signature and repairs
+ * it in place.
  */
 static int
 uart_recoveries_read(char *buf, size_t max)
@@ -153,10 +130,9 @@ uart_recoveries_read(char *buf, size_t max)
 /**
  * @brief Read handler for /dev/uart/baud.
  *
- * Renders the configured baud rate from the board header as a
- * decimal line ("9600\n" on MSP430 boards, "115200\n" on RP2350).
- * Build-time constant — handy for a host-side script that wants to
- * confirm it opened the port at the right speed.
+ * Renders the board header's configured baud rate as a decimal line ("9600\n"
+ * on MSP430 boards, "115200\n" on RP2350) -- a build-time constant, useful to a
+ * host script confirming it opened the port at the right speed.
  *
  * @param buf  Output buffer for the rendered text
  * @param max  Capacity of @p buf in bytes
@@ -176,15 +152,9 @@ uart_baud_read(char *buf, size_t max)
 /**
  * @brief Read handler for /dev/spi/config.
  *
- * Renders the active SPI configuration on one line:
- *
- *   "mode=0 order=msb pre=8\n"   (SPI mode, bit order, prescaler)
- *   "off\n"                      driver compiled in but not configured
- *   "n/a\n"                      TIKU_SPI_ENABLE=0 build
- *
- * Read-only: bus configuration belongs to the driver owning the
- * peripheral, not to a shell one-liner that could yank the clock
- * mode out from under an in-flight transfer.
+ * Renders the active configuration as "mode=0 order=msb pre=8\n", or "off\n"
+ * when the driver is compiled in but unconfigured, or "n/a\n" in a
+ * TIKU_SPI_ENABLE=0 build.  Read-only: bus setup belongs to the owning driver.
  *
  * @param buf  Output buffer for the rendered text
  * @param max  Capacity of @p buf in bytes
@@ -214,12 +184,9 @@ spi_config_read(char *buf, size_t max)
 /**
  * @brief Read handler for /dev/adc/temp.
  *
- * Triggers a conversion on the internal temperature channel and
- * renders the RAW ADC count as a decimal line ("2789\n"), or
- * "err\n" if the conversion fails.  Conversion to degrees is left
- * to the consumer: it needs the per-device TLV calibration
- * constants, and keeping the node raw keeps the handler small and
- * the policy out of the kernel.
+ * Triggers a conversion on the internal temperature channel and renders the RAW
+ * ADC count ("2789\n"), or "err\n" on failure.  Degrees are left to the
+ * consumer, which needs the per-device TLV calibration constants.
  *
  * @param buf  Output buffer for the rendered text
  * @param max  Capacity of @p buf in bytes
@@ -263,23 +230,11 @@ adc_battery_read(char *buf, size_t max)
 /*---------------------------------------------------------------------------*/
 
 /**
- * @brief Read handler for /dev/i2c/scan.
+ * @brief Read handler for /dev/i2c/scan -- an ACTIVE prober.
  *
- * ACTIVE prober: reading this node performs a live scan of the
- * 7-bit address range 0x08..0x77 (the reserved addresses at both
- * ends are skipped), issuing a zero-length write to each and
- * collecting the ACKs.  Renders the responders as hex words on
- * one line, or "none":
- *
- *   "0x18 0x48\n"    two devices found
- *   "none\n"         empty bus
- *
- * Takes bus-time proportional to 112 probe transactions, and a
- * zero-length write is harmless to almost every part but not
- * guaranteed side-effect-free for exotic devices — this is a
- * debugging aid, not something to poll from a loop.  The scan
- * stops early if the output buffer runs low (pos < max-6 keeps
- * room for one more "0xNN " token plus the terminator).
+ * Reading probes 7-bit addresses 0x08..0x77 with a zero-length write and
+ * renders the responders as "0x18 0x48\n", or "none\n".  112 transactions of
+ * bus time, so it is a debugging aid rather than something to poll.
  *
  * @param buf  Output buffer for the rendered text
  * @param max  Capacity of @p buf in bytes
@@ -319,13 +274,9 @@ i2c_scan_read(char *buf, size_t max)
 /**
  * @brief Read handler for /dev/console — drain pending UART RX.
  *
- * Non-blocking: copies only the bytes already waiting in the
- * hardware RX register / ring buffer and returns their count,
- * 0 when the line is idle.  Raw bytes, no newline appended —
- * unlike every other node this is a byte stream, not a rendered
- * value.  Note the shell itself consumes the same UART; reading
- * the console from within an interactive shell session steals
- * bytes from the line editor.
+ * Non-blocking: copies only the bytes already waiting and returns their count,
+ * 0 when idle.  Raw bytes with no newline appended, unlike every other node.
+ * The shell consumes the same UART, so reading it mid-session steals bytes.
  *
  * @param buf  Output buffer for the drained bytes
  * @param max  Capacity of @p buf in bytes
@@ -414,10 +365,8 @@ devnull_write(const char *buf, size_t len)
 /**
  * @brief Read handler for /dev/zero — fill with NUL bytes.
  *
- * Fills the entire buffer with zeros and returns @p max bytes.
- * Programmatic consumers use the return value; shell
- * "read /dev/zero" will display an empty string, which matches
- * the expected Unix behaviour.
+ * Fills the buffer with zeros and returns @p max.  Programmatic consumers use
+ * the return value; `read /dev/zero` shows an empty string, as on Unix.
  *
  * @param buf  Output buffer, fully zeroed on return
  * @param max  Capacity of @p buf in bytes
@@ -483,14 +432,11 @@ static const tiku_vfs_node_t dev_spi_children[] = {
     { "config", TIKU_VFS_FILE, spi_config_read, NULL, NULL, 0 },
 };
 
-/**
- * The /dev directory table — every hardware-facing node.
- *
- * LED entries are gated one by one on TIKU_BOARD_LED_COUNT so a
- * one-LED board exposes exactly /dev/led0; the gpio subtrees come
- * from tiku_vfs_tree_gpio.c with their port count in
- * TIKU_VFS_TREE_GPIO_NPORTS.  To add a /dev node: implement the
- * handler above (or in a new module) and append the entry here.
+/*
+ * The /dev directory table -- every hardware-facing node.  LED entries are
+ * gated one by one on TIKU_BOARD_LED_COUNT so a one-LED board exposes exactly
+ * /dev/led0; the gpio subtrees come from tiku_vfs_tree_gpio.c.  To add a node,
+ * implement the handler above and append the entry here.
  */
 static const tiku_vfs_node_t dev_children[] = {
 #if TIKU_BOARD_LED_COUNT >= 1
@@ -550,10 +496,8 @@ tiku_vfs_tree_dev_get(void)
 /**
  * @brief Initialise /dev hardware state.
  *
- * Configures every board LED pin (direction + initial level) and
- * zeroes the led_state shadow so reads and hardware agree from
- * the first access.  Boards with no LEDs compile this down to the
- * bare tiku_led_init_all() call.
+ * Configures every board LED pin (direction and initial level) and zeroes the
+ * led_state shadow so reads and hardware agree from the first access.
  */
 void
 tiku_vfs_tree_dev_init(void)

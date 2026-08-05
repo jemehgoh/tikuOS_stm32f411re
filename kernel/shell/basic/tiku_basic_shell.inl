@@ -7,21 +7,9 @@
  *
  * tiku_basic_shell.inl - public engine entry points.
  *
- * NOT a standalone translation unit. Included from tiku_basic.c.
- *
- * Three entry points are exposed via tiku_basic.h:
- *
- *   tiku_basic_repl()       - run the interactive REPL until BYE
- *                             or Ctrl-C at the prompt.
- *   tiku_basic_autorun()    - load the saved program from FRAM and
- *                             RUN it once (no REPL).
- *   tiku_basic_run_source() - parse a multi-line source string
- *                             (build-time BASIC_PROGRAM=foo.bas
- *                             firmware path) and RUN it.
- *
- * All three call basic_session_begin() to reset interpreter state
- * and lazily allocate the AUTO-tier arena that backs the line table,
- * variable table, and stacks.
+ * The REPL, the saved-program autorun and the embedded source runner.  All three
+ * call basic_session_begin() to reset interpreter state and lazily allocate the
+ * AUTO-tier arena behind the line table, variables and stacks.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -123,11 +111,9 @@ tiku_basic_autorun(void)
 /**
  * @brief Parse a multi-line BASIC source string and RUN the result.
  *
- * Walks @p source line by line, dispatching each through
- * process_line().  Numbered lines get stored; un-numbered direct
- * commands (LIST / RUN / NEW / ...) execute as they would at the
- * REPL.  After all lines have been parsed, exec_run() fires once
- * unless the source already issued an explicit `RUN`.
+ * Walks @p source line by line through process_line(): numbered lines are
+ * stored, un-numbered direct commands execute as at the REPL.  exec_run() then
+ * fires once unless the source already issued an explicit `RUN`.
  *
  * @param source NUL-terminated multi-line BASIC source ('\n' breaks).
  */
@@ -153,7 +139,7 @@ tiku_basic_run_source(const char *source)
                 memcpy(line_buf, line_start, len);
                 line_buf[len] = '\0';
                 {
-                    /* Detect un-numbered RUN so we can suppress the
+                    /* Detect un-numbered RUN so as to suppress the
                      * implicit auto-RUN below. */
                     const char *t = line_buf;
                     while (*t == ' ' || *t == '\t') t++;

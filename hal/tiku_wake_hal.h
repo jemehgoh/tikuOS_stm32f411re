@@ -5,15 +5,11 @@
  *
  * Authors: Ambuj Varshney <ambuj@tiku-os.org>
  *
- * tiku_wake_hal.h - Platform-agnostic wake-source query interface
+ * tiku_wake_hal.h - platform-agnostic wake-source query interface.
  *
- * Used by the "wake" shell command and /sys/power/wake VFS node to
- * report which interrupt families are currently armed and would
- * therefore wake the CPU from a low-power state.
- *
- * The HAL exposes a fixed set of role-named flags. The arch backend
- * is free to map each flag to whichever device-specific IE register
- * (or registers) covers that role on the current MCU.
+ * Reports which interrupt families are armed and would therefore wake the CPU
+ * from a low-power state, for the `wake` command and /sys/power/wake.  The arch
+ * backend maps each role-named flag to whatever IE registers cover it.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -57,10 +53,8 @@
  * @struct tiku_wake_sources_t
  * @brief Snapshot of currently-armed wake sources.
  *
- * sources    -- bit-OR of TIKU_WAKE_* flags above.
- * gpio_ie[i] -- per-port pin-IE mask for port (i+1) if that port
- *               exists and any pin in it has an interrupt enabled.
- *               Valid only when TIKU_WAKE_GPIO is set in @p sources.
+ * `sources` is a bit-OR of the TIKU_WAKE_* flags; `gpio_ie[i]` is the per-pin
+ * IE mask for port i+1 and is valid only when TIKU_WAKE_GPIO is set.
  */
 typedef struct {
     uint8_t sources;

@@ -5,15 +5,10 @@
  *
  * Authors: Ambuj Varshney <ambuj@tiku-os.org>
  *
- * tiku_device_select.h - RP2350 device + board include router
+ * tiku_device_select.h - RP2350 device and board include router.
  *
- * Mirrors arch/msp430/tiku_device_select.h. The Makefile sets one of:
- *   TIKU_DEVICE_RP2350      (silicon)
- *   TIKU_BOARD_RPI_PICO2_W  (board PCB definitions)
- *
- * Adding a new RP2350 board requires only:
- *   1. A board header in boards/ with pin assignments
- *   2. An #elif clause in this file
+ * Mirrors the MSP430 router: the Makefile names the silicon and the board PCB
+ * separately.  A new board needs a header in boards/ and one #elif here.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -45,10 +40,9 @@
 /**
  * @brief Route the board-level pin-assignment header.
  *
- * TIKU_BOARD_RPI_PICO2_W selects the Pico 2 W (with CYW43439 footprint);
- * TIKU_BOARD_RPI_PICO2 selects the plain Pico 2 (direct GP25 LED, no
- * wireless). When neither is defined the Pico 2 W is used as the default
- * primary supported board.
+ * TIKU_BOARD_RPI_PICO2_W selects the Pico 2 W (CYW43439 footprint);
+ * TIKU_BOARD_RPI_PICO2 selects the plain Pico 2 (direct GP25 LED, no wireless).
+ * With neither defined the Pico 2 W is the default.
  */
 #if defined(TIKU_BOARD_RPI_PICO2_W)
 #include <arch/arm-rp2350/boards/tiku_board_rpi_pico2_w.h>

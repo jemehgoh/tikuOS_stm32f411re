@@ -5,12 +5,11 @@
  *
  * Authors: Ambuj Varshney <ambuj@tiku-os.org>
  *
- * tiku_onewire_arch.h - nRF54L 1-Wire arch header (stub port)
+ * tiku_onewire_arch.h - nRF54L 1-Wire arch header (stub port).
  *
- * The 1-Wire backend is a stub on this port (see tiku_onewire_arch.c); a real
- * bit-banged driver is a later phase.  These prototypes mirror the RP2350 arch
- * header so the interface layer (interfaces/onewire/tiku_onewire.c) and the
- * 1-Wire HAL routing resolve without implicit declarations on Nordic.
+ * The backend is a stub; these prototypes mirror the RP2350 arch header so the
+ * interface layer and the 1-Wire HAL routing resolve without implicit
+ * declarations.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -25,9 +24,8 @@
  * @brief Configure the 1-Wire pin and bring up the bus (stub).
  *
  * Not implemented on this port: a bit-banged 1-Wire master needs a
- * microsecond-class delay source, which is a later phase.  Reports
- * failure instead of pretending the bus came up, so callers fall
- * through to their no-device path.
+ * microsecond-class delay source.  Reports failure rather than pretending the
+ * bus came up, so callers fall through to their no-device path.
  *
  * @return -1 always (never TIKU_OW_OK).
  */

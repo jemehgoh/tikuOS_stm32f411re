@@ -5,13 +5,11 @@
  *
  * Authors: Ambuj Varshney <ambuj@tiku-os.org>
  *
- * tiku_nvm_map.h - Platform-independent NVM region management
+ * tiku_nvm_map.h - platform-independent NVM region management.
  *
- * Declares named non-volatile memory (NVM) regions whose sizes come
- * from the per-device header (TIKU_DEVICE_FRAM_CONFIG_SIZE on MSP430,
- * MRAM/RRAM equivalents on other targets).  The linker places the
- * backing arrays — no hardcoded addresses.  Subsystems obtain pointers
- * at runtime via tiku_nvm_region_get().
+ * Declares named NVM regions whose sizes come from the per-device header and
+ * whose backing arrays the linker places, so no address is hard-coded.
+ * Subsystems obtain pointers at run time via tiku_nvm_region_get().
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -141,7 +139,7 @@ typedef tiku_nvm_region_t     tiku_fram_region_t;
  * App-usable SRAM, for the same reason and in the same place: a memory report
  * must not print the BANK size when part of the bank is carved away before the
  * linker ever sees it (the nRF54L parts hold back 16 KB of the primary bank for
- * the FLPR coprocessor, so `free` used to over-report free SRAM by that much).
+ * the FLPR coprocessor, so a bank-sized `free` over-reports by that much).
  * Devices that hand their whole bank to the application need declare nothing.
  */
 #ifndef TIKU_DEVICE_RAM_USABLE

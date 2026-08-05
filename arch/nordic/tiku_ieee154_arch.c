@@ -5,20 +5,11 @@
  *
  * Authors: Ambuj Varshney <ambuj@tiku-os.org>
  *
- * tiku_ieee154_arch.c - IEEE 802.15.4-2006 250 kbps O-QPSK PHY on the
- *                       nRF54L on-die RADIO, from scratch (N1 bring-up).
+ * tiku_ieee154_arch.c - IEEE 802.15.4 250 kbps O-QPSK PHY on the nRF54L RADIO.
  *
- * The RADIO's 15.4 mode (MODE=0xF) does the O-QPSK/DSSS PHY and the SFD
- * sync in hardware; software programs the packet format and drives
- * TXEN/RXEN, exactly like the BLE path in tiku_radio_arch.c.  The frame in
- * RAM is [PHR][PSDU]: PHR is the 8-bit LENGTH and -- because CRCINC=Include
- * -- it counts the 2-byte FCS the radio computes/checks.  No whitening
- * (WHITEEN=0) and no access address (BALEN=0): the 4-symbol zero preamble
- * plus the 0xA7 SFD provide sync.
- *
- * PHY only: raw frame in / out, energy detect, CCA (N2 will add MAC).  The
- * HFXO start and Constant-Latency (erratum 20) discipline are borrowed from
- * the BLE arch so both stay consistent on this shared peripheral.
+ * RADIO mode 0xF does the O-QPSK/DSSS PHY and SFD sync in hardware; software
+ * programs the packet format and drives TXEN/RXEN.  The frame is [PHR][PSDU] with
+ * CRCINC set, so the length counts the 2-byte FCS.  PHY only -- no MAC.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -260,7 +251,7 @@ int tiku_ieee154_arch_rx_ack(uint8_t *buf, uint8_t cap, uint32_t timeout_ms,
 
     RADIO->TIFS = 192u;                          /* aTurnaroundTime (12 sym)   */
     RADIO->PACKETPTR = (uint32_t)rx_frame;
-    /* RX with the turnaround pre-armed; we commit or abort in the window. */
+    /* RX with the turnaround pre-armed; commit or abort inside the window. */
     RADIO->SHORTS = ((uint32_t)1u << RADIO_SHORTS_READY_START_Pos) |
                     ((uint32_t)1u << RADIO_SHORTS_PHYEND_DISABLE_Pos) |
                     ((uint32_t)1u << 2);         /* DISABLED_TXEN              */

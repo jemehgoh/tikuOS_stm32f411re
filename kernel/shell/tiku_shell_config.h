@@ -10,9 +10,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-/**
- * @file tiku_shell_config.h
- * @brief Enable/disable individual CLI commands
+/*
+ * tiku_shell_config.h - enable/disable individual CLI commands.
  *
  * To add a new command:
  *   1. Add a TIKU_SHELL_CMD_xxx flag here (set to 1)
@@ -20,10 +19,9 @@
  *   3. Add #include and table entry in tiku_shell.c
  *   4. Add the .c file to the Makefile TIKU_SHELL_ENABLE section
  *   5. If it drives hardware not every target has, add a rule to the
- *      HARDWARE REQUIREMENTS section at the bottom of this file (and
- *      gate/warn in the Makefile) so the flag resolves to 0 where the
- *      capability is absent -- gate the whole .c on the resolved flag,
- *      no runtime "not available" stubs
+ *      HARDWARE REQUIREMENTS section at the bottom of this file so the
+ *      flag resolves to 0 where the capability is absent.  Gate the
+ *      whole .c on the resolved flag; no runtime "not available" stubs.
  */
 
 #ifndef TIKU_SHELL_CONFIG_H_
@@ -69,6 +67,30 @@
 #ifndef TIKU_SHELL_CMD_TRNG
 #define TIKU_SHELL_CMD_TRNG    1  /**< trng    - Dump hardware TRNG bytes */
 #endif
+#ifndef TIKU_SHELL_CMD_XFLASH
+/* Auto-on where an XSPI NOR is wired; off elsewhere. */
+#if defined(PLATFORM_STM32N6)
+#define TIKU_SHELL_CMD_XFLASH  1  /**< xflash - external NOR over XSPI */
+#else
+#define TIKU_SHELL_CMD_XFLASH  0
+#endif
+#endif
+#ifndef TIKU_SHELL_CMD_CACHE
+/* Auto-on where the port owns the core's caches; off elsewhere. */
+#if defined(PLATFORM_STM32N6)
+#define TIKU_SHELL_CMD_CACHE   1  /**< cache - CPU cache state/toggle/bench */
+#else
+#define TIKU_SHELL_CMD_CACHE   0
+#endif
+#endif
+#ifndef TIKU_SHELL_CMD_DIAG
+/* Auto-on where the port owns fault/EXTI/watchdog silicon; off elsewhere. */
+#if defined(PLATFORM_STM32N6)
+#define TIKU_SHELL_CMD_DIAG    1  /**< diag - faults, EXTI and the watchdog */
+#else
+#define TIKU_SHELL_CMD_DIAG    0
+#endif
+#endif
 #ifndef TIKU_SHELL_CMD_HISTORY
 #define TIKU_SHELL_CMD_HISTORY 1  /**< history - Last N commands from FRAM */
 #endif
@@ -79,6 +101,17 @@
 #define TIKU_SHELL_CMD_MRAMBENCH 1  /**< mrambench - Time the MRAM programmer */
 #else
 #define TIKU_SHELL_CMD_MRAMBENCH 0
+#endif
+#endif
+#ifndef TIKU_SHELL_CMD_FAT
+/* Auto-on wherever the eMMC driver is built: the card is the only FAT32
+ * volume in the system, so the command has nothing to read without it.
+ * The parser itself (kernel/fs/tiku_fat.c) is hardware-independent and is
+ * regression-tested on a host -- see tools/fat32. */
+#if defined(TIKU_DRV_EMMC_ENABLE)
+#define TIKU_SHELL_CMD_FAT 1  /**< fat - read the card's FAT32 volume */
+#else
+#define TIKU_SHELL_CMD_FAT 0
 #endif
 #endif
 #ifndef TIKU_SHELL_CMD_BLE
@@ -165,6 +198,9 @@
 #ifndef TIKU_SHELL_CMD_WAKE
 #define TIKU_SHELL_CMD_WAKE    1  /**< wake    - Show active wake sources */
 #endif
+#ifndef TIKU_SHELL_CMD_POWER
+#define TIKU_SHELL_CMD_POWER   1  /**< power   - Cache/DCDC/idle power knobs */
+#endif
 #ifndef TIKU_SHELL_CMD_FREQ
 #define TIKU_SHELL_CMD_FREQ    1  /**< freq    - Show/set CPU core frequency */
 #endif
@@ -195,8 +231,14 @@
 #endif
 /* `lcd` is only useful on boards that physically wire an LCD panel
  * to the LCD_C peripheral (currently FR6989 LaunchPad). Default it
- * on / off based on the board header's TIKU_BOARD_HAS_LCD; user
- * override via -DTIKU_SHELL_CMD_LCD still wins. */
+ * on / off from TIKU_BOARD_HAS_LCD; user override via
+ * -DTIKU_SHELL_CMD_LCD still wins.
+ *
+ * That macro is a BOARD_CAPS entry in the Makefile, so it arrives as a -D
+ * and is visible here regardless of what this file has included.  It used
+ * to be defined in the board header, which meant this test silently read
+ * "no LCD" in any translation unit that reached this header first -- the
+ * include-order hazard documented at the bottom of this file. */
 #ifndef TIKU_SHELL_CMD_LCD
 #  if defined(TIKU_BOARD_HAS_LCD) && TIKU_BOARD_HAS_LCD
 #    define TIKU_SHELL_CMD_LCD 1  /**< lcd     - Drive segment-LCD interface */
@@ -408,11 +450,9 @@
 /**
  * @brief Enable TCP (telnet) backend on port 23.
  *
- * Requires the TikuKits TCP stack (TIKU_KITS_NET_TCP_ENABLE=1).
- * The net process must be auto-started alongside the CLI process.
- * Build with:
- *   make APP=cli MCU=msp430fr5994 \
- *        EXTRA_CFLAGS="-DTIKU_KITS_NET_TCP_ENABLE=1 -DTIKU_SHELL_TCP_ENABLE=1"
+ * Requires the TikuKits TCP stack (TIKU_KITS_NET_TCP_ENABLE=1), and the net
+ * process must be auto-started alongside the CLI process -- so a build needs
+ * both -DTIKU_KITS_NET_TCP_ENABLE=1 and -DTIKU_SHELL_TCP_ENABLE=1.
  */
 #ifndef TIKU_SHELL_TCP_ENABLE
 #define TIKU_SHELL_TCP_ENABLE 0
@@ -421,12 +461,13 @@
 /**
  * @brief Bring the net test servers (UDP echo + TCP + CoAP) up inside the shell.
  *
- * Off by default so the normal shell stays lean.  When set -- TikuBench's net
- * suite enables it on boards without a working APP=net (Ambiq) -- the shell
- * inits UDP/TCP and registers the CoAP server; the existing `slip` RX demux
- * feeds tiku_kits_net_ipv4_input(), which then dispatches to them, so the
- * device answers the suite's UDP/TCP/CoAP tests over SLIP.  No net process is
- * started (the shell owns the UART RX, so a second reader would conflict).
+ * Off by default so the normal shell stays lean.  When set, the shell inits
+ * UDP/TCP and registers the CoAP server, and the `slip` RX demux feeds
+ * tiku_kits_net_ipv4_input(), which dispatches to them.
+ *
+ * @note No net process is started -- the shell owns the UART RX, so a second
+ *       reader would conflict.  TikuBench's net suite enables this on boards
+ *       without a working APP=net.
  */
 #ifndef TIKU_SHELL_NET_TEST
 #define TIKU_SHELL_NET_TEST 0

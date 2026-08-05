@@ -18,6 +18,18 @@
 
 #include <stdint.h>
 
+/**
+ * @brief Core clock in Hz right now, read from the live PLL state.
+ *
+ * 64 or 128 MHz, the only two the part supports (datasheet 5.5.3).  Reads
+ * OSCILLATORS.PLL.CURRENTFREQ rather than trusting a build-time constant,
+ * because a boot has been observed to land somewhere other than it asked.
+ *
+ * @note This is the ONLY definition of the core rate; tiku_cpu_mclk_hz() and
+ *       the delay helpers both come here.
+ */
+unsigned long tiku_nordic_cpu_hz_now(void);
+
 /** @brief Enable the DWT cycle counter (used by the busy-delay helpers). */
 void tiku_nordic_dwt_init(void);
 

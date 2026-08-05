@@ -5,25 +5,11 @@
  *
  * Authors: Ambuj Varshney <ambuj@tiku-os.org>
  *
- * tiku_cpu_freq_boot_arch.c - Apollo 510 CPU/SoC bring-up + clocks
+ * tiku_cpu_freq_boot_arch.c - Apollo510 CPU/SoC bring-up and clocks.
  *
- * Clock facts (Apollo510, hardware-confirmed):
- *   - CPU core: 96 MHz in Low-Power mode (the SBL default), ~250 MHz in
- *     High-Performance "turbo" mode (the M55 runs from the free-running
- *     HFRC2; there is no HP frequency select -- CMSIS comments saying 192
- *     are stale Apollo4-era text). HP is a live feature now: `freq 250`
- *     performs the full SPOT bring-up; see tiku_cpu_freq_ambiq_init().
- *   - SysTick timer clock: 48 MHz = core/2 on this Cortex-M55. That is the OS
- *     tick + busy-delay timebase (see TIKU_MAIN_CPU_HZ in tiku.h, and the
- *     SysTick delay in tiku_cpu_common.c) — NOT the core clock.
- *   - The HFRC "free-run ~48 MHz" the SBL leaves running is a peripheral
- *     reference oscillator, unrelated to the core clock.
- * s_core_hz below reports the TRUE core clock (read from the perf-mode reg).
- *
- * SoC bring-up is fully bare-metal now (direct CMSIS register access, no
- * AmbiqSuite SDK): it enables the I/D caches + M55 prefetch unit and otherwise
- * inherits the power rails and clock tree exactly as the secure bootloader
- * (SBL) left them. Each dropped am_hal_* call is documented inline below.
+ * Fully bare-metal: direct CMSIS register access, no AmbiqSuite.  Bring-up enables
+ * the I/D caches and the M55 prefetch unit and otherwise inherits the rails and
+ * clock tree the secure bootloader left.  See the clock facts at s_core_hz.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -32,33 +18,33 @@
 #include "tiku_cpu_freq_boot_arch.h"
 
 /** True CPU core frequency in Hz; updated from the perf-mode register at boot */
+/*
+ * CLOCK FACTS, hardware-confirmed.  Three different rates get confused here:
+ *   - CPU core: 96 MHz in Low-Power (the SBL default), ~250 MHz in
+ *     High-Performance.  There is no HP frequency select; CMSIS comments
+ *     saying 192 are stale Apollo4-era text.
+ *   - SysTick: 48 MHz = core/2 on this M55.  That is the OS tick and
+ *     busy-delay timebase -- NOT the core clock.
+ *   - The HFRC "free-run ~48 MHz" the SBL leaves running is a peripheral
+ *     reference oscillator, unrelated to the core clock.
+ */
 static unsigned long s_core_hz = 96000000UL;  /* true CPU core; set from perf mode */
 
 /**
  * @brief Bare-metal Apollo510 SoC bring-up (caches + prefetch)
  *
- * Enables the Cortex-M55 I/D caches and prefetch unit via CMSIS, then
- * inherits the power rails and clock tree exactly as the Secure Boot
- * Loader (SBL) left them. Each dropped am_hal_* call is documented
- * inline — a wrong drop would brown out the chip at boot.
- *
- * De-SDK steps performed here:
- *   - Step 3 (TEST): skip am_hal_pwrctrl_low_power_init (SBL provides
- *     a stable power state; brown-out = proof the call was load-bearing).
- *   - Step 1:  dropped SIMOBUCK_INIT and temp_update — efficiency
- *     upgrades only, not correctness.
- *   - Step 2a: dropped clkmgr XTAL bookkeeping and HFRC2 config.
- *   - Step 2b (TEST): drop am_hal_clkmgr_clock_config(HFRC) — the
- *     SBL HFRC already free-runs near 48 MHz; UART cleanness is the
- *     canary.
+ * Enables the Cortex-M55 I/D caches and prefetch unit via CMSIS, then inherits
+ * the power rails and clock tree exactly as the Secure Boot Loader left them.
+ * Each dropped am_hal_* call is documented inline; a wrong drop brown-outs boot.
  */
 static void tiku_ambiq_soc_init(void) {
     /* De-SDK step 3 (TEST): skip am_hal_pwrctrl_low_power_init. The SBL leaves
-     * the chip in a usable power state -- our reset handler and all early boot
-     * already ran on it before this call ever executed. If the system boots and
-     * runs stably with a steady VDD_MCU, the SBL power suffices and we reach
-     * ZERO am_hal calls; if it browns out (no boot / hang / instability), the
-     * LDO/voltage config is load-bearing and we transcribe the essentials. */
+     * the chip in a usable power state -- the reset handler and all early boot
+     * already ran on it before this call would have executed. A board that
+     * boots and runs stably with a steady VDD_MCU proves the SBL power state
+     * suffices, leaving ZERO am_hal calls; a brown-out (no boot / hang /
+     * instability) means the LDO config is load-bearing and must be
+     * transcribed. */
 
     /* Enable the Cortex-M55 I/D caches bare-metal (CMSIS), replacing
      * am_hal_cachectrl_icache/dcache_enable(). The HAL versions are just the
@@ -93,11 +79,9 @@ static void tiku_ambiq_soc_init(void) {
 /**
  * @brief Read the true CPU core clock from the MCU performance-mode register
  *
- * Returns 96 MHz for Low-Power mode or ~250 MHz for High-Performance
- * ("turbo") mode. In HP the M55 runs from HFRC2, which free-runs at
- * approximately 250 MHz -- there is no HP frequency select on Apollo5; the
- * CMSIS enum comments saying "192MHz" are stale Apollo4-era text (the SDK's
- * own delay scaling and AM_HAL_CLKGEN_FREQ_HP250_HZ both use 250 MHz).
+ * 96 MHz in Low-Power mode, ~250 MHz in High-Performance, where the M55 runs
+ * from a free-running HFRC2.  There is no HP frequency select on Apollo5; the
+ * CMSIS enum comments saying "192MHz" are stale Apollo4-era text.
  *
  * @return Core clock frequency in Hz (96000000 or 250000000)
  */
@@ -116,8 +100,40 @@ static unsigned long tiku_ambiq_core_hz(void) {
  * core clock from the performance-mode register into s_core_hz. Called
  * once from main() before any kernel subsystem starts.
  */
+/*
+ * Release the blocks the SBL leaves powered that a quiet image never uses.
+ *
+ * The secure bootloader hands over with the CryptoCell domain, the OTP reader
+ * and the M55 trace unit all live.  MEASURED (Joulescope at J4, 96 MHz, buck):
+ * OTP -577 uA, crypto -397 uA, trace -98 uA, together -1072 uA of idle current.
+ *
+ * Safe unconditionally, because every user powers its own block up on demand:
+ *   - OTP:    hp_trims_load() / tiku_cpu_freq_ambiq_hp_probe() raise PWRENOTP
+ *             around their INFO1 reads and restore the previous state.
+ *   - crypto: tiku_trng_arch_init() raises PWRENCRYPTO and waits PWRSTCRYPTO.
+ *   - trace:  every DWT user sets DEMCR.TRCENA before reading CYCCNT.
+ *
+ * NOT released here, deliberately: the boot ROM and the upper MRAM bank
+ * (another 217 uA between them).  MRAM writes are bootrom-mediated, so powering
+ * those down under a running OS faults the next NVM write.  They stay behind
+ * the `power dev ... force` verb until a sleep path quiesces NVM first.
+ */
+#ifndef TIKU_AMBIQ_BOOT_TIDY
+#define TIKU_AMBIQ_BOOT_TIDY 1
+#endif
+
+static void tiku_ambiq_boot_tidy(void) {
+#if (TIKU_AMBIQ_BOOT_TIDY + 0)
+    CoreDebug->DEMCR &= ~CoreDebug_DEMCR_TRCENA_Msk;   /* trace unit  -98 uA */
+    PWRCTRL->DEVPWREN_b.PWRENCRYPTO = 0u;              /* CryptoCell -397 uA */
+    PWRCTRL->DEVPWREN_b.PWRENOTP    = 0u;              /* OTP reader -577 uA */
+    __DSB();
+#endif
+}
+
 void tiku_cpu_boot_ambiq_init(void) {
     tiku_ambiq_soc_init();          /* caches + prefetch; power/clocks from SBL */
+    tiku_ambiq_boot_tidy();         /* release the SBL's unused blocks          */
     s_core_hz = tiku_ambiq_core_hz();
 }
 
@@ -182,6 +198,33 @@ static uint32_t ambiq_info1_word(uint32_t otp_off, uint8_t in_otp) {
  * never set), so the SDK's HP-vs-deepsleep PWRSW handling does not apply.
  */
 
+/*
+ * Which regulator an LP (96 MHz) image runs on -- 1 = SIMO buck, 0 = LDO.
+ *
+ * The SBL hands over on the LDOs, which drop 1.8 V to the core linearly and
+ * waste the difference as heat; the SIMO buck converts instead.  MEASURED on
+ * this board, one boot per row, tidied, ELP=RET:
+ *
+ *              idle        busy        work
+ *     LDO      3.129 mA    7.155 mA    31740 kiter/s
+ *     buck     2.433 mA    5.326 mA    31716 kiter/s
+ *              -696 uA     -1829 uA    unchanged
+ *
+ * NOT INDEPENDENT OF TIKU_AMBIQ_ELP_STATE: with the FP/MVE unit left ON with
+ * its clock stopped (the CMSIS choice) the buck costs 42 uA at idle while
+ * saving 2404 uA busy, a break-even near 1.7 % duty.  With the unit RETAINED
+ * (this port's default) the idle term inverts and the buck wins at both ends,
+ * so it is the default.  The LDO stays selectable (-DTIKU_AMBIQ_LP_BUCK=0) for
+ * a board with no SIMO inductor or for isolating a regulator measurement.
+ *
+ * Two properties of the part: requesting HP (250 MHz) force-enables the buck
+ * whatever this says, and there is no validated path back to the LDO, so a
+ * reboot is what returns an image to its configured state.
+ */
+#ifndef TIKU_AMBIQ_LP_BUCK
+#define TIKU_AMBIQ_LP_BUCK 1
+#endif
+
 /* INFO1 words (OTP offsets) consumed by the HP slice, beyond the probe's. */
 #define AMBIQ_INFO1_L_TRIMCODE_O   0x91CUL
 #define AMBIQ_INFO1_E_TRIMCODE_O   0x920UL
@@ -206,6 +249,15 @@ static struct {
     uint32_t defaultton;    /* buck Ton defaults (HP->LP restore)            */
     uint32_t vddclvadj;     /* VDDC_LV per-bucket trims                      */
     uint32_t memldocfg;     /* MEMLDO trim + reference select                */
+    /* Diagnostics only -- see the VDDF PLAN note in the header.  Read by
+     * `freq probe`; never read back by the transition itself. */
+    uint32_t dx_ltrim;      /* raw INFO1 L_TRIMCODE                          */
+    uint32_t dx_etrim;      /* raw INFO1 E_TRIMCODE                          */
+    uint32_t dx_mv_x10;     /* the formula's mV boost, x10                   */
+    uint32_t dx_boost;      /* boost in trim codes, pre-clamp                */
+    uint8_t  dx_ps5_raw;    /* TVRGF(state 5) before the boost               */
+    uint8_t  dx_ps13_raw;   /* TVRGF(state 13) before the boost              */
+    uint8_t  dx_clamped;    /* 1 = the clamp bit                             */
 } s_hp;
 
 extern void tiku_cpu_ambiq_delay_us(unsigned int us);   /* tiku_cpu_common.c */
@@ -229,16 +281,17 @@ static uint8_t hp_tvrgf_clamp(uint32_t code) {
 /**
  * @brief Read + validate the per-chip HP trim plan from INFO1 (once).
  *
- * Computes the TrimSubRev-0x5F VDDF code boost exactly as the SDK does
- * (uint32 arithmetic + float rounding), then pins the state-5/13 trims.
- * Refuses (returns -1, HP stays declined) if any word is unprogrammed or the
- * narrow-slice assumption (states 5 and 13 differ only in VDDF) is violated.
+ * Computes the TrimSubRev-0x5F VDDF code boost exactly as the SDK does (uint32
+ * arithmetic + float rounding), then pins the state-5/13 trims.  Returns -1 and
+ * declines HP if a word is unprogrammed or states 5 and 13 differ beyond VDDF.
  */
 static int hp_trims_load(void) {
     uint8_t  in_otp, otp_was_on = 0u;
     uint32_t ps0, ps5, ps13, ps19, ltrim, etrim, pgm, trimrev, rev;
     uint32_t tmp1, tmp2, boost = 0u, spin;
-    float    mv;
+    /* 0, not undefined: mv is only assigned on the TrimSubRev-0x5F path, and
+     * the diagnostic below records it unconditionally.  No boost == 0 mV. */
+    float    mv = 0.0f;
 
     if (s_hp.trims_ok) {
         return 0;
@@ -330,9 +383,26 @@ static int hp_trims_load(void) {
         }
     }
 
+    /* Record what the boost computation produced, for `freq probe`.  Pure
+     * bookkeeping of values this function already has: it changes no decision
+     * and writes no register.  Without it the boost is discarded the moment it
+     * is applied, which is why a 53%-over-spec HP measurement could not be
+     * attributed to a voltage. */
+    s_hp.dx_ltrim      = ltrim;
+    s_hp.dx_etrim      = etrim;
+    s_hp.dx_mv_x10     = (uint32_t)(mv * 10.0f + 0.5f);
+    s_hp.dx_boost      = boost;
+    s_hp.dx_ps5_raw    = (uint8_t)HP_PS_TVRGF(ps5);
+    s_hp.dx_ps13_raw   = (uint8_t)HP_PS_TVRGF(ps13);
+
     s_hp.tvrgf_lp  = hp_tvrgf_clamp(HP_PS_TVRGF(ps5)      + boost);
     s_hp.tvrgf_hp  = hp_tvrgf_clamp(HP_PS_TVRGF(ps13)     + boost);
     s_hp.tvrgf_ps7 = hp_tvrgf_clamp(HP_PS_TVRGF(s_hp.ps7) + boost);
+    /* Did the [0x8,0x7F] clamp actually bite?  A clamped HP trim means the
+     * requested boost exceeded what the window can express, which is a
+     * different failure from a merely large boost. */
+    s_hp.dx_clamped = ((HP_PS_TVRGF(ps5)  + boost) > 0x7Fu ||
+                       (HP_PS_TVRGF(ps13) + boost) > 0x7Fu) ? 1u : 0u;
     if (s_hp.tvrgf_hp < s_hp.tvrgf_lp) {        /* HP must not LOWER VDDF */
         return -1;
     }
@@ -516,15 +586,13 @@ static void hp_exit(void) {
 /**
  * @brief Select the CPU operating frequency (perf mode).
  *
- * Apollo510 has Low-Power (96 MHz) and High-Performance "turbo" (~250 MHz,
- * HFRC2 free-run) modes. An HP request (`freq 250`) performs the full
- * bring-up on demand -- INFO1 trim load, SIMO buck enable, room-temperature
- * bucket pin, VDDF raise, perf switch -- each step idempotent and fail-safe:
- * any refusal leaves the core in LP at the LP voltages, and the shell reports
- * "not applied". A subsequent `freq 96` drops back to LP (voltage lowered
- * only after the frequency). The OS tick lives on the STIMER and the busy
- * delay re-reads the live core clock, so timekeeping is undisturbed.
+ * Apollo510 has Low-Power (96 MHz) and High-Performance turbo (~250 MHz, HFRC2
+ * free-run).  An HP request performs the full bring-up on demand: INFO1 trim
+ * load, buck enable, temperature-bucket pin, VDDF raise, perf switch.
  *
+ * @note Each step is idempotent and fail-safe -- any refusal leaves the core in
+ *       LP at LP voltages and the shell reports "not applied".  `freq 96` drops
+ *       back, lowering voltage after frequency.  The tick lives on the STIMER.
  * @param cpu_freq  Requested core frequency in MHz.
  */
 void tiku_cpu_freq_ambiq_init(unsigned int cpu_freq) {
@@ -547,8 +615,8 @@ void tiku_cpu_freq_ambiq_init(unsigned int cpu_freq) {
         return;
     }
 
-    /* LP request: drop out of HP if we are in it (frequency before voltage),
-     * else ensure Low-Power mode (the SBL default, so usually a no-op). */
+    /* LP request: drop out of HP when in it (frequency before voltage), else
+     * ensure Low-Power mode (the SBL default, so usually a no-op). */
     if (PWRCTRL->MCUPERFREQ_b.MCUPERFSTATUS ==
             PWRCTRL_MCUPERFREQ_MCUPERFSTATUS_HP) {
         if (s_hp.trims_ok) {
@@ -563,6 +631,15 @@ void tiku_cpu_freq_ambiq_init(unsigned int cpu_freq) {
             if (spin-- == 0u) break;
         }
     }
+
+#if (TIKU_AMBIQ_LP_BUCK + 0)
+    /* Hand the load to the SIMO buck at 96 MHz (see TIKU_AMBIQ_LP_BUCK).
+     * Failure is non-fatal -- the LDOs are the SBL's own working state, so a
+     * refused buck means "less efficient", never "broken".  See the
+     * TIKU_AMBIQ_LP_BUCK comment for the duty-cycle trade this encodes. */
+    (void)tiku_cpu_freq_ambiq_simobuck_enable();
+#endif
+
     s_core_hz = tiku_ambiq_core_hz();
 }
 
@@ -583,11 +660,11 @@ void tiku_cpu_boot_ambiq_power_wfi_enter(void) {
 /**
  * @brief Measure the live SysTick tick rate against the 32.768 kHz STIMER.
  *
- * Counts SysTick decrements (wrap-aware) across a 4096-STIMER-tick window
- * (125 ms) and returns the measured SysTick frequency in Hz. SysTick runs
- * with CLKSOURCE = processor, so this IS the core clock -- the one number
- * that proves an LP<->HP switch actually changed the CPU speed (the STIMER
- * crystal timebase is independent of the core clock). Blocks for 125 ms.
+ * Counts SysTick decrements (wrap-aware) across a 4096-STIMER-tick window and
+ * returns the measured frequency.  SysTick runs with CLKSOURCE = processor, so
+ * this IS the core clock -- the one number proving an LP/HP switch took.
+ *
+ * @return Measured core clock in Hz.  Blocks for 125 ms.
  */
 unsigned long tiku_cpu_freq_ambiq_measured_hz(void) {
     volatile uint32_t *cvr = (volatile uint32_t *)0xE000E018UL; /* SYST_CVR  */
@@ -609,6 +686,28 @@ unsigned long tiku_cpu_freq_ambiq_measured_hz(void) {
         last = now;
     }
     return (unsigned long)((count * 32768u) / 4096u);
+}
+
+/**
+ * @brief Enable the SIMO buck WITHOUT entering HP mode (measurement hook).
+ *
+ * tiku_cpu_freq_ambiq_init() only enables the buck above 96 MHz, so an LP build
+ * lives its whole life on the SBL's LDOs -- measured at 90 uA/MHz against a
+ * ~3 uA/MHz class figure.  Run-time switchable so both states measure in ONE boot.
+ *
+ * @note Loads the factory trims first (the buck sequence needs them); the
+ *       frequency is untouched.
+ * @return 0 when the buck reports ACT, negative if trims are unusable or it
+ *         never reached ACT.
+ */
+int tiku_cpu_freq_ambiq_simobuck_enable(void) {
+    if (PWRCTRL->VRSTATUS_b.SIMOBUCKST == PWRCTRL_VRSTATUS_SIMOBUCKST_ACT) {
+        return 0;                                  /* idempotent */
+    }
+    if (!s_hp.trims_ok && hp_trims_load() != 0) {
+        return -1;                                 /* trims unusable */
+    }
+    return hp_simobuck_enable();
 }
 
 void tiku_cpu_freq_ambiq_hp_probe(tiku_ambiq_hp_probe_t *out) {
@@ -659,6 +758,37 @@ void tiku_cpu_freq_ambiq_hp_probe(tiku_ambiq_hp_probe_t *out) {
         out->pgm_info       = 0xFFFFFFFFu;
         for (i = 0u; i < 20u; i++) { out->powerstate[i] = 0xFFFFFFFFu; }
     }
+
+    /* VDDF plan + the trim the hardware is actually running.  The plan is
+     * computed lazily on the FIRST HP request, so a probe taken before any
+     * `freq 250` has nothing to report -- say so via vddf_plan_ok rather than
+     * printing a zeroed plan that would read as "no boost". */
+    out->vddf_applied  = (uint8_t)MCUCTRL->VREFGEN4_b.TVRGFVREFTRIM;
+    out->vddf_plan_ok  = s_hp.trims_ok;
+    out->vddf_ltrim    = s_hp.dx_ltrim;
+    out->vddf_etrim    = s_hp.dx_etrim;
+    out->vddf_mv_x10   = s_hp.dx_mv_x10;
+    out->vddf_boost_codes = (uint8_t)s_hp.dx_boost;
+    out->vddf_ps5_raw  = s_hp.dx_ps5_raw;
+    out->vddf_ps13_raw = s_hp.dx_ps13_raw;
+    out->vddf_lp       = s_hp.tvrgf_lp;
+    out->vddf_hp       = s_hp.tvrgf_hp;
+    out->vddf_clamped  = s_hp.dx_clamped;
+
+    /* Raw regulator words for the LP-vs-HP diff. */
+    out->r_vrefgen2 = MCUCTRL->VREFGEN2;
+    out->r_vrefgen3 = MCUCTRL->VREFGEN3;
+    out->r_vrefgen4 = MCUCTRL->VREFGEN4;
+    out->r_ldoreg1  = MCUCTRL->LDOREG1;
+    out->r_ldoreg2  = MCUCTRL->LDOREG2;
+    out->r_vrctrl   = MCUCTRL->VRCTRL;
+    out->r_d2aspare = MCUCTRL->D2ASPARE;
+    out->r_sb[0]    = MCUCTRL->SIMOBUCK0;
+    out->r_sb[1]    = MCUCTRL->SIMOBUCK2;
+    out->r_sb[2]    = MCUCTRL->SIMOBUCK4;
+    out->r_sb[3]    = MCUCTRL->SIMOBUCK6;
+    out->r_sb[4]    = MCUCTRL->SIMOBUCK7;
+    out->r_sb[5]    = MCUCTRL->SIMOBUCK15;
 
     if (out->info1_in_otp && !otp_was_on) {
         PWRCTRL->DEVPWREN_b.PWRENOTP = 0u;      /* restore OTP power state */
@@ -722,10 +852,8 @@ void tiku_cpu_ambiq_dcache_invalidate(const void *addr, unsigned long len) {
  * @brief Apollo510 (M55) full instruction-cache invalidate.
  *
  * Required after out-of-band writes to EXECUTABLE MRAM (the Tier-3 module
- * loader programs code via the bootrom) and before the first fetch from it.
- * Canonical ARMv8-M code-modification sequence: barriers on BOTH sides of
- * ICIALLU -- the leading pair orders the (already D-invalidated) writes,
- * the trailing pair discards prefetched/pipelined stale instructions.
+ * loader programs code via the bootrom) and before the first fetch.  Barriers
+ * on BOTH sides of ICIALLU: leading orders the writes, trailing drops prefetch.
  */
 void tiku_cpu_ambiq_icache_invalidate(void) {
     __DSB();

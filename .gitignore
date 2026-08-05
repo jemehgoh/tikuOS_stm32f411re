@@ -47,6 +47,7 @@ Thumbs.db
 takenote.md
 problem.md
 tikukits/
+experiment/
 
 # drivers/ is registered as a git submodule pointing at
 # https://github.com/tikuos/drivers.git — no gitignore entry needed.
@@ -56,6 +57,12 @@ texput.log
 
 # Vendored third-party libraries / scratch (not part of the upstream tree)
 temp/
+
+# Local hardware reference library: vendor datasheets, board schematics and
+# hardware user guides.  Not our work, several are redistribution-restricted,
+# and they are large -- see hardware/README.md for the index and for the
+# wrong-board trap it exists to prevent.
+hardware/
 
 # Scratch demos — not yet promoted into examples/. Will move once
 # stable and the dependencies (ARP cache, DHCP wire-up) are public.
@@ -87,3 +94,8 @@ insight/
 # (Nordic-proprietary). TikuOS ships none; drop your own here to opt into
 # hardware PK (TIKU_CRACEN_PK_ENABLE=1). Never committed.
 arch/nordic/cracen_pk_microcode.h
+
+# Bench experiments: raw captures, scratch scripts and working notes.
+# Local lab output, never committed -- findings graduate into kintsugi/ decks
+# or TikuBench suites, and the raw data stays here.
+experiments/

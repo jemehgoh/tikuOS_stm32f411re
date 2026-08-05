@@ -5,20 +5,11 @@
  *
  * Authors: Ambuj Varshney <ambuj@tiku-os.org>
  *
- * tiku_flpr_arch.c - nRF54L15 FLPR (VPR RISC-V) coprocessor control.
+ * tiku_flpr_arch.c - nRF54L FLPR (VPR RISC-V) coprocessor control.
  *
- * The FLPR firmware is built by the RISC-V sub-build (arch/nordic/flpr/),
- * objcopy'd to a flat binary and embedded into this application image as a
- * binary blob (_binary_* symbols).  Starting the coprocessor is then pure
- * software: copy the blob into the SRAM carve, point VPR00.INITPC at the
- * carve base (the crt0 `_start` is the first instruction by linker-script
- * construction) and set CPURUN.EN.  Stopping clears CPURUN; a subsequent
- * start reloads the image so the firmware always boots a fresh world.
- *
- * The blob contains .text/.rodata/.data; .bss is zeroed by the FLPR crt0
- * itself.  The shared IPC page (top 1 KB of the carve, tiku_flpr_ipc.h)
- * is scrubbed here before each start so stale magic/heartbeat values can
- * never masquerade as liveness.
+ * Copies the embedded FLPR image into the SRAM carve, points VPR00.INITPC at the
+ * base and sets CPURUN; a restart reloads the image so the firmware always boots
+ * fresh.  The shared IPC page is scrubbed first so stale values cannot read as live.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -29,6 +20,7 @@
 
 #include <arch/nordic/tiku_device_select.h>   /* NRF_VPR00_NS / NRF_MPC00  */
 #include <arch/nordic/tiku_nordic_core.h>     /* NVIC enable (IRQ 76)      */
+#include <arch/nordic/tiku_cpu_common.h>      /* tiku_nordic_cpu_hz_now()  */
 #include <arch/nordic/tiku_timer_arch.h>       /* TIKU_CLOCK_ARCH_SECOND    */
 #include <kernel/timers/tiku_clock.h>          /* pulse wall-clock measure  */
 #include <kernel/cpu/tiku_watchdog.h>          /* kick during the long probe */
@@ -270,7 +262,16 @@ int tiku_flpr_arch_pulse(uint32_t period_us, uint32_t edges,
         (1u << 28) |                           /* CTRLSEL = VPR            */
         (0u << 1);                             /* INPUT = Connect          */
 
-    req->half_cycles = period_us * 64u;        /* 128 cycles/us, half duty */
+    /* HALF-CYCLES FROM THE LIVE CORE CLOCK, NOT A CONSTANT.  The FLPR shares
+     * HCLK128M with the M33 (datasheet block diagram: both sit inside "MCU PD
+     * (128 MHz)"), so its cycle rate follows whatever the core was built for.
+     * Hard-coding `period_us * 64`, i.e. 128 cycles/us, would break: on a
+     * TIKU_NORDIC_CPU_MHZ=64 build every waveform then came out exactly TWICE
+     * as slow: measured, a requested 1000 ms pattern took 2078 ms.  Deriving
+     * the figure keeps the API's contract (period_us means microseconds) at
+     * either clock. */
+    req->half_cycles = period_us * (uint32_t)(tiku_nordic_cpu_hz_now()
+                                              / 2000000UL);
     req->edges = edges;
     __asm__ volatile ("dsb 0xF" ::: "memory");
     TIKU_FLPR_SHARED->rsp = 0u;
@@ -300,6 +301,74 @@ int tiku_flpr_arch_pulse(uint32_t period_us, uint32_t edges,
               * 1000u / (uint32_t)TIKU_CLOCK_SECOND;
     }
     return (spin < 20000000u) ? 0 : -2;       /* -2: firmware never DONE  */
+}
+
+/*---------------------------------------------------------------------------*/
+/* Compute-only load (power characterisation)                                */
+/*---------------------------------------------------------------------------*/
+
+/* NON-BLOCKING by design.  The question this exists to answer is what the
+ * coprocessor costs while the APPLICATION CORE IS ASLEEP, so the M33 must be
+ * free to enter WFI after handing the work over.  A blocking call would make
+ * "FLPR busy, CPU idle" unmeasurable -- the only state it could ever produce is
+ * "both busy". */
+int tiku_flpr_arch_spin_start(uint32_t iters)
+{
+    if (!tiku_flpr_arch_running() || iters == 0u) {
+        return -1;
+    }
+    TIKU_FLPR_SHARED->spin_passes = 0u;
+    TIKU_FLPR_SHARED->spin_iters = iters;
+    TIKU_FLPR_SHARED->rsp = 0u;
+    __asm__ volatile ("dsb 0xF" ::: "memory");
+    TIKU_FLPR_SHARED->cmd = TIKU_FLPR_CMD_SPIN;
+    return 0;
+}
+
+uint32_t tiku_flpr_arch_spin_passes(void)
+{
+    return TIKU_FLPR_SHARED->spin_passes;
+}
+
+/* End a sustained load early.  The firmware re-reads the request count every
+ * pass, so zeroing it drops the coprocessor back to its mailbox loop. */
+void tiku_flpr_arch_spin_abort(void)
+{
+    TIKU_FLPR_SHARED->spin_iters = 0u;
+    __asm__ volatile ("dsb 0xF" ::: "memory");
+}
+
+int tiku_flpr_arch_spin_done(void)
+{
+    return (TIKU_FLPR_SHARED->rsp == TIKU_FLPR_RSP_SPIN_DONE) ? 1 : 0;
+}
+
+/* Timed variant: the clock oracle.  The FLPR shares HCLK128M with the M33, so a
+ * FIXED amount of coprocessor work must complete in half the wall time at
+ * 128 MHz that it takes at 64 MHz.  Timed here against the GRTC (1 MHz,
+ * PLL-independent) rather than the 128 Hz system tick, because the tick's
+ * 7.81 ms granularity is coarser than the effect on short runs. */
+int tiku_flpr_arch_spin_timed(uint32_t iters, uint32_t *passes, uint32_t *us)
+{
+    uint32_t t0, spin;
+
+    if (tiku_flpr_arch_spin_start(iters) != 0) {
+        return -1;
+    }
+    t0 = NRF_GRTC_S->SYSCOUNTER[0].SYSCOUNTERL;
+    for (spin = 0u; spin < 200000000u; spin++) {
+        if (TIKU_FLPR_SHARED->rsp == TIKU_FLPR_RSP_SPIN_DONE) {
+            break;
+        }
+    }
+    if (us != (uint32_t *)0) {
+        *us = (uint32_t)(NRF_GRTC_S->SYSCOUNTER[0].SYSCOUNTERL - t0);
+    }
+    if (passes != (uint32_t *)0) {
+        *passes = TIKU_FLPR_SHARED->spin_passes;
+    }
+    TIKU_FLPR_SHARED->rsp = 0u;
+    return (spin < 200000000u) ? 0 : -2;
 }
 
 /*---------------------------------------------------------------------------*/
@@ -493,8 +562,8 @@ uint32_t tiku_flpr_arch_conn_events(void)
     return TIKU_FLPR_SHARED->conn_events;
 }
 
-/* Phase E: peer + our address (from the CONNECT_IND) for SMP f5/f6.  Copies
- * InitA (central = A) and AdvA (us = B); returns the type bitfield (bit0
+/* Phase E: peer + local address (from the CONNECT_IND) for SMP f5/f6.  Copies
+ * InitA (central = A) and AdvA (local = B); returns the type bitfield (bit0
  * InitA, bit1 AdvA; 1 = random).  Valid once conn_active(). */
 uint8_t tiku_flpr_arch_conn_addrs(uint8_t inita[6], uint8_t adva[6])
 {
@@ -510,10 +579,10 @@ uint8_t tiku_flpr_arch_conn_addrs(uint8_t inita[6], uint8_t adva[6])
     return TIKU_FLPR_SHARED->conn_addr_types;
 }
 
-/* Phase E3: last enc_req_seq we derived a session key for. */
+/* Phase E3: last enc_req_seq a session key was derived for. */
 static uint32_t flpr_enc_serviced;
 
-/* Service an LL_ENC_REQ the FLPR forwarded: generate our SKDs/IVs, derive
+/* Service an LL_ENC_REQ the FLPR forwarded: generate the SKDs/IVs, derive
  * SK = e(LTK, SKDm||SKDs) + IV = IVm||IVs, publish them, and release the FLPR
  * to send LL_ENC_RSP.  Returns 1 the (first) call that services a request. */
 int tiku_flpr_arch_enc_service(const uint8_t ltk[16])
@@ -530,8 +599,8 @@ int tiku_flpr_arch_enc_service(const uint8_t ltk[16])
         skd[i] = sh->enc_skdm[i];
     }
     tiku_trng_arch_init();
-    (void)tiku_trng_arch_read_bytes(&skd[8], 8); /* our SKDs (MSO half)       */
-    (void)tiku_trng_arch_read_bytes(ivs, 4);     /* our IVs                   */
+    (void)tiku_trng_arch_read_bytes(&skd[8], 8); /* local SKDs (MSO half)     */
+    (void)tiku_trng_arch_read_bytes(ivs, 4);     /* local IVs                 */
     (void)tiku_crypto_arch_aes_ecb(0, ltk, 16u, skd, sk);   /* SK = e(LTK,SKD)*/
     for (i = 0; i < 8; i++) {
         sh->enc_skds[i] = skd[8 + i];

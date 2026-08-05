@@ -5,17 +5,11 @@
  *
  * Authors: Ambuj Varshney <ambuj@tiku-os.org>
  *
- * tiku_timer_arch.c - Apollo 510 system tick (always-on STIMER)
+ * tiku_timer_arch.c - Apollo510 system tick (always-on STIMER).
  *
- * On Ambiq the Cortex-M SysTick freezes during WFI sleep -- its clock is gated --
- * so a WFI idle with only SysTick armed never wakes, and the tick does not
- * advance while the core is parked (verified on hardware on Apollo4 Lite, the
- * same trait on this M55 part). The system tick therefore runs from the always-on
- * 32.768 kHz STIMER (compare-B / NVIC IRQ 33), which keeps running through sleep
- * and wakes the core every tick -- see tiku_htimer_arch.c, which owns the STIMER
- * and delivers the periodic interrupt into tiku_ambiq_tick_advance() below.
- * SysTick is left configured as a free-running down-counter (no TICKINT) purely so
- * the calibrated SYST_CVR micro-delay in tiku_cpu_common.c still works.
+ * SysTick freezes during WFI on Ambiq, so an idle with only SysTick armed never
+ * wakes and the tick stops while parked.  The tick therefore runs from the 32.768
+ * kHz STIMER; SysTick stays free-running, untick-ed, for the calibrated delay.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -65,9 +59,10 @@ static volatile unsigned int   s_subsec  = 0;
  *
  * Leaves SysTick free-running (ENABLE | CLKSOURCE, no TICKINT) so the SYST_CVR
  * micro-delay keeps working, then starts the always-on STIMER periodic tick at
- * TIKU_CLOCK_ARCH_SECOND Hz (STIMER_XTAL_HZ / rate counts per tick). The STIMER
- * survives WFI sleep, so the kernel clock advances and the core wakes every tick
- * even while idle-parked.
+ * TIKU_CLOCK_ARCH_SECOND Hz.
+ *
+ * @note The STIMER survives WFI sleep, so the kernel clock advances and the
+ *       core wakes every tick even while idle-parked.
  */
 void tiku_clock_arch_init(void) {
     SYST_RVR = (uint32_t)(TIKU_CLOCK_ARCH_INTERVAL - 1u);
@@ -89,13 +84,12 @@ void tiku_ambiq_tick_advance(void) {
 /**
  * @brief Advance the system clock by @p n ticks at once.
  *
- * The tickless-idle resync path (tiku_htimer_arch.c): after a
- * stretched sleep the STIMER counter says how many whole ticks really
- * elapsed, and they are credited in one call so the kernel clock is
- * exact regardless of how far the tick interrupt was stretched.
- * n == 1 is the normal per-tick cadence.  Rolls the sub-second
- * accumulator with a divide so a long stretch costs O(1).
+ * The tickless-idle resync path: after a stretched sleep the STIMER counter
+ * says how many whole ticks really elapsed, and they are credited in one call
+ * so the kernel clock is exact however far the tick was stretched.
  *
+ * @note n == 1 is the normal per-tick cadence.  The sub-second accumulator
+ *       rolls with a divide, so a long stretch costs O(1).
  * @param n  Whole ticks to credit (>= 1)
  */
 void tiku_ambiq_tick_advance_n(unsigned long n) {

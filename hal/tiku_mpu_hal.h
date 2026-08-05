@@ -33,6 +33,10 @@
 #include "arch/ambiq/tiku_mpu_arch.h"
 #elif defined(PLATFORM_NORDIC)
 #include "arch/nordic/tiku_mpu_arch.h"
+#elif defined(PLATFORM_STM32N6)
+#include "arch/stm32n6/tiku_mpu_arch.h"
+#elif defined(PLATFORM_RA8P1)
+#include "arch/ra8p1/tiku_mpu_arch.h"
 #endif
 
 /*---------------------------------------------------------------------------*/
@@ -40,24 +44,20 @@
 /*---------------------------------------------------------------------------*/
 
 /**
- * @brief Read the current segment-access-mode register
+ * @brief Read the current segment-access-mode register.
  *
- * Returns the raw value of the hardware register that holds per-segment
- * read/write/execute permission bits (MPUSAM on MSP430). Primarily used
- * for diagnostic inspection and testing; the kernel should use the
- * higher-level arch functions instead.
+ * Returns the raw per-segment permission bits, for diagnostics and testing;
+ * the kernel should use the higher-level arch functions instead.
  *
  * @return Current permission register value
  */
 uint16_t tiku_mpu_arch_get_sam(void);
 
 /**
- * @brief Write a new value to the segment-access-mode register
+ * @brief Write a new value to the segment-access-mode register.
  *
- * Handles any password/unlock sequence required by the hardware,
- * writes the new permission bits, and re-enables the MPU. Primarily
- * used internally by arch-level functions; the kernel should use the
- * higher-level arch functions instead.
+ * Handles whatever password or unlock sequence the hardware needs, writes the
+ * bits and re-enables the MPU.  Used internally by the arch layer.
  *
  * @param sam  New permission register value
  */
@@ -66,8 +66,8 @@ void tiku_mpu_arch_set_sam(uint16_t sam);
 /**
  * @brief Read the current MPU control register
  *
- * Returns the raw value of the MPU control register (MPUCTL0 on MSP430).
- * Used to check whether the MPU is enabled.
+ * Returns the raw value of the MPU control register (MPUCTL0 on MSP430), from
+ * which the caller can tell whether the MPU is enabled.
  *
  * @return Current control register value
  */

@@ -5,15 +5,11 @@
  *
  * Authors: Ambuj Varshney <ambuj@tiku-os.org>
  *
- * tiku_ieee154_arch.h - from-scratch IEEE 802.15.4-2006 250 kbps PHY on the
- *                       nRF54L on-die RADIO (N1 PHY bring-up; kintsugi/
- *                       radio.md N-track).  Clean-room: MDK registers only,
- *                       no SoftDevice / OpenThread / sdk-nrf.
+ * tiku_ieee154_arch.h - from-scratch IEEE 802.15.4 250 kbps PHY (nRF54L RADIO).
  *
- * The RADIO is a single peripheral shared with the BLE facade; 15.4 mode
- * REPLACES the link config (MODE/PCNF/CRC/SFD).  Callers must own the
- * radio (idle BLE first) and restore BLE with tiku_ieee154_arch_mode_ble()
- * when done.  PHY only -- no addressing, ACK, or CSMA yet (that is N2).
+ * The RADIO is shared with the BLE facade and 15.4 mode REPLACES the link config,
+ * so a caller must own the radio and restore BLE with _mode_ble() when done.
+ * Clean-room: MDK registers only, no SoftDevice, OpenThread or sdk-nrf.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -29,7 +25,7 @@
 
 /** @brief Max on-air frame (PHR counts it): 127 B incl the 2-byte FCS. */
 #define TIKU_154_MAX_FRAME   127u
-/** @brief Max MAC payload we hand to/from the caller (frame minus FCS). */
+/** @brief Max MAC payload handed to/from the caller (frame minus FCS). */
 #define TIKU_154_MAX_PSDU    125u
 
 /** @brief 1 if this build has the 15.4 PHY (nRF54L on-die RADIO). */
@@ -80,10 +76,10 @@ int tiku_ieee154_arch_ed(uint8_t channel, int8_t *dbm);
 int tiku_ieee154_arch_cca(void);
 
 /**
- * @brief Receive one frame and, if it is a CRC-OK data frame for us that
+ * @brief Receive one frame and, if it is a CRC-OK data frame for this node that
  *        requests an ACK, transmit a spec-timed ACK via the hardware T_IFS
  *        turnaround (192 us) -- no software in the ack path.
- * @param my_pan/my_addr  our 16-bit PAN/short address for the in-window
+ * @param my_pan/my_addr  the 16-bit PAN/short address for the in-window
  *                        filter (0xFFFF dst = broadcast, never ACKed).
  * @param did_ack  out (optional): 1 if an ACK was launched.
  * @return >0 payload length (FCS stripped), 0 timeout, -1 bad FCS.

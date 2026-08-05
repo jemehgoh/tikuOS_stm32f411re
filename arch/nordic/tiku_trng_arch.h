@@ -5,14 +5,11 @@
  *
  * Authors: Ambuj Varshney <ambuj@tiku-os.org>
  *
- * tiku_trng_arch.h - nRF54L15 True Random Number Generator (CRACEN RNG)
+ * tiku_trng_arch.h - nRF54L true random number generator (CRACEN RNG).
  *
- * Mirrors the RP2350 TRNG arch API (return codes plus init /
- * read_u32 / read_bytes) so shared callers link unchanged. The backend
- * drives the ring-oscillator TRNG inside CRACEN with AES conditioning
- * (see tiku_trng_arch.c); it blocks-polls the entropy FIFO and never
- * fabricates random bytes -- on a hardware stall it returns
- * TIKU_TRNG_ERR_TIMEOUT rather than substituting pseudo-random data.
+ * Mirrors the RP2350 TRNG arch API so shared callers link unchanged.  The backend
+ * blocks polling the entropy FIFO and never fabricates bytes: a hardware stall
+ * returns ERR_TIMEOUT rather than substituting pseudo-random data.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -23,8 +20,8 @@
 #include <stdint.h>
 #include <stddef.h>
 
-/**
- * @brief Return codes for the TRNG driver (identical to the other ports).
+/*
+ * Return codes for the TRNG driver (identical to the other ports).
  *
  * TIKU_TRNG_OK            — success.
  * TIKU_TRNG_ERR_INVALID   — NULL pointer.
@@ -36,8 +33,13 @@
 #define TIKU_TRNG_ERR_TIMEOUT   -2
 #define TIKU_TRNG_ERR_NOT_READY -3
 
-/**
- * @brief One-time init. Idempotent; the RNG is powered per request.
+/*
+ * Return codes for the TRNG driver (identical to the other ports).
+ *
+ * TIKU_TRNG_OK            — success.
+ * TIKU_TRNG_ERR_INVALID   — NULL pointer.
+ * TIKU_TRNG_ERR_TIMEOUT   — the RNG FIFO did not deliver in time.
+ * TIKU_TRNG_ERR_NOT_READY — reserved (kept for cross-port API parity).
  */
 void tiku_trng_arch_init(void);
 

@@ -5,22 +5,11 @@
  *
  * Authors: Ambuj Varshney <ambuj@tiku-os.org>
  *
- * tiku_basic_module.h - runtime-loadable native module ABI (Tier 3 of
- * kintsugi/loadable.md).
+ * tiku_basic_module.h - runtime-loadable native module ABI.
  *
- * A native module is machine code compiled SEPARATELY from the firmware, at a
- * fixed load address (the module carve), that registers Tier-2 BASIC words at
- * load time.  Because it is separately compiled, it cannot link against
- * firmware symbols -- it reaches every firmware service through a JUMP TABLE
- * (tiku_basic_syscalls_t) passed to its entry point.  This is the exact
- * Tier-2 ABI (tiku_basic_ext.h) re-exposed as a table so a load-time-resolved
- * module can call it.
- *
- * The module image begins with a tiku_module_header_t at the carve base; its
- * init routine is at carve_base + init_off.  The loader validates the header,
- * then calls init(&syscalls); the module registers its words and returns.
- * This header is included by BOTH the firmware and the separate module build,
- * so it stays plain C99 + the Tier-2 handler typedefs.
+ * A module is machine code compiled separately at a fixed address, so it cannot
+ * link against firmware symbols and reaches every service through a jump table
+ * passed to its entry point.  Included by both the firmware and the module build.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -65,11 +54,10 @@
  *     HIFRAM MPU segment is already R+W+X).  No cache, no barrier. */
 #if defined(AM_PART_APOLLO510)
 /* DELIBERATELY UNDEFINED on this part: there is no NVM carve (the module
- * executes from the ITCM -- see TIKU_MODULE_EXEC_ADDR below), and the address
- * this used to hold, 0x488000, is the NVM REGION BASE now that the slot is
- * gone -- which is to say the NVM tier.  A stale reference would program over
- * live tier data, so leaving it undefined turns that mistake into a compile
- * error instead. */
+ * executes from the ITCM -- see TIKU_MODULE_EXEC_ADDR below), and 0x488000 is
+ * the NVM REGION BASE here, which is to say the NVM tier.  A stale reference
+ * would program over live tier data, so leaving this undefined turns that
+ * mistake into a compile error instead. */
 #elif defined(AM_PART_APOLLO4L)
 #define TIKU_MODULE_CARVE_ADDR  0x78000u
 #elif defined(PLATFORM_RP2350)
@@ -96,10 +84,10 @@
 #endif
 
 /*
- * WHERE THE IMAGE COMES FROM (P3e).  It used to come only from a blob linked
- * into the firmware -- so a module image was counted TWICE, once as .rodata in
- * the code window and once as the reserved slot it was copied into.  The image
- * is now an ordinary store file, and the embedded blob becomes an optional
+ * WHERE THE IMAGE COMES FROM.  A blob linked into the firmware would be
+ * counted TWICE -- once as .rodata in the code window, once as the reserved
+ * slot it is copied into.  The image is therefore an ordinary store file, and
+ * the embedded blob is only an optional
  * SEEDER: when a board has never been provisioned, the first install writes the
  * embedded copy into the store and thereafter the FILE is authoritative.  That
  * is what makes a module replaceable over serial instead of by reflashing, and
@@ -119,7 +107,7 @@
 #endif
 
 /*
- * WHERE THE MODULE EXECUTES (P3f) -- A SETTLED DECISION, NOT PENDING WORK.
+ * WHERE THE MODULE EXECUTES -- A SETTLED DECISION, NOT PENDING WORK.
  *
  * A module is pre-linked to an absolute address, so SOME fixed window is
  * unavoidable; nothing requires it to be in NVM.  The plan once read as "move
@@ -144,9 +132,9 @@
  *
  * THE POWER QUESTION IS NOW MEASURED, not inferred.  ITCM and DTCM power share
  * one field, PWRCTRL->MEMPWREN.PWRENTCM, and nothing in arch/ambiq programs it,
- * so the reset default is what we get.  The old reasoning here -- "we declare
- * 512 KB of DTCM, therefore PWRENTCM must be 7" -- was unsound (the port uses
- * ~30 KB of DTCM, so PWRENTCM=1 would fit too), which is why the window needing
+ * so the reset default is what applies.  Arguing "the linker declares 512 KB
+ * of DTCM, therefore PWRENTCM must be 7" would be unsound -- the port uses
+ * ~30 KB of DTCM, so PWRENTCM=1 would fit too -- which is why a window needing
  * 36 KB against a possible 32 KB was a real risk.
  *
  * Run on an Apollo510B EVB, 2026-07-26 (TikuBench tests/memory/test_mem_tcm.c):

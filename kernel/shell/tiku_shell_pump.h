@@ -5,18 +5,11 @@
  *
  * Authors: Ambuj Varshney <ambuj@tiku-os.org>
  *
- * tiku_shell_pump.h - one cooperative service step for busy-wait loops
+ * tiku_shell_pump.h - one cooperative service step for busy-wait loops.
  *
- * Long-running shell/BASIC operations (an MQTT connect, an HTTPS
- * fetch, a blocking receive) busy-wait inside a single command
- * dispatch, which starves every kernel service the scheduler would
- * normally run.  Historically each such loop hand-rolled its own
- * "pump" — kick the watchdog, drain the WiFi radio, pace
- * tcp_periodic, poll for Ctrl-C — and the copies drifted: one used
- * the raw console getc instead of the SLIP-aware demux and misread
- * IP payload bytes as Ctrl-C (the MQTTWAIT$ abort bug).  This is the
- * single shared implementation; busy-wait loops call it once per
- * iteration and abort when it returns non-zero.
+ * A long operation that busy-waits inside one command dispatch starves every
+ * kernel service, so each such loop calls this once per iteration and aborts when
+ * it returns non-zero.  One shared implementation, because hand-rolled copies drifted.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -29,16 +22,15 @@
 /**
  * @brief One cooperative service step for a busy-wait loop.
  *
- * Kicks the watchdog; drains the WiFi radio RX (CYW43 builds — the
- * driver process is starved while we busy-wait, so without this the
- * chip's FIFO fills and inbound segments never reach the stack);
- * paces tiku_kits_net_tcp_periodic() to ~8 Hz (it advances
- * connect/retransmit timeouts PER CALL, so calling it every loop
- * iteration would blow through them) and runs @p periodic at the
- * same paced point; then polls the console for Ctrl-C — through the
- * SLIP-aware demux on shared-UART builds, so an IP payload byte 0x03
- * is never misread as a break (and no stack-bound bytes are stolen).
+ * Kicks the watchdog, drains the WiFi radio RX, paces
+ * tiku_kits_net_tcp_periodic() to ~8 Hz along with @p periodic, then polls the
+ * console for Ctrl-C through the SLIP-aware demux.
  *
+ * @note The RX drain matters because the driver process is starved during a
+ *       busy-wait, so the chip's FIFO would fill and inbound segments never
+ *       reach the stack.  tcp_periodic advances connect/retransmit timeouts PER
+ *       CALL, so calling it every iteration would blow through them.  The
+ *       SLIP-aware poll keeps an IP payload byte 0x03 from reading as a break.
  * @param periodic Optional protocol housekeeping to run at the paced
  *                 net service point (e.g. tiku_kits_net_mqtt_periodic);
  *                 NULL for none.

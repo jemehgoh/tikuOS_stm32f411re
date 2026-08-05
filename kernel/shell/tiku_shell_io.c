@@ -5,12 +5,10 @@
  *
  * Authors: Ambuj Varshney <ambuj@tiku-os.org>
  *
- * tiku_shell_io.c - I/O abstraction implementation
+ * tiku_shell_io.c - shell I/O abstraction implementation.
  *
- * Provides:
- *   - A lightweight printf that routes through the active backend's putc
- *   - Wrapper functions for input / output / flag queries
- *   - The built-in UART backend (serial terminal, echo + CRLF)
+ * A lightweight printf routed through the active backend's putc, wrappers for
+ * input, output and flag queries, and the built-in UART backend.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -62,11 +60,9 @@ tiku_shell_io_get_backend(void)
 /**
  * @brief Write one character through the active backend.
  *
- * When the backend sets TIKU_SHELL_IO_CRLF, a bare '\n' is expanded to
- * "\r\n" so serial terminals return to column 0; every other byte passes
- * through untouched.  This is the single output primitive — puts() and
- * the printf helpers below all route through it, so command code may emit
- * a trailing '\n' with putc() and still get a correct line break.
+ * When the backend sets TIKU_SHELL_IO_CRLF a bare '\n' expands to "\r\n" so
+ * serial terminals return to column 0; every other byte passes through.  This
+ * is the single output primitive -- puts() and the printf helpers route here.
  */
 void
 tiku_shell_io_putc(char c)
@@ -168,10 +164,9 @@ io_emit_num(unsigned long uval, int base, int upper, int width,
 /**
  * @brief Lightweight printf through the active backend.
  *
- * Supports %d, %u, %x, %X, %p, %s, %c, and %% with the '-' (left)
- * and '0' (zero-pad) flags, a field width, and the 'l' length
- * modifier -- so %04X, %-8s, %3u all work.  CRLF expansion is
- * applied if the backend flag is set.  No heap; stack formatting.
+ * Supports %d, %u, %x, %X, %p, %s, %c and %% with the '-' and '0' flags, a
+ * field width and the 'l' modifier, so %04X, %-8s and %3u all work.  CRLF
+ * expansion applies if the backend flag is set; no heap, stack formatting only.
  */
 void
 tiku_shell_io_printf(const char *fmt, ...)

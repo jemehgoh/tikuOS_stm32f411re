@@ -5,27 +5,11 @@
  *
  * Authors: Ambuj Varshney <ambuj@tiku-os.org>
  *
- * tiku_vfs_tree_data.c - /data VFS nodes (user-data / persisted state)
+ * tiku_vfs_tree_data.c - /data VFS nodes (user data and persisted state).
  *
- * /data is a DYNAMIC directory backed by the Tiku File Store (kernel/fs):
- * arbitrary files can be created, written, read, listed and deleted at run
- * time and are kept in NVM.  So:
- *
- *   write /data/blink.bas "10 LED 0,1 : ..."   # create / overwrite
- *   ls /data                                    # list files
- *   cat /data/blink.bas                         # read
- *
- * The file store sits on the carved NVM region's filesystem extent and is
- * durable on both NVM families:
- *   - MSP430: a `.persistent` FRAM array, written in place.
- *   - Ambiq : the FS extent of the memory-mapped NVM region -- read in place
- *             (no SRAM shadow), written via the region backend (MRAM bootrom),
- *             so files survive a power cut.  Sized in megabytes (see
- *             derived from the carve at mount), above the NVM tier's
- *             bump extent (front) and the reserved durable tail.
- *   - else  : plain `.bss` (functional but volatile) until a backend lands.
- * When BASIC is built, the legacy /data/basic bridge to the interpreter's
- * program store is kept as a static child.
+ * A dynamic directory backed by the Tiku File Store: files can be created,
+ * written, read, listed and deleted at run time.  The store rides the carved NVM
+ * region where there is one, a .persistent FRAM array on MSP430, else .bss.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -40,18 +24,13 @@
 /*
  * THE STORE IS NOT A SHELL FEATURE.
  *
- * This whole file used to sit inside `#if defined(TIKU_SHELL_ENABLE)`, because
- * /data began life as the place BASIC kept its saved program.  That was fine
- * while every tenant was a shell feature, and wrong as soon as one was not:
- * loadable modules and radio firmware are kernel-level tenants that must mount
- * and read the store in a build with no shell at all.
- *
- * So the file is now in two halves.  Everything down to the DYNAMIC-DIRECTORY
- * OPS banner -- the backing memory, the backend, the mount, and the
- * tiku_vfs_tree_data_store() accessor -- is always compiled.  The VFS
- * presentation above it (the /data node, its dynamic ops, and the df snapshot)
- * stays behind the shell gate, because a namespace entry with no shell to type
- * at it is genuinely shell-shaped.
+ * The file has two halves.  Everything down to the DYNAMIC-DIRECTORY OPS
+ * banner -- the backing memory, the backend, the mount, and the
+ * tiku_vfs_tree_data_store() accessor -- is always compiled, because loadable
+ * modules and radio firmware are kernel-level tenants that must mount and read
+ * the store in a build with no shell at all.  The VFS presentation above it
+ * (the /data node, its dynamic ops, and the df snapshot) stays behind the shell
+ * gate: a namespace entry with no shell to type at it is genuinely shell-shaped.
  */
 
 #include <string.h>
@@ -72,7 +51,8 @@
  * RRAM region (byte-writable NVM read in place, written via the region backend
  * through the RRAMC WEN gate).  MSP430: a `.persistent` FRAM array (in place).
  * Other parts: plain `.bss` (volatile) until a backend lands. */
-#if defined(PLATFORM_AMBIQ) || defined(PLATFORM_RP2350) || defined(PLATFORM_NORDIC)
+#if defined(PLATFORM_AMBIQ) || defined(PLATFORM_RP2350) || \
+    defined(PLATFORM_NORDIC) || defined(PLATFORM_STM32N6)
 
 /*
  * The fit/fill assertions that stood here are GONE, not relaxed.
@@ -148,11 +128,9 @@ data_tfs_ensure(void)
 /**
  * @brief Report how the carved region is divided, for `df`.
  *
- * The two extents are compile-time constants; the region size is whatever the
- * linker carved.  Publishing both, plus the difference, is what keeps the split
- * honest at run time: `idle_bytes` is the number that was quietly 676 KB on the
- * nRF54LM20 before v0.06, and it must read 0.  A non-zero value means
- * TIKU_NVM_REGION_BYTES has fallen out of step with the device linker script.
+ * The extents are compile-time constants and the region size is whatever the
+ * linker carved, so `df` publishes both plus their difference: `idle_bytes`
+ * must read 0, or TIKU_NVM_REGION_BYTES is out of step with the linker script.
  *
  * @param out  Snapshot to fill in (extent fields only).
  */
@@ -271,10 +249,9 @@ data_fill_extents(tiku_data_df_t *out)
 /* entry, which is what needs a shell.                                        */
 /*
  * NOTE ON THE TEST: `#if TIKU_SHELL_ENABLE`, on the VALUE, not
- * `#if defined(TIKU_SHELL_ENABLE)`.  tiku.h:265 defines the macro
- * UNCONDITIONALLY (to 0 when the shell is off), so the `defined()` form is
- * always true -- which is why the gate this file used to carry never actually
- * excluded anything, and why the rest of kernel/vfs/tree/ spells it this way.
+ * `#if defined(TIKU_SHELL_ENABLE)`.  tiku.h defines the macro UNCONDITIONALLY
+ * (to 0 when the shell is off), so the `defined()` form is always true and
+ * gates nothing.  The rest of kernel/vfs/tree/ spells it this way too.
  */
 /*===========================================================================*/
 #if TIKU_SHELL_ENABLE
@@ -505,8 +482,8 @@ tiku_vfs_tree_data_df(tiku_data_df_t *out)
     out->slot_bytes = (uint16_t)TIKU_TFS_SLOT_DATA;
     out->cap_bytes  = (uint32_t)data_fs.nfiles * (uint32_t)TIKU_TFS_SLOT_DATA;
     /* One source of truth for what to CALL the NVM: the device header's
-     * TIKU_DEVICE_NVM_LABEL (FRAM / RRAM / MRAM / Flash).  This used to be a
-     * per-platform ladder here, which is exactly how a second copy drifts. */
+     * TIKU_DEVICE_NVM_LABEL (FRAM / RRAM / MRAM / Flash), never a per-platform
+     * ladder here -- a second copy is exactly how the two drift apart. */
     out->backing = TIKU_DEVICE_NVM_LABEL;
     data_fill_extents(out);
     return 0;

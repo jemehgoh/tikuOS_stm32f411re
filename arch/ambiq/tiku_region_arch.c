@@ -5,22 +5,11 @@
  *
  * Authors: Ambuj Varshney <ambuj@tiku-os.org>
  *
- * tiku_region_arch.c - Apollo 510 physical memory-region table
+ * tiku_region_arch.c - Apollo510 physical memory-region table.
  *
- * Builds the region table at runtime from linker symbols, mirroring the
- * RP2350 port (arch/arm-rp2350/tiku_region_arch.c). The DTCM is split into:
- *   - a general SRAM region below .uninit (.data / .bss / the tier buffers),
- *   - an NVM overlay on .uninit -- the NOLOAD area where .persistent vars
- *     live. It survives warm reset, and crucially is a region of type NVM,
- *     which is what tiku_persist_register() and the hibernate marker REQUIRE
- *     (they reject any buffer not contained in an NVM region). Without this
- *     the persist + hibernate APIs silently fail on Apollo510.
- *
- * Power-cycle durability is provided by tiku_mem_arch.c: it mirrors .uninit to
- * a reserved MRAM page via the bootrom and restores it on boot. The .uninit
- * area is the live working copy (warm-reset durable); the MRAM mirror carries
- * it across power loss. MRAM is still reported FLASH here -- the mirror is a
- * small reserved slice at the top of MRAM, not a separate region.
+ * Built at run time from linker symbols.  The DTCM splits into a general SRAM
+ * region and an NVM overlay on .uninit -- typed NVM because persist and hibernate
+ * reject buffers outside an NVM region, and would silently fail without it.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -39,25 +28,24 @@ static tiku_mem_region_t       s_regions[5];
 /** @brief Number of valid entries in s_regions; 0 until first call. */
 static tiku_mem_arch_size_t    s_region_count;
 
-/**
- * @brief Return the Apollo 510 physical memory-region table
+/*
+ * Return the Apollo 510 physical memory-region table.
  *
- * Builds the table lazily on the first call from linker symbols, then
- * caches it for subsequent calls. The layout contains five regions:
+ * Built lazily on the first call from linker symbols, then cached.  The five
+ * regions:
  *
- *   1. DTCM SRAM — from RAM start up to .uninit (volatile: .data, .bss,
+ *   1. DTCM SRAM -- from RAM start up to .uninit (volatile: .data, .bss,
  *      SRAM/NVM tier backing buffers).
- *   2. NVM overlay on .uninit — NOLOAD area in DTCM that survives warm
- *      reset; required so tiku_persist_register() and the hibernate
- *      marker accept their buffers (both reject non-NVM-region pointers).
+ *   2. NVM overlay on .uninit -- NOLOAD area in DTCM that survives warm
+ *      reset; required so tiku_persist_register() and the hibernate marker
+ *      accept their buffers, both of which reject non-NVM-region pointers.
  *      Omitted when .uninit is empty.
- *   3. Shared SRAM — 3 MB at 0x20080000, powered in tiku_crt_early.c;
+ *   3. Shared SRAM -- 3 MB at 0x20080000, powered in tiku_crt_early.c;
  *      hosts the large SRAM tier.
- *   4. MRAM — internal flash for code/rodata above the SBL; reported
- *      as FLASH.  The MRAM mirror of .uninit lives inside this slice but
- *      is a reserved range managed by tiku_mem_arch.c, not a separate
- *      region here.
- *   5. Peripheral aperture — APB/AHB at 0x40000000, 256 MB.
+ *   4. MRAM -- internal flash for code/rodata above the SBL, reported as
+ *      FLASH.  The MRAM mirror of .uninit lives inside this slice but is a
+ *      reserved range managed by tiku_mem_arch.c.
+ *   5. Peripheral aperture -- APB/AHB at 0x40000000, 256 MB.
  *
  * @param count  Output: number of entries in the returned table
  *               (may be NULL if the caller only needs the pointer)

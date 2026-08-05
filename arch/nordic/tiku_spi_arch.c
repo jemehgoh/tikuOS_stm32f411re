@@ -5,45 +5,11 @@
  *
  * Authors: Ambuj Varshney <ambuj@tiku-os.org>
  *
- * tiku_spi_arch.c - SPI master for nRF54L (SPIM + EasyDMA, blocking poll)
+ * tiku_spi_arch.c - SPI master for nRF54L (SPIM + EasyDMA, blocking poll).
  *
- * Master-only, 8-bit frames, synchronous polled I/O on the nRF54L SPIM
- * peripheral.  The nRF54L SPIM has no byte FIFO: every transfer moves
- * through EasyDMA against a RAM buffer, using the "new" register layout
- * (DMA.TX/RX.PTR/MAXCNT) rather than the older nRF52 TXD/RXD block.  A
- * single transaction is:
- *
- *   1. clear EVENTS_END
- *   2. DMA.TX.PTR/MAXCNT  <- transmit buffer / length
- *      DMA.RX.PTR/MAXCNT  <- receive buffer  / length
- *   3. trigger TASKS_START
- *   4. spin on EVENTS_END
- *
- * (TASKS_START + EVENTS_END are retained on the nRF54L SPIM even though
- * the DMA buffer registers moved; the TASKS_DMA/EVENTS_DMA sub-blocks
- * here only drive the RX pattern-matcher, which this driver does not
- * use -- verified against the MDK NRF_SPIM_Type struct.)
- *
- * EasyDMA can only reach RAM (0x2000_0000..).  The interface hands the
- * transmit pointer straight through from the caller, and callers legally
- * pass RRAM/flash-resident constants (e.g. an e-paper image or LUT living
- * in .rodata).  Those cannot be DMA sources, so the transmit path is
- * staged through a static RAM bounce buffer in bounded chunks -- this
- * makes tiku_spi_arch_write()/write_read() accept any source address,
- * matching the CPU-copy behaviour of the PL022 (RP2350) backend.  Receive
- * data lands directly in the caller's buffer (a receive destination is by
- * definition writable RAM); a defensive RAM-reachability check rejects a
- * non-RAM destination with TIKU_SPI_ERR_PARAM rather than faulting.
- *
- * Instance & pins (see the block above the config defines): SPIM21 on
- * P1.11/P1.12/P1.15.  The nRF54L15-DK board header carries no SPI pin
- * assignment yet, so these are a documented, board-overridable default
- * to be confirmed against the DK schematic -- not a hardware-verified
- * mapping.
- *
- * Received bytes are the real MISO levels: with no slave driving the bus
- * an idle (pulled-up) MISO reads 0xFF, which is the honest hardware
- * result, not fabricated data.
+ * The SPIM has no byte FIFO, so every transfer moves through EasyDMA, which can
+ * only reach RAM.  Transmit is staged through a bounce buffer so callers may pass
+ * .rodata sources; a non-RAM receive destination is rejected rather than faulting.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -136,10 +102,9 @@
 /**
  * @brief Poll bound for one DMA burst.
  *
- * Every hardware transaction moves at most TIKU_SPIM_CHUNK (64) bytes,
- * whose worst-case duration is ~4 ms at the slowest SCK (~127 kHz).  At
- * the 128 MHz core this ~2 M-iteration spin is ~60 ms, comfortably above
- * that yet still a hard ceiling so a wedged bus cannot hang the kernel.
+ * Every hardware transaction moves at most TIKU_SPIM_CHUNK (64) bytes, whose
+ * worst case is ~4 ms at the slowest SCK (~127 kHz).  At 128 MHz this ~2 M
+ * iteration spin is ~60 ms: comfortably above that, still a hard ceiling.
  */
 #define TIKU_SPIM_SPIN_LIMIT        2000000UL
 
@@ -172,10 +137,9 @@ static uint8_t spim_initialised;
 /**
  * @brief Test whether an address is EasyDMA-reachable RAM.
  *
- * The nRF54L SPIM can only DMA to/from on-chip SRAM
- * (@ref TIKU_DEVICE_RAM_START).  A receive destination outside that
- * window (e.g. an RRAM/flash pointer) is rejected rather than allowed to
- * raise a bus error.
+ * The nRF54L SPIM can only DMA to and from on-chip SRAM, so a receive
+ * destination outside that window -- an RRAM or flash pointer -- is rejected
+ * rather than allowed to raise a bus error.
  *
  * @param p  Address to test.
  * @return 1 if @p p lies within on-chip RAM, 0 otherwise.
@@ -191,12 +155,12 @@ static int spim_addr_is_ram(const void *p)
 /**
  * @brief Run one blocking SPIM DMA burst and wait for completion.
  *
- * Points EasyDMA at the given RAM buffers, triggers TASKS_START, and
- * spins on EVENTS_END with a bounded poll.  When @p txlen < @p rxlen the
- * over-read character (ORC, set to 0xFF at init) is clocked out for the
- * remaining receive bytes; when @p rxlen is 0 the received bytes are not
- * written to RAM.  Both pointers must reference on-chip RAM.
+ * Points EasyDMA at the given RAM buffers, triggers TASKS_START and spins on
+ * EVENTS_END with a bounded poll.  Both pointers must reference on-chip RAM.
  *
+ * @note When @p txlen < @p rxlen the over-read character (ORC, 0xFF at init) is
+ *       clocked out for the remaining receive bytes; when @p rxlen is 0 the
+ *       received bytes are not written to RAM.
  * @param txp    Transmit RAM address (valid even when @p txlen == 0).
  * @param txlen  Transmit byte count (<= 0xFFFF).
  * @param rxp    Receive RAM address (valid even when @p rxlen == 0).
@@ -209,7 +173,7 @@ static int spim_run(uint32_t txp, uint32_t txlen,
     uint32_t spin;
 
     /* Clear the completion event and read it back so the clear has landed
-     * before we arm the next transfer (write-buffer flush). */
+     * before the next transfer is armed (write-buffer flush). */
     TIKU_SPIM->EVENTS_END = 0UL;
     (void)TIKU_SPIM->EVENTS_END;
 
@@ -237,13 +201,12 @@ static int spim_run(uint32_t txp, uint32_t txlen,
 /**
  * @brief Initialise the SPIM master with the given configuration.
  *
- * Parks the SCK/MOSI/MISO pads at defined idle levels (SCK at the CPOL
- * idle, MOSI low, MISO input with pull-up), routes them via PSEL, programs
- * CONFIG (bit order + CPOL/CPHA), PRESCALER (SCK = 16 MHz / DIVISOR), and
- * the over-read character, then enables the peripheral.  Unlike the PL022
- * backend the nRF54L SPIM supports LSB-first natively (CONFIG.ORDER), so
- * TIKU_SPI_LSB_FIRST is honoured rather than rejected.
+ * Parks the SCK/MOSI/MISO pads at defined idle levels, routes them via PSEL,
+ * programs CONFIG (bit order plus CPOL/CPHA), PRESCALER (SCK = 16 MHz /
+ * DIVISOR) and the over-read character, then enables the peripheral.
  *
+ * @note Unlike the PL022 backend the nRF54L SPIM supports LSB-first natively
+ *       via CONFIG.ORDER, so TIKU_SPI_LSB_FIRST is honoured, not rejected.
  * @param config  Bus parameters (mode, bit order, prescaler/divisor).
  * @return TIKU_SPI_OK on success, TIKU_SPI_ERR_PARAM on NULL config or an
  *         out-of-range mode.
@@ -441,12 +404,12 @@ int tiku_spi_arch_read(uint8_t *buf, uint16_t len)
 /**
  * @brief Full-duplex transfer over two equal-length buffers.
  *
- * Transmits from @p tx_buf while receiving into @p rx_buf, chunk by chunk:
- * the transmit slice is staged through the RAM bounce buffer (any source
- * region) and the receive slice lands directly in the caller's buffer.
- * Chip select is held by the caller across the whole call, so the brief
- * clock gaps between chunks are transparent to the slave.
+ * Transmits from @p tx_buf while receiving into @p rx_buf chunk by chunk: the
+ * transmit slice stages through the RAM bounce buffer, so any source region
+ * works, and the receive slice lands directly in the caller's buffer.
  *
+ * @note Chip select is held by the caller across the whole call, so the brief
+ *       clock gaps between chunks are transparent to the slave.
  * @param tx_buf  Source bytes (non-NULL when @p len > 0).
  * @param rx_buf  Destination buffer (non-NULL, DMA-reachable RAM, when
  *                @p len > 0).

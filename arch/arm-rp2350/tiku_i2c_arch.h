@@ -5,16 +5,11 @@
  *
  * Authors: Ambuj Varshney <ambuj@tiku-os.org>
  *
- * tiku_i2c_arch.h - RP2350 I2C driver interface
+ * tiku_i2c_arch.h - RP2350 I2C driver interface.
  *
- * Drives the DW_apb_i2c controller (RP2350 datasheet §12.3, plus
- * the DesignWare IP databook). Master mode, 7-bit addressing,
- * supports standard (100 kHz) and fast (400 kHz) modes. Speed is
- * picked from the tiku_i2c_config_t passed to init; SCL high/low
- * counts are recomputed from clk_peri so the same code is correct
- * at every supported clk_sys frequency. SDA/SCL pins are
- * board-defined; the driver verifies the function-select mapping
- * against the per-pin tables in tiku_rp2350_regs.h.
+ * Drives the DW_apb_i2c controller in master mode, 7-bit addressing, standard or
+ * fast speed.  SCL counts are recomputed from clk_peri so the driver is correct at
+ * every supported clk_sys; SDA/SCL pins are board-defined and function-checked.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -72,9 +67,8 @@ int  tiku_i2c_arch_read (uint8_t addr, uint8_t *buf, uint16_t len);
  * @brief Architecture-specific address probe (bus-scan presence check).
  *
  * Reports whether a device acknowledges @p addr.  The DW_apb_i2c cannot do a
- * zero-byte transaction, so the backend probes with a single 1-byte read.
- * The `i2c scan` command uses this instead of a zero-length write (which the
- * bus layer rejects).
+ * zero-byte transaction, so the backend probes with a single 1-byte read and
+ * `i2c scan` uses this rather than the zero-length write the bus layer rejects.
  *
  * @param addr  7-bit slave address (unshifted).
  * @return 0 (TIKU_I2C_OK) if acknowledged, negative errno-style code if not.

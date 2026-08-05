@@ -7,16 +7,9 @@
  *
  * tiku_shell_cmd_cryptoprobe.c - CRACEN CryptoMaster bring-up probe.
  *
- * Interactive diagnostic for the hardware-crypto backend, in the nvmprobe
- * mold (opt-in, TIKU_SHELL_CMD_CRYPTOPROBE=1 via EXTRA_CFLAGS):
- *
- *   cryptoprobe hwcfg        dump the CRYPTMSTRHW fused-engine words
- *   cryptoprobe sha <hexcfg> hash "abc" with that BA413 config word,
- *                            print the digest + wall time + vector verdict
- *   cryptoprobe sweep        iterate candidate config words until one
- *                            reproduces SHA-256("abc") -- the empirical
- *                            way to pin the engine's config encoding
- *   cryptoprobe bench        time hw vs sw SHA-256 over 4 KB
+ * An interactive diagnostic for the hardware-crypto backend: dump the fused-engine
+ * words, hash with a candidate config, sweep candidates until one reproduces a
+ * known vector, and time hardware against software.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -177,7 +170,7 @@ void tiku_shell_cmd_cryptoprobe(int argc, char **argv)
     if (argc >= 2 && strcmp(argv[1], "bench") == 0) {
         /* Iterate each path over 4 KB and count kernel ticks -- coarse per
          * tick (7.8 ms) but honest; the iteration count divides it down to
-         * us-per-op.  (The GRTC fine capture proved unreliable for short
+         * microseconds per op.  (The GRTC fine capture proved unreliable for short
          * deltas; ticks x N is wraparound-proof.) */
         static uint8_t buf[4096];
         uint8_t  hw[32], sw[32];

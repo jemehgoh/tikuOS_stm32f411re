@@ -5,28 +5,11 @@
  *
  * Authors: Ambuj Varshney <ambuj@tiku-os.org>
  *
- * tiku_pio_arch.h - RP2350 PIO (Programmable I/O) driver
+ * tiku_pio_arch.h - RP2350 PIO (programmable I/O) driver.
  *
- * The RP2350 has three PIO blocks; each block has four state machines
- * sharing a 32-instruction program memory and 4-deep TX/RX FIFOs.
- * TikuOS uses one state machine on PIO0 as a hardware-offloaded
- * bit-bang engine (the backend for kernel/timers/tiku_bitbang.c).
- *
- * Program (4 instructions, loaded at address 0):
- *   addr 0:  out pins, 1     ; shift 1 bit from OSR to the output pin
- *   addr 1:  jmp x-- 0       ; decrement X, jump back if non-zero
- *   addr 2:  irq nowait 0    ; signal completion to PIO0_IRQ_0
- *   addr 3:  jmp 3           ; halt (waits for CPU to restart SM)
- *
- * CPU side per transmission:
- *   1. Reset SM, load OSR with the data word, load X with bit_count-1.
- *   2. Configure clkdiv for the requested bit period.
- *   3. Enable SM. SM shifts bit_count bits to the pin, fires IRQ.
- *   4. PIO0_IRQ_0 handler invokes the kernel completion callback.
- *
- * Single-shot per call; only one bit-bang transmission can run at a
- * time. Long bursts (> 32 bits) push multiple words; SM auto-pulls
- * on OSR exhaustion.
+ * One state machine on PIO0 runs a four-instruction program that shifts a data
+ * word out to a pin and raises an IRQ when done.  Single-shot per call; bursts
+ * longer than 32 bits push several words and the SM auto-pulls.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -40,8 +23,8 @@
 /* RETURN CODES                                                              */
 /*---------------------------------------------------------------------------*/
 
-/**
- * @brief Return codes for the PIO bit-bang driver.
+/*
+ * Return codes for the PIO bit-bang driver.
  *
  * TIKU_PIO_OK           — operation succeeded.
  * TIKU_PIO_ERR_BUSY     — a transmission is already in progress.
@@ -83,11 +66,9 @@ void tiku_pio_arch_init(void);
 /**
  * @brief Start a one-shot bit-bang transmission on PIO0 / SM0.
  *
- * Configures the pin as a PIO0 output, sets the state machine clock
- * divider so each bit takes @p bit_period_us microseconds, loads
- * the data word and the bit count, and enables the SM. Returns
- * immediately; @p on_done is called from the PIO0 IRQ once the
- * stream completes.
+ * Configures the pin as a PIO0 output, sets the SM clock divider so each bit
+ * takes @p bit_period_us, loads the data word and bit count, and enables the
+ * SM.  Returns immediately; @p on_done fires from the PIO0 IRQ.
  *
  * @param gpio_pin     GPIO number (0..47) to drive
  * @param data         Up to 32 bits, packed MSB-first if msb_first=1
@@ -131,11 +112,11 @@ int tiku_pio_arch_bitbang_abort(void);
 /**
  * @brief PIO0_IRQ_0 interrupt service routine.
  *
- * Strong override of the weak alias in tiku_crt_early.c.  Wired
- * automatically when this driver is linked in.  Clears the IRQ source,
- * resets the busy flag, and invokes the on_done callback registered
- * with tiku_pio_arch_bitbang_tx().  Runs in NVIC ISR context — keep
- * callbacks short.
+ * Strong override of the weak alias in tiku_crt_early.c, wired automatically
+ * when this driver is linked in.  Clears the IRQ source, resets the busy flag
+ * and invokes the on_done callback.
+ *
+ * @note Runs in NVIC ISR context -- keep callbacks short.
  */
 void tiku_rp2350_pio0_irq0_handler(void);
 

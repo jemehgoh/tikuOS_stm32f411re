@@ -5,21 +5,11 @@
  *
  * Authors: Ambuj Varshney <ambuj@tiku-os.org>
  *
- * tiku_basic_named_slots.inl - multi-slot named SAVE / LOAD / DIR.
+ * tiku_basic_named_slots.inl - multi-slot named SAVE, LOAD and DIR.
  *
- * NOT a standalone translation unit.  Included from tiku_basic.c.
- *
- * The default unnamed SAVE / LOAD keep the program in the reserved NVM-region
- * tail, or in the persist store on MSP430 (see tiku_basic_persist.inl).  Named
- * saves have two backends:
- *
- *   region-backed parts -- ordinary /data FILES, "/data/<name>.bas".  Durable,
- *       4 KB each, as many as the file store has room for, and visible to the
- *       shell.  DIR lists /data children with the .bas suffix.
- *   MSP430 / host      -- the original fixed array of TIKU_BASIC_NAMED_SLOTS
- *       slots, each TIKU_BASIC_NAMED_SLOT_BYTES wide, in durable FRAM.
- *
- * Everything here compiles to nothing when TIKU_BASIC_NAMED_SLOTS is 0.
+ * Two backends: ordinary /data files on the region-backed parts, visible to the
+ * shell, and a fixed array of durable slots on MSP430 and host.  The whole piece
+ * compiles to nothing when named slots are disabled.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -29,18 +19,15 @@
 /*
  * NAMED PROGRAMS ARE ORDINARY /data FILES: "/data/<name>.bas".
  *
- * They used to be a fixed array of slots carrying BASIC_NVM_PERSISTENT, which
+ * A fixed slot array carrying BASIC_NVM_PERSISTENT cannot work here: that grade
  * is TIKU_DURABLE only on MSP430 -- .ssram on Ambiq (zeroed at boot, like .bss)
- * and EMPTY everywhere else.  So on Nordic, RP2350 and Ambiq, `SAVE "name"` was
- * silently lost across a reset while the header above documented the slots as
- * "FRAM-backed", and unlike the default slot they had no region-tail fallback.
- * The array also cost 6,180 B of always-resident RAM and capped a named program
- * at TIKU_BASIC_NAMED_SLOT_BYTES (2,048), which a BIG-tier program exceeds
- * after about thirteen lines -- even though the comment beside that constant
- * says the slot scales with program size.  It does not; the two knobs move
- * independently.
+ * and EMPTY everywhere else -- so on Nordic, RP2350 and Ambiq a `SAVE "name"`
+ * would be silently lost across a reset, with no region-tail fallback.  Such an
+ * array also costs 6,180 B of always-resident RAM and caps a named program at
+ * TIKU_BASIC_NAMED_SLOT_BYTES (2,048), which a BIG-tier program exceeds after
+ * about thirteen lines.
  *
- * Riding the file store fixes all of it at once: durable on every platform for
+ * Riding the file store settles all of it at once: durable on every platform for
  * free, 4 KB per program, and as many programs as /data has room for (222 on the
  * LM20, not 3).  They also stop being invisible -- `ls /data`,
  * `cat /data/foo.bas`, and `send` to copy one off the board.
@@ -96,7 +83,7 @@ basic_save_to_named(const char *name)
         if (idx < 0) {
             break;
         }
-        /* Number + detokenized body: the stored format stays plain text (A2). */
+        /* Number + detokenized body: the stored format stays plain text. */
         n = snprintf(tmp + pos, cap - pos, "%u ", (unsigned)prog[idx].number);
         if (n < 0 || (size_t)n >= cap - pos) {
             full = 1;
@@ -157,7 +144,7 @@ basic_load_from_named(const char *name)
     prog_clear();
     basic_clear_vars();
 
-    /* Dispatch through the dedicated line buffer, not the scratch we are
+    /* Dispatch through the dedicated line buffer, not the scratch being
      * walking: process_line() can reach commands that use the scratch. */
     for (i = 0; i <= got; i++) {
         char c = (i < got) ? tmp[i] : '\n';
@@ -262,7 +249,7 @@ basic_save_to_named(const char *name)
         int idx = prog_next_index(cur);
         int n;
         if (idx < 0) break;
-        /* Number + detokenized body: slot format stays plain text (A2). */
+        /* Number + detokenized body: slot format stays plain text. */
         n = snprintf(tmp + pos, sizeof(tmp) - pos, "%u ",
                      (unsigned)prog[idx].number);
         if (n < 0 || (size_t)n >= sizeof(tmp) - pos) {
@@ -348,7 +335,7 @@ basic_list_named_slots(void)
 #endif /* BASIC_NVM_ON_REGION */
 #endif /* TIKU_BASIC_NAMED_SLOTS */
 
-/* Scratch buffer for IF/THEN truncation -- when ELSE is present we
+/* Scratch buffer for IF/THEN truncation -- when ELSE is present the
  * need to stop the THEN branch's exec_stmt from consuming the ELSE
  * keyword as if it were part of its own arguments. The simplest
  * portable approach is to copy the THEN branch into a buffer with

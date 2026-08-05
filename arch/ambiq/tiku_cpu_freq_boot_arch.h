@@ -5,14 +5,11 @@
  *
  * Authors: Ambuj Varshney <ambuj@tiku-os.org>
  *
- * tiku_cpu_freq_boot_arch.h - Apollo 510 (Cortex-M55) CPU boot + clocks
+ * tiku_cpu_freq_boot_arch.h - Apollo510 (Cortex-M55) CPU boot and clocks.
  *
- * Mirrors arch/arm-rp2350/tiku_cpu_freq_boot_arch.h. These are the
- * arch backends dispatched by hal/tiku_cpu.c under PLATFORM_AMBIQ.
- *
- * NOTE (de-SDK): fully bare-metal. The implementation uses only direct
- * CMSIS register access (apollo510.h); no AmbiqSuite HAL/BSP calls remain.
- * Power and clocks are inherited from the secure bootloader (SBL).
+ * The arch backends dispatched by hal/tiku_cpu.c on this platform.  Fully
+ * bare-metal -- direct CMSIS register access only -- with power and clocks
+ * inherited from the secure bootloader.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -25,20 +22,18 @@
 /**
  * @brief Perform one-time CPU and SoC bring-up.
  *
- * Configures power domains, the clock tree, and caches after SBL
- * hand-off. Called once very early in main() before any other
- * subsystem initializes. Uses direct CMSIS register access only —
- * no AmbiqSuite HAL/BSP calls.
+ * Configures power domains, the clock tree and caches after SBL hand-off.
+ * Called once very early in main(), before any other subsystem initializes.
+ * Uses direct CMSIS register access only -- no AmbiqSuite HAL/BSP calls.
  */
 void tiku_cpu_boot_ambiq_init(void);
 
 /**
  * @brief Apply a target core frequency to the Apollo510 clock tree.
  *
- * Apollo510 derives the core clock from HFRC or HFRC2. The @p cpu_freq
- * parameter is accepted for API compatibility with the portable boot
- * sequencer (see TIKU_MAIN_CPU_FREQ in tiku.h); the implementation
- * selects the nearest supported divider.
+ * Apollo510 derives the core clock from HFRC or HFRC2.  @p cpu_freq is accepted
+ * for API compatibility with the portable boot sequencer (TIKU_MAIN_CPU_FREQ in
+ * tiku.h); the implementation selects the nearest supported divider.
  *
  * @param cpu_freq  Desired core frequency in MHz.
  */
@@ -98,28 +93,21 @@ int           tiku_cpu_ambiq_clock_has_fault(void);
  * @brief Clean / invalidate the data cache over [addr, addr+len).
  *
  * Per-part: Apollo510 (M55) uses the SCB by-address ops; Apollo4 Lite uses
- * the CACHECTRL (clean is a no-op -- its MRAM data cache is read-only from the
- * CPU; invalidate flushes the whole cache, lacking a by-range op). Routed from
- * the portable tiku_cpu_dcache_* HAL.
+ * CACHECTRL, where clean is a no-op (its MRAM data cache is read-only from the
+ * CPU) and invalidate flushes the whole cache for want of a by-range op.
  */
 void          tiku_cpu_ambiq_dcache_clean(const void *addr, unsigned long len);
 
 /**
  * @brief Drop cached copies of [addr, addr+len) so the next read is fresh.
  *
- * Call this AFTER an agent outside the CPU wrote that memory behind the
- * cache's back -- the bootrom MRAM programmer (NVM mirror flush, NVM-region
- * write, Tier-3 module load) or the GPU/DMA filling a buffer -- and before
- * the CPU reads the range again, otherwise stale lines are returned. It is
- * the mirror of tiku_cpu_ambiq_dcache_clean(), which runs BEFORE such an
- * agent reads a CPU-written staging buffer.
+ * Call AFTER an agent outside the CPU wrote that memory behind the cache's back
+ * -- the bootrom MRAM programmer, or the GPU/DMA filling a buffer -- and before
+ * the CPU reads it again.  Mirror of tiku_cpu_ambiq_dcache_clean().
  *
- * Per-part: Apollo510 (M55) invalidates exactly the given range with the SCB
- * by-address op; Apollo4 Lite has no by-range op, so @p addr / @p len are
- * ignored and the whole CACHECTRL cache is invalidated (coarse but correct)
- * followed by a DSB/ISB pair. Routed from the portable
- * tiku_cpu_dcache_invalidate() HAL.
- *
+ * @note Apollo510 (M55) invalidates exactly the range with the SCB by-address
+ *       op; Apollo4 Lite has none, so @p addr / @p len are ignored and the whole
+ *       CACHECTRL cache is invalidated (coarse but correct) plus DSB/ISB.
  * @param addr  Start of the range whose cached copies must be dropped.
  * @param len   Length of the range in bytes.
  */
@@ -129,21 +117,17 @@ void          tiku_cpu_ambiq_dcache_invalidate(const void *addr, unsigned long l
  * @brief Invalidate the instruction cache (whole cache).
  *
  * Per-part: Apollo510 (M55) writes ICIALLU with barriers on both sides;
- * Apollo4 Lite flushes its unified CACHECTRL cache (which also serves
- * instruction fetches). Needed after out-of-band writes to executable
- * MRAM (the Tier-3 module loader) before the first fetch from them.
- * Routed from the portable tiku_cpu_icache_invalidate() HAL.
+ * Apollo4 Lite flushes its unified CACHECTRL cache, which also serves
+ * instruction fetches.  Needed after out-of-band writes to executable MRAM.
  */
 void          tiku_cpu_ambiq_icache_invalidate(void);
 
 /**
  * @brief Raw identity + power snapshot for the HP-turbo bring-up (`freq probe`).
  *
- * Everything the Apollo5 High-Performance mode decision needs, read live:
- * silicon revision, INFO1 residency, the factory trim revision words, the
- * SIMOBUCK/perf-mode state, and the SPOT-manager POWERSTATE trim table. The
- * shell formats it; keeping the raw words here lets the HP port (and a bug
- * report) see exactly what the chip carries.
+ * Everything the High-Performance mode decision needs, read live: silicon
+ * revision, INFO1 residency, factory trim revision words, SIMOBUCK/perf-mode
+ * state, and the SPOT-manager POWERSTATE trim table.  The shell formats it.
  */
 typedef struct {
     uint32_t chiprev;          /**< MCUCTRL->CHIPREV (REVMAJ/REVMIN)          */
@@ -157,6 +141,39 @@ typedef struct {
     uint32_t powerstate[20];   /**< INFO1 SPOT-manager POWERSTATE trim table  */
     uint8_t  info1_in_otp;     /**< 1 = INFO1 read from OTP, 0 = MRAM shadow  */
     uint8_t  info1_ok;         /**< 1 = the INFO1 words above are valid reads */
+
+    /* --- VDDF PLAN (the measurement that motivated these fields) ---------
+     * Measured HP active power came in 53% above the datasheet's IRUNHPFB row
+     * (46.8 uW/MHz) while LP sat within 6% of IRUNLPFB -- on a workload LIGHTER
+     * than the CoreMark the spec is quoted for, which should read BELOW it.
+     * Dynamic power goes as V^2, so a ~24% VDDF over-volt would account for the
+     * whole excess, and this port computes its own VDDF boost for a
+     * TrimSubRev-0x5F part.  These fields expose that computation and the trim
+     * the hardware is ACTUALLY running, so the hypothesis is testable instead of
+     * plausible.  All read-only; nothing here changes a voltage. */
+    uint32_t vddf_ltrim;       /**< INFO1 L_TRIMCODE, raw (0 = not loaded)    */
+    uint32_t vddf_etrim;       /**< INFO1 E_TRIMCODE, raw                     */
+    uint32_t vddf_mv_x10;      /**< the formula's mV boost, x10 (no floats)   */
+    uint8_t  vddf_boost_codes; /**< boost converted to trim codes             */
+    uint8_t  vddf_ps5_raw;     /**< TVRGF(state 5), BEFORE the boost          */
+    uint8_t  vddf_ps13_raw;    /**< TVRGF(state 13), BEFORE the boost         */
+    uint8_t  vddf_lp;          /**< planned LP trim, boosted + clamped        */
+    uint8_t  vddf_hp;          /**< planned HP trim, boosted + clamped        */
+    uint8_t  vddf_clamped;     /**< 1 = the [0x8,0x7F] clamp actually bit     */
+    uint8_t  vddf_applied;     /**< LIVE MCUCTRL.VREFGEN4.TVRGFVREFTRIM       */
+    uint8_t  vddf_plan_ok;     /**< 1 = the plan above has been computed      */
+
+    /* Raw regulator/buck words for host-side LP-vs-HP diffing.  Raw on
+     * purpose: interpretation belongs to the analysis, and a firmware decoder
+     * is a second place for a transcription bug to hide.  All reads. */
+    uint32_t r_vrefgen2;       /**< MCUCTRL->VREFGEN2 (TVRGC = VDDC ref)      */
+    uint32_t r_vrefgen3;       /**< MCUCTRL->VREFGEN3 (TVRGCLV)               */
+    uint32_t r_vrefgen4;       /**< MCUCTRL->VREFGEN4 (TVRGF = VDDF ref)      */
+    uint32_t r_ldoreg1;        /**< MCUCTRL->LDOREG1 (core LDO trims)         */
+    uint32_t r_ldoreg2;        /**< MCUCTRL->LDOREG2 (mem LDO trims)          */
+    uint32_t r_vrctrl;         /**< MCUCTRL->VRCTRL (override bits)           */
+    uint32_t r_d2aspare;       /**< MCUCTRL->D2ASPARE (MEMLDOREF)             */
+    uint32_t r_sb[6];          /**< SIMOBUCK 0,2,4,6,7,15 (comp en + Ton)     */
 } tiku_ambiq_hp_probe_t;
 
 /**
@@ -167,6 +184,15 @@ typedef struct {
  * previous power state after. Never changes the perf mode or any voltage.
  */
 void tiku_cpu_freq_ambiq_hp_probe(tiku_ambiq_hp_probe_t *out);
+
+/**
+ * @brief Enable the SIMO buck without changing the frequency (measurement hook).
+ *
+ * The LP boot path never enables it, so the part ships in LDO-only mode.  This
+ * makes the buck switchable at run time so both states can be measured in one
+ * boot.  Returns 0 when VRSTATUS reports ACT.
+ */
+int tiku_cpu_freq_ambiq_simobuck_enable(void);
 
 /**
  * @brief Measure the true core clock against the 32.768 kHz STIMER crystal.

@@ -5,15 +5,11 @@
  *
  * Authors: Ambuj Varshney <ambuj@tiku-os.org>
  *
- * tiku_uart_arch.h - Console backend for printf (Apollo 510)
+ * tiku_uart_arch.h - console backend for printf (Apollo510).
  *
- * Mirrors arch/arm-rp2350/tiku_uart_arch.h so hal/tiku_printf_hal.h
- * routes TIKU_PRINTF -> tiku_uart_printf unchanged. The Apollo510
- * console is SWO/ITM (not a wire UART): the implementation backs these
- * entry points onto am_hal_itm + am_util_stdio_printf at bring-up (the
- * same path the user's hello_world example uses). The "uart" naming is
- * kept only to satisfy the printf HAL contract; a real COM-UART backend
- * (pins 30/55) can be selected later.
+ * Mirrors the RP2350 header so the printf HAL routes TIKU_PRINTF here unchanged.
+ * The backend is the bare-metal COM UART0 driver in tiku_uart_arch.c -- no ITM and
+ * no vendor stdio.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -24,12 +20,11 @@
 #include <stdint.h>
 
 /**
- * @brief Initialize the console transport (SWO/ITM or wire UART).
+ * @brief Initialize the console transport (wire UART).
  *
- * Configures the ITM stimulus port and enables SWO output via
- * am_hal_itm. Called once during boot before any printf output.
- * A real COM-UART backend (TX=pad 30, RX=pad 55) may be substituted
- * by reconfiguring this entry point.
+ * Brings up the board's COM UART (see the board header for pads and FUNCSEL)
+ * for 8N1 at TIKU_BOARD_UART_BAUD.  Called once during boot, before any printf
+ * output.
  */
 void     tiku_uart_init(void);
 

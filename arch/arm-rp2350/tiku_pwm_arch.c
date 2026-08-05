@@ -5,18 +5,11 @@
  *
  * Authors: Ambuj Varshney <ambuj@tiku-os.org>
  *
- * tiku_pwm_arch.c - RP2350 PWM driver
+ * tiku_pwm_arch.c - RP2350 PWM driver.
  *
- * The 12 slices share one PWM_EN register; each slice has its own
- * CSR / DIV / CTR / CC / TOP. We always set TOP = 0xFFFF so duty
- * resolution stays 16-bit, then choose DIV (8.4 fixed-point) so the
- * effective wrap rate matches the requested freq_hz against the live
- * clk_sys rate. That way a clk_sys retune (12/48/100/125/133/150 MHz
- * — see tiku_cpu_freq_boot_arch.c) doesn't change PWM behaviour
- * once init runs.
- *
- * Single-shot init per pin; calling init again on the same pin
- * reconfigures the channel.
+ * TOP is fixed at 0xFFFF so duty resolution stays 16-bit, and DIV is chosen
+ * against the live clk_sys so the wrap rate matches the requested frequency --
+ * a clk_sys retune after init therefore does not change PWM behaviour.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -40,10 +33,8 @@ static uint8_t g_pwm_reset_done;
 /**
  * @brief Compute the 16.8 fixed-point divider for the requested wrap frequency.
  *
- * Derives DIV from:
- *   wrap_hz = clk_sys / (DIV * (TOP + 1))
- *   DIV     = clk_sys / (wrap_hz * (TOP + 1))
- * Returned divider is formatted for the SLICE_DIV register layout.
+ * From wrap_hz = clk_sys / (DIV * (TOP + 1)), so DIV = clk_sys / (wrap_hz *
+ * (TOP + 1)).  The result is formatted for the SLICE_DIV register layout.
  *
  * @param freq_hz  Target PWM wrap frequency in Hz.
  * @return 12.4 fixed-point divider value (multiply of 16), or 0 if
@@ -55,7 +46,7 @@ static uint32_t pwm_compute_div(uint32_t freq_hz) {
      * 16-bit field, written as a 32-bit access. The integer field
      * is 8 bits (range 1..255) on RP2040; RP2350 widens to 12 bits
      * (1..4095). Compute as 12.4 unconditionally; if the answer
-     * exceeds 12 bits we clamp.
+     * exceeds 12 bits it clamps.
      *
      * Compute divider_x16 = clk_sys / (freq_hz * (TOP+1)) * 16. */
     uint64_t clk      = (uint64_t)tiku_cpu_rp2350_clock_get_hz();
@@ -70,7 +61,7 @@ static uint32_t pwm_compute_div(uint32_t freq_hz) {
         div_x16 = 16ULL;
     }
     if (div_x16 > 0xFFFFULL) {
-        /* Above 12.4 max -- caller's freq is too low for our chosen
+        /* Above 12.4 max -- caller's freq is too low for the chosen
          * TOP. Return 0 to signal "out of range" so caller can
          * pick a smaller TOP. */
         return 0U;
@@ -113,10 +104,9 @@ static void pwm_pin_route_to_slice(uint8_t gpio) {
 /**
  * @brief Initialise a PWM output on the given GPIO pin.
  *
- * Takes the PWM block out of reset if needed, computes the clock
- * divider for freq_hz, programs TOP/DIV/CC, resets the counter, and
- * enables the slice.  Calling init again on the same pin reconfigures
- * the channel without disturbing the other channel in the slice.
+ * Takes the PWM block out of reset if needed, computes the divider for
+ * @p freq_hz, programs TOP/DIV/CC, resets the counter and enables the slice.
+ * Re-initialising a pin reconfigures its channel without disturbing the other.
  *
  * @param gpio_pin  GPIO pin to configure as a PWM output (0-based).
  * @param freq_hz   Desired PWM wrap frequency in Hz; must be non-zero.
@@ -147,7 +137,7 @@ int tiku_pwm_arch_init(uint8_t  gpio_pin,
         return TIKU_PWM_ERR_FREQ;
     }
 
-    /* Disable the slice while we reconfigure, then re-enable. */
+    /* Disable the slice while reconfiguring, then re-enable. */
     _RP2350_REG(RP2350_PWM_SLICE_CSR(slice)) = 0U;
 
     _RP2350_REG(RP2350_PWM_SLICE_TOP(slice)) = PWM_TOP_DEFAULT;

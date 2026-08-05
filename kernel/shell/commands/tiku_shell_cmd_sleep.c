@@ -5,12 +5,11 @@
  *
  * Authors: Ambuj Varshney <ambuj@tiku-os.org>
  *
- * tiku_shell_cmd_sleep.c - "sleep" command implementation
+ * tiku_shell_cmd_sleep.c - "sleep" command implementation.
  *
- * Configures the scheduler's idle hook to enter a low-power mode
- * when no events are pending. Modes are abstract (off / lpm0 /
- * lpm3 / lpm4) and resolved to the platform's real entry function
- * by the CPU HAL.
+ * Configures the scheduler's idle hook to enter a low-power mode when no events
+ * are pending.  Modes are abstract and resolved to the platform's real entry by
+ * the CPU HAL.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -28,7 +27,10 @@
 /* CURRENT MODE TRACKING                                                     */
 /*---------------------------------------------------------------------------*/
 
-static tiku_cpu_idle_mode_t current_idle = TIKU_CPU_IDLE_OFF;
+/* Must match the hook tiku_sched_init() installs, or "sleep" reports a mode
+ * the scheduler is not in.  The scheduler owns the default; this only tracks
+ * it for reporting. */
+static tiku_cpu_idle_mode_t current_idle = TIKU_CPU_IDLE_LIGHT;
 
 /*---------------------------------------------------------------------------*/
 /* HELPERS                                                                   */
@@ -51,13 +53,11 @@ streq(const char *a, const char *b)
 }
 
 /**
- * Map a user-typed token ("off", "lpm0", "lpm3", "lpm4") to a HAL
- * idle-mode enum. Returns 0 on match, -1 on unknown token.
+ * Map a user-typed token ("off", "lpm0", "lpm3", "lpm4") to a HAL idle-mode
+ * enum.  Token names follow the short name tiku_cpu_idle_mode_name() returns,
+ * which keeps the CLI stable while the HAL chooses the actual entry hook.
  *
- * Token names follow the platform-specific short name returned by
- * tiku_cpu_idle_mode_name(); this keeps the user-facing CLI stable
- * with the documented MSP430 mode names while letting the HAL
- * choose the actual entry hook.
+ * @return 0 on match, -1 on unknown token.
  */
 static int
 parse_mode(const char *tok, tiku_cpu_idle_mode_t *out)

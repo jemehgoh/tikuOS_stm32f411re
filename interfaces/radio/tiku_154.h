@@ -5,14 +5,11 @@
  *
  * Authors: Ambuj Varshney <ambuj@tiku-os.org>
  *
- * tiku_154.h - IEEE 802.15.4 MAC-min facade (kintsugi/radio.md N2).
+ * tiku_154.h - IEEE 802.15.4 MAC-min facade.
  *
- * Ties the PHY (arch/nordic/tiku_ieee154_arch) to the PHY-free frame layer
- * (tiku_154_frame): addressed data frames with 16-bit PAN/short addressing
- * and sequence numbers, address filtering on receive, unslotted CSMA-CA on
- * the hardware CCA (N2.2), and auto-ACK via the T_IFS turnaround (N2.3).
- * Same facade discipline as tiku_ble_adv -- the shell command and any
- * future stack sit on this, not on registers.
+ * Ties the PHY to the frame layer: addressed data frames with 16-bit PAN/short
+ * addressing, receive address filtering, unslotted CSMA-CA on the hardware CCA,
+ * and auto-ACK on the T_IFS turnaround.  Shell and stacks sit here, not on registers.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -29,7 +26,7 @@
 typedef struct {
     uint16_t src;           /**< source short address                     */
     uint8_t  seq;           /**< sequence number                          */
-    uint8_t  acked;         /**< 1 if we sent an ACK for it (N2.3)         */
+    uint8_t  acked;         /**< 1 if an ACK was sent for it (N2.3)        */
     int8_t   rssi;          /**< RSSI in dBm                              */
 } tiku_154_rx_t;
 
@@ -37,7 +34,7 @@ typedef struct {
 int tiku_154_available(void);
 
 /**
- * @brief Configure the MAC: PAN id, our short address, and channel (11..26).
+ * @brief Configure the MAC: PAN id, local short address, and channel (11..26).
  * Idempotent; call again to re-address or retune.
  */
 void tiku_154_init(uint16_t pan, uint16_t short_addr, uint8_t channel);
@@ -45,7 +42,7 @@ void tiku_154_init(uint16_t pan, uint16_t short_addr, uint8_t channel);
 /** @brief Retune while keeping PAN/address. */
 void tiku_154_set_channel(uint8_t channel);
 
-/** @brief Our configured short address. */
+/** @brief The configured short address. */
 uint16_t tiku_154_addr(void);
 
 /** @brief Current durable TX security frame counter (survives reboot). */
@@ -72,7 +69,7 @@ int tiku_154_send(uint16_t dst, const uint8_t *payload, uint8_t len,
                   uint8_t ack);
 
 /**
- * @brief Receive one data frame addressed to us or broadcast, up to
+ * @brief Receive one data frame addressed to this node or broadcast, up to
  *        @p timeout_ms.  Frames for other addresses are skipped within the
  *        window.  ACKs an ack-requesting frame before returning (N2.3).
  * @return payload length, 0 timeout, -1 error.

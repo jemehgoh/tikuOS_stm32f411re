@@ -5,41 +5,11 @@
  *
  * Authors: Ambuj Varshney <ambuj@tiku-os.org>
  *
- * tiku_basic_mode.inl - BASIC as a non-blocking shell-loop MODE.
+ * tiku_basic_mode.inl - BASIC as a non-blocking shell-loop mode.
  *
- * NOT a standalone translation unit.  Included LAST from tiku_basic.c
- * (after shell.inl, so basic_session_begin / process_line / the run
- * step machine are all in scope).
- *
- * Historically the interpreter took over the shell for the whole
- * session: `basic` called tiku_basic_repl(), a blocking
- * `while (!basic_quit) { read_line(); process_line(); }` loop that ran
- * inside ONE shell-process dispatch.  For that entire session the
- * scheduler heartbeat was frozen -- which is why read_line, the RUN
- * loop, and INPUT all had to kick the watchdog by hand, and why RUN
- * needed a 100k-iteration cap to keep an infinite reactive program
- * (10 GOTO 10) from wedging the board.
- *
- * BASIC is now a MODE of the shell process, exactly like watch / ping /
- * mqtt: the `basic` command enters the mode and RETURNS, and the shell
- * poll loop drives it one slice per tick --
- *
- *   tiku_basic_mode_active()     - is the shell in BASIC mode?
- *   tiku_basic_mode_feed_char()  - line editor: called for each console
- *                                  byte while in mode (replaces read_line
- *                                  for the prompt; INPUT still uses the
- *                                  nested blocking read_line).
- *   tiku_basic_mode_tick()       - pump up to TIKU_BASIC_MODE_BATCH
- *                                  program steps, then yield.
- *   tiku_basic_mode_enter()      - `basic`      : interactive REPL mode.
- *   tiku_basic_mode_run_saved()  - `basic run`  : run the saved program
- *                                  headless, then leave the mode.
- *
- * The scheduler now runs between every batch of steps, so other
- * processes stay live during a RUN, SLEEP is cooperative, and the
- * iteration cap is gone for the yielding path.  Ctrl-C is delivered by
- * the shell loop (basic_run_shell_mode tells basic_run_step to skip its
- * inline poll).
+ * The `basic` command enters the mode and returns; the shell poll loop then drives
+ * it a batch of program steps per tick.  The scheduler runs between batches, so
+ * other processes stay live during a RUN and no iteration cap is needed.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -248,13 +218,14 @@ tiku_basic_mode_feed_char(int ch)
 }
 
 /**
- * @brief Notify BASIC that a watched VFS node changed (F2).
+ * @brief Notify BASIC that a watched VFS node changed.
  *
- * Called by the shell process on TIKU_EVENT_VFS with the changed node.  Marks
- * every event-armed ON CHANGE slot on that node as pending; the mode/RUN poll
- * then re-reads and fires it at the next statement boundary (so the GOSUB
- * return address is correct).  Defined even when the feature is off so the
- * shell's dispatch hook always links.
+ * Called by the shell process on TIKU_EVENT_VFS.  Marks every event-armed
+ * ON CHANGE slot on that node pending; the mode/RUN poll then re-reads and
+ * fires it at the next statement boundary, so the GOSUB return address is right.
+ *
+ * @note Defined even when the feature is off, so the shell's dispatch hook
+ *       always links.
  */
 void
 tiku_basic_mode_on_vfs(const void *node)
@@ -292,7 +263,7 @@ tiku_basic_mode_tick(void)
     }
 #if TIKU_BASIC_ONCHG_EVENT
     /* F2 self-heal: the shell's rules engine does a wholesale unwatch_all() on
-     * re-arm, dropping our ON CHANGE subscriptions too.  Re-arm each active
+     * re-arm, dropping the ON CHANGE subscriptions too.  Re-arm each active
      * event slot idempotently every tick, exactly as the `watch` command does. */
     {
         int i;
@@ -374,11 +345,9 @@ tiku_basic_mode_enter(void)
 /**
  * @brief Run the saved program headlessly as a non-blocking mode (`basic run`).
  *
- * Loads the persisted program and starts the step machine, then returns; the
- * shell poll loop pumps it to completion and leaves the mode.  Unlike the
- * interactive REPL there is no prompt -- the program simply runs alongside the
- * live shell and other processes.  Pairs with `init add ... 'basic run'` for a
- * saved program that autostarts at boot without blocking the system.
+ * Loads the persisted program, starts the step machine and returns; the shell
+ * poll loop pumps it to completion.  Unlike the REPL there is no prompt -- the
+ * program runs alongside the live shell and other processes.
  *
  * @return 0 if a program started running, -1 otherwise (message printed).
  */
@@ -410,15 +379,15 @@ tiku_basic_mode_run_saved(void)
 
 /**
  * @brief Resume (or, first boot, start) the saved program headlessly (`basic
- *        run resume`) -- F1's power-failure-transparent autostart.
+ *        run resume`) -- the power-failure-transparent autostart.
  *
- * Loads the persisted program, then tries to continue it mid-loop from the
- * durable execution-state checkpoint; if none exists (a clean first boot, or a
- * program that ended in an orderly way), it starts the program fresh.  The
- * resume-or-fresh behaviour is exactly what an autostart wants: `init add ...
- * 'basic run resume'` boots straight into the program on the first power-up and,
- * after a power cut mid-run, picks it back up where it left off.
+ * Loads the persisted program, then continues it mid-loop from the durable
+ * checkpoint; with none (a clean first boot, or an orderly end) it starts
+ * fresh.
  *
+ * @note That resume-or-fresh behaviour is exactly what an autostart wants: it
+ *       boots straight into the program on first power-up and, after a power
+ *       cut mid-run, picks it back up where it left off.
  * @return 0 if a program is running (resumed or fresh), -1 otherwise.
  */
 int

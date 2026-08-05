@@ -5,25 +5,11 @@
  *
  * Authors: Ambuj Varshney <ambuj@tiku-os.org>
  *
- * tiku_htimer_apollo4l.c - Apollo4 Lite hardware one-shot timer (STIMER)
- *                          + the always-on periodic kernel tick.
+ * tiku_htimer_apollo4l.c - Apollo4 Lite STIMER one-shot plus the kernel tick.
  *
- * Mirrors arch/ambiq/tiku_htimer_arch.c (Apollo510). The Apollo4 Lite STIMER is
- * register-identical: STCFG/STTMR/SCMPR0/STMINT*, CLKSEL=3 (XTAL 32 kHz), the
- * COMPAREA interrupt on NVIC IRQ 32 (STIMER_CMPR0_IRQn), and the MCUCTRL.XTALCTRL
- * crystal-enable fields all match -- only the register header differs. The
- * compare register takes a DELTA (the hardware adds the counter); the async
- * 32 kHz counter is triple-read and voted; COMPARE writes are spaced.
- *
- * On Apollo4 Lite this file ALSO hosts the kernel system tick. SysTick (the tick
- * source on Apollo510, see tiku_timer_arch.c) freezes during WFI sleep on Ambiq,
- * so a WFI idle with only SysTick armed never wakes -- and the tick never
- * advances while parked. The STIMER runs from the always-on 32 kHz crystal and
- * survives sleep, so the periodic tick is driven here off compare-B (SCMPR1,
- * NVIC IRQ 33) alongside the htimer's one-shot on compare-A. Both compares share
- * the single COUNTER and the inter-write spacing guard (s_last_cmpr), so the
- * tick and one-shot never corrupt each other's compare writes. The tick counters
- * live in tiku_timer_apollo4l.c; this file only delivers the periodic interrupt.
+ * Mirrors the Apollo510 driver; the STIMER is register-identical.  It also hosts
+ * the system tick, because SysTick freezes during WFI on Ambiq while the STIMER
+ * runs from the always-on crystal and survives sleep.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -55,10 +41,8 @@ static uint32_t s_tick_period;
  * @brief STIMER count at the last ACCOUNTED tick boundary (tickless anchor).
  *
  * The single source of truth for tick accounting: every accounting point
- * (the compare-B ISR, an early tickless wake, the one-shot ISR during a
- * stretch) derives elapsed whole ticks from stimer_counter() - anchor and
- * advances the anchor by exactly those counts, so the tick re-locks to the
- * crystal and never drifts across stretched sleeps.
+ * derives elapsed whole ticks from stimer_counter() - anchor and advances the
+ * anchor by exactly those counts, so the tick re-locks to the crystal.
  */
 static uint32_t s_tick_anchor;
 
@@ -94,11 +78,9 @@ static void stimer_xtal_enable(void) {
 /**
  * @brief Write a compare register with the spacing the async STIMER requires.
  *
- * Waits until the COUNTER has advanced past the previous compare write (tracked
- * in the shared s_last_cmpr), then writes the DELTA and records the write.
- * Self-contained PRIMASK critical section, so it is safe from either thread
- * context (htimer schedule) or ISR context (the tick re-arm), and serialises
- * the one-shot (SCMPR0) against the periodic tick (SCMPR1) on the shared bus.
+ * Waits until the COUNTER has passed the previous compare write (tracked in
+ * s_last_cmpr), writes the DELTA, and records it.  Its own PRIMASK section, so
+ * it is safe from thread or ISR context and serialises SCMPR0 against SCMPR1.
  *
  * @param scmpr  Pointer to the SCMPR0/SCMPR1 compare register
  * @param delta  DELTA value (hardware adds the COUNTER); floored to 1
@@ -132,11 +114,12 @@ static void stimer_arm(volatile uint32_t *scmpr, uint32_t delta) {
 /**
  * @brief Initialize the STIMER and enable the NVIC compare-0 interrupt (IRQ 32).
  *
- * Powers the crystal, free-runs the STIMER from it with both compares enabled
- * (compare-A one-shot here, compare-B periodic tick), clears any stale flag, and
- * enables IRQ 32. The COMPAREA source stays masked at STMINTEN until a compare
- * is scheduled. COMPAREBEN is kept set so this (later) init does not disturb the
- * periodic tick that tiku_clock_arch_init() armed earlier at boot.
+ * Powers the crystal, free-runs the STIMER from it with both compares enabled,
+ * clears any stale flag and enables IRQ 32.  COMPAREA stays masked at STMINTEN
+ * until a compare is scheduled.
+ *
+ * @note COMPAREBEN is kept set so this later init does not disturb the periodic
+ *       tick that tiku_clock_arch_init() armed earlier at boot.
  */
 void tiku_htimer_arch_init(void) {
     stimer_xtal_enable();
@@ -152,10 +135,9 @@ void tiku_htimer_arch_init(void) {
 /**
  * @brief Schedule an STIMER compare-A interrupt at the given 16-bit tick.
  *
- * Converts the absolute target into the DELTA the hardware requires, adjusts
- * for write/interrupt latency + elapsed time, floors to 1, spaces from the
- * previous COMPARE write, all inside a PRIMASK critical section. STMINTEN is
- * OR-ed (not overwritten) so the periodic tick's COMPAREB enable is preserved.
+ * Converts the absolute target into the DELTA the hardware requires, adjusting
+ * for write/interrupt latency and elapsed time, all inside a PRIMASK section.
+ * STMINTEN is OR-ed, not overwritten, so the tick's COMPAREB enable survives.
  *
  * @param t  Target 16-bit STIMER tick (absolute, wrapping)
  */
@@ -212,11 +194,11 @@ void tiku_ambiq_stimer_cmpr0_isr(void) {
 /**
  * @brief Credit every whole tick elapsed since the anchor (idempotent).
  *
- * Reads the free-running STIMER, converts the distance from s_tick_anchor
- * into whole ticks, credits them in one call, and advances the anchor by
- * exactly the credited counts (the sub-tick remainder stays, preserving
- * phase). Must run with interrupts masked (ISR, or the scheduler's atomic
- * idle section).
+ * Converts the distance from s_tick_anchor into whole ticks, credits them in
+ * one call, and advances the anchor by exactly that many counts, so the
+ * sub-tick remainder stays and phase is preserved.
+ *
+ * @note Must run with interrupts masked (ISR, or the atomic idle section).
  */
 static void stimer_tick_account(void) {
     uint32_t elapsed = stimer_counter() - s_tick_anchor;
@@ -244,11 +226,9 @@ static void stimer_tick_rearm_boundary(void) {
 /**
  * @brief Start the always-on periodic kernel tick on STIMER compare-B (IRQ 33).
  *
- * Called once from tiku_clock_arch_init() (which runs before the htimer init at
- * boot). Brings up the crystal + free-running STIMER, arms compare-B one period
- * ahead, unmasks COMPAREB, and enables NVIC IRQ 33. Because this runs first, it
- * does the full STIMER bring-up; the later tiku_htimer_arch_init() re-asserts the
- * same STCFG (with COMPAREBEN preserved) idempotently.
+ * Called once from tiku_clock_arch_init(), which runs before the htimer init,
+ * so it does the full STIMER bring-up: crystal, free-running counter, compare-B
+ * armed one period ahead, COMPAREB unmasked, NVIC IRQ 33 enabled.
  *
  * @param period_counts  STIMER counts per kernel tick (32768 / tick rate)
  */
@@ -272,10 +252,9 @@ void tiku_ambiq_stimer_tick_start(uint32_t period_counts) {
 /**
  * @brief STIMER compare-1 ISR (vector slot 16+33) -- the periodic kernel tick.
  *
- * Clears the COMPAREB flag, re-arms compare-B one period ahead (drift is a
- * fraction of one 30.5 us STIMER count -- the match-to-rearm latency -- so a
- * fixed-delta re-arm is well within tick tolerance), then advances the kernel
- * clock. Runs through the same spacing guard as the one-shot path.
+ * Clears the COMPAREB flag, re-arms compare-B one period ahead, then advances
+ * the kernel clock through the same spacing guard as the one-shot path.  Drift
+ * is a fraction of one 30.5 us count, well inside tick tolerance.
  */
 void tiku_ambiq_stimer_cmpr1_isr(void) {
     STIMER->STMINTCLR = STIMER_INT_COMPAREB;
@@ -292,19 +271,13 @@ void tiku_ambiq_stimer_cmpr1_isr(void) {
  * @brief Stretch compare-B straight to the next software-timer deadline.
  *
  * Called by the scheduler with interrupts masked, timers armed, none due.
- * Re-targets SCMPR1 from "next tick boundary" to "the boundary @p
- * ticks_ahead ticks after the anchor", opens the stretch window, and lets
- * the WFI idle sleep through every skipped tick. The always-on 32 kHz
- * STIMER keeps counting through sleep, so the resync on wake (ISR or
- * tiku_clock_tickless_end()) is exact.
+ * Re-targets SCMPR1 to the boundary @p ticks_ahead after the anchor and lets the
+ * WFI sleep through every skipped tick; the STIMER counts through sleep.
  *
- * No accounting here: crediting a passed boundary would post the timer
- * poll AFTER the scheduler already checked has_pending, so the WFI would
- * sleep on queued work. The target is anchor-relative, so the math is
- * right either way -- a boundary that already passed has its compare-B
- * IRQ pended (interrupts masked in the idle section), the WFI falls
- * straight through, and tiku_clock_tickless_end() credits it.
- *
+ * @note No accounting here -- crediting a passed boundary would post the timer
+ *       poll after the scheduler checked has_pending, so the WFI would sleep on
+ *       queued work.  The target is anchor-relative, so a boundary that already
+ *       passed simply pends its IRQ and tiku_clock_tickless_end() credits it.
  * @param ticks_ahead Ticks to the earliest deadline (>1; bounded by the
  *                    16-bit tiku_clock_time_t at 65535 ticks)
  * @return 1 (stretch armed)
@@ -322,11 +295,9 @@ int tiku_clock_tickless_begin(tiku_clock_time_t ticks_ahead) {
 /**
  * @brief Close the stretch window after the idle hook returns.
  *
- * Runs with interrupts still masked (scheduler's atomic idle section). If
- * the stretched compare already fired, its ISR resynced the clock and
- * restored the cadence. On an early wake by any other interrupt, credit
- * the elapsed whole ticks and re-arm the per-tick cadence at the next
- * boundary.
+ * Runs with interrupts still masked.  If the stretched compare already fired,
+ * its ISR resynced the clock and restored the cadence.  On an early wake by any
+ * other interrupt, credit the elapsed whole ticks and re-arm the cadence.
  */
 void tiku_clock_tickless_end(void) {
     if (!s_stretched) {

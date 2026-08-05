@@ -5,32 +5,11 @@
  *
  * Authors: Ambuj Varshney <ambuj@tiku-os.org>
  *
- * tiku_trng_arch.c - Ambiq Apollo4/5 CryptoCell-312 TRNG driver
+ * tiku_trng_arch.c - Ambiq CryptoCell-312 TRNG driver.
  *
- * Hardware: the Arm CryptoCell-312 RNG sub-block inside the Apollo CRYPTO
- * peripheral (base 0x400C0000).  A ring oscillator (one of four selectable
- * lengths) is sampled every SAMPLECNT1 rng_clk cycles; once 192 bits are
- * whitened into EHR_DATA[0..5], RNGISR.EHRVALID asserts.  On-die health
- * tests (autocorrelation, CRNGT, Von Neumann) flag a bad sample run via the
- * RNGISR error bits, which we treat as "re-arm and try again".
- *
- * Collect sequence (CC312 TRM, matched to Ambiq's am_hal_entropy):
- *   1. RNGCLKENABLE = 1                  enable the RNG clock
- *   2. RNGSWRESET   = 1                  reset the RNG core ...
- *   3. RNGCLKENABLE = 1                  ... which clears the clock-enable
- *   4. RNGICR = all-1s                   clear stale status
- *   5. TRNGCONFIG = ROSC select          pick a ring-oscillator length
- *   6. SAMPLECNT1 = sample count         clocks between bit samples
- *   7. RNDSOURCEENABLE = 1               start sampling
- *   8. spin on RNGISR: EHRVALID -> read EHR_DATA[0..5]; error bit -> re-arm
- *   9. RNDSOURCEENABLE = 0; clear status
- *
- * Power: the CRYPTO domain is power-gated; tiku_trng_arch_init() raises
- * PWRCTRL.DEVPWREN.PWRENCRYPTO and waits for DEVPWRSTATUS.PWRSTCRYPTO.
- *
- * The driver fills the cache from hardware; callers never deal with EHR
- * ordering, valid bits, or ROSC timing.  A health-test failure or a dead
- * source surfaces as TIKU_TRNG_ERR_TIMEOUT (the TLS layer then fails closed).
+ * A ring oscillator is sampled until 192 whitened bits fill the EHR.  On-die
+ * health tests flag a bad run, which is treated as re-arm and retry; a dead source
+ * surfaces as ERR_TIMEOUT so the TLS layer fails closed.  The CRYPTO domain is gated.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -44,24 +23,24 @@
 #include "apollo4l.h"          /* apollo4l / apollo4p: register-compatible */
 #endif
 
-/**
- * @defgroup trng_config TRNG private configuration
- * @{
+/*
+ * TRNG private configuration.
  *
  * TRNG_ROSC_SEL selects the ring-oscillator length (TRNGCONFIG.RNDSRCSEL,
- * 0..3 = fastest..slowest).  The longer oscillators are better whitened and
- * pass the autocorrelation test more reliably at the cost of fill latency.
- * The slowest (3) + 1000-cycle sampling took ~10 s to gather a ClientHello's
- * worth of entropy on Apollo510 -- long enough to stall the TLS handshake
- * mid-flight -- so use the 2nd-slowest ROSC (2, still well-whitened) at half
- * the sample count (~4x faster fill).  The von Neumann debiaser + the
- * autocorr/CRNGT/VN health tests (re-arm on failure, below) are the quality
- * guarantee at any ROSC/sample setting, so this trades only margin, not bias.
+ * 0..3 = fastest..slowest).  Longer oscillators are better whitened and pass
+ * autocorrelation more reliably, at the cost of fill latency.
+ *
+ * The slowest (3) plus 1000-cycle sampling took ~10 s to gather a
+ * ClientHello's worth of entropy on Apollo510, long enough to stall the
+ * TLS handshake mid-flight.  The 2nd-slowest ROSC at half the sample
+ * count fills ~4x faster; the von Neumann debiaser and the
+ * autocorr/CRNGT/VN health tests are the quality guarantee at any
+ * setting, so this trades margin, not bias.
  *
  * TRNG_SAMPLE_COUNT is the rng_clk cycle count between bit samples
- * (SAMPLECNT1) -- higher = more decorrelation per bit.
+ * (SAMPLECNT1) -- higher means more decorrelation per bit.
  *
- * TRNG_CACHE_WORDS = the six EHR_DATA registers (192 bits per collection).
+ * TRNG_CACHE_WORDS is the six EHR_DATA registers (192 bits per collection).
  * TRNG_SPIN_LIMIT bounds the wait for EHRVALID; TRNG_MAX_RETRIES bounds the
  * health-test re-arm loop.
  */
@@ -72,7 +51,7 @@
 #define TRNG_MAX_RETRIES     16u         /* health-test re-arm attempts        */
 /** @} */
 
-/* RNGISR bits we care about. */
+/* RNGISR bits this driver acts on. */
 #define RNG_ISR_EHR_VALID    (1ul << 0)
 #define RNG_ISR_AUTOCORRERR  (1ul << 1)
 #define RNG_ISR_CRNGTERR     (1ul << 2)

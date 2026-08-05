@@ -5,13 +5,11 @@
  *
  * Authors: Ambuj Varshney <ambuj@tiku-os.org>
  *
- * tiku_cpu_common.c - Apollo 510 common CPU helpers (delays, IDs)
+ * tiku_cpu_common.c - Apollo510 common CPU helpers (delays, IDs).
  *
- * Bare-metal delays spin on the Cortex-M SysTick counter — reliable (unlike
- * the Apollo5 DWT, which ticks at 2x the core and broke a DWT-based delay) and
- * sharing the exact clock basis as the system tick, so a delay and a tick can
- * never disagree. Scaled by the SysTick clock = TIKU_MAIN_CPU_HZ = 96 MHz, the
- * full M55 core (SysTick CLKSOURCE=processor). No AmbiqSuite dependency.
+ * Delays spin on SysTick rather than DWT, which ticks at twice the core on this
+ * part and once broke a DWT-based delay.  SysTick also shares the system tick's
+ * clock basis, so a delay and a tick can never disagree.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -39,16 +37,13 @@
 /**
  * @brief Spin-delay for a given number of microseconds
  *
- * Uses the Cortex-M SysTick down-counter as the timebase, scaled by
- * TIKU_MAIN_CPU_HZ (96 MHz). Reliable across sleep and clock changes
- * because it tracks elapsed SysTick ticks rather than loop iterations.
- * Falls back to a NOP spin loop when SysTick is not yet configured
- * (pre-clock-init). Does not depend on AmbiqSuite.
+ * Uses the Cortex-M SysTick down-counter, which runs at the full core frequency
+ * (CLKSOURCE=processor), scaled by the LIVE core clock so the delay stays
+ * correct across an LP/HP perf-mode switch.
  *
- * SysTick CLKSOURCE=processor, so the counter runs at the full M55 core
- * frequency (96 MHz LP / 192 MHz HP). Scale by the LIVE core clock so the
- * delay stays correct across an LP<->HP perf-mode switch.
- *
+ * @note Tracks elapsed SysTick ticks rather than loop iterations, so it is
+ *       reliable across sleep and clock changes.  Falls back to a NOP spin
+ *       before SysTick is configured.
  * @param us  Delay in microseconds
  */
 void tiku_cpu_ambiq_delay_us(unsigned int us) {
@@ -126,15 +121,12 @@ uint8_t tiku_cpu_ambiq_unique_id(uint8_t *buf, uint8_t len) {
 /**
  * @brief Return the encoded reason for the last system reset.
  *
- * Reads the Apollo reset generator's status latch (RSTGEN->STAT) and
- * maps it to an MSP430-SYSRSTIV-compatible code, which is the contract
- * the /sys reset consumers expect (tiku_vfs_tree_boot.c buckets it into
- * watchdog / power / reboot / other).  Multiple causes can latch across
- * a chain of resets; the most specific / most recent is reported first.
+ * Reads the reset generator's status latch (RSTGEN->STAT) and maps it to an
+ * MSP430-SYSRSTIV-compatible code, the contract the /sys reset consumers
+ * expect.  Multiple causes can latch, so the most specific is reported first.
  *
- * Read-only: the STAT latch is left intact (the boot path samples it
- * once), so this never perturbs the reset generator.
- *
+ * @note Read-only -- the STAT latch is left intact, so this never perturbs the
+ *       reset generator.
  * @return SYSRSTIV-compatible reset-reason code (0 = clean power-on).
  */
 uint16_t tiku_cpu_ambiq_reset_reason(void) {

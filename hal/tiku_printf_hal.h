@@ -5,18 +5,11 @@
  *
  * Authors: Ambuj Varshney <ambuj@tiku-os.org>
  *
- * tiku_printf_hal.h - Platform-routing header for debug printf
+ * tiku_printf_hal.h - platform routing for debug printf.
  *
- * Defines TIKU_PRINTF() based on the active platform.  Each platform
- * block selects the correct low-level output channel (semihosting,
- * UART, RTT, etc.) and handles transport-conflict suppression
- * (e.g. SLIP owns the UART).
- *
- * Adding a new platform:
- *   1. Add an #elif block for PLATFORM_<NAME>
- *   2. Include the platform's console/UART header
- *   3. Map TIKU_PRINTF to the platform's printf function
- *   4. Handle any transport conflicts (SLIP, BLE, etc.)
+ * Defines TIKU_PRINTF() per platform, selecting the low-level output channel
+ * (semihosting, UART, RTT) and suppressing it where a transport owns the link,
+ * as SLIP owns the UART.  A new port adds one #elif block.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -93,6 +86,22 @@
 /* nRF54L: console over UARTE (polled EasyDMA). No SLIP transport yet, so
  * debug printf routes straight to the UARTE backend. */
 #include <arch/nordic/tiku_uart_arch.h>
+#define TIKU_PRINTF(...) tiku_uart_printf(__VA_ARGS__)
+
+/*---------------------------------------------------------------------------*/
+/* STM32N6 (Cortex-M55) — console over USART1, the ST-LINK virtual COM port   */
+/*---------------------------------------------------------------------------*/
+
+#elif defined(PLATFORM_STM32N6)
+#include <arch/stm32n6/tiku_uart_arch.h>
+#define TIKU_PRINTF(...) tiku_uart_printf(__VA_ARGS__)
+
+/*---------------------------------------------------------------------------*/
+/* RA8P1 (Cortex-M85) — console over SCI8, the kit's J-Link OB virtual COM    */
+/*---------------------------------------------------------------------------*/
+
+#elif defined(PLATFORM_RA8P1)
+#include <arch/ra8p1/tiku_uart_arch.h>
 #define TIKU_PRINTF(...) tiku_uart_printf(__VA_ARGS__)
 
 /*---------------------------------------------------------------------------*/

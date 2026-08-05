@@ -7,15 +7,9 @@
  *
  * tiku_ble_adv.c - BLE broadcaster/observer facade, nRF54L15 backend.
  *
- * Backend-specific implementation of interfaces/bluetooth/tiku_ble_adv.h
- * on the on-die 2.4 GHz RADIO (arch/nordic/tiku_radio_arch).  Compiled only
- * when the build maps a broadcast-capable radio to TIKU_HAS_BLE_ADV (see
- * the Makefile's nordic section); consumers gate on TIKU_BLE_ADV_PRESENT.
- *
- * Concurrency model (see the header): the background beacon is a CALLBACK
- * software timer dispatched by the cooperative scheduler in the arming
- * process's context.  Nothing here preempts anything -- a blocking scan
- * simply delays the next burst -- so radio ownership needs no locking.
+ * Implements tiku_ble_adv.h on the on-die 2.4 GHz RADIO, compiled only where the
+ * build maps a broadcast-capable radio to TIKU_HAS_BLE_ADV.  The background beacon
+ * is a callback timer in the arming process's context, so nothing preempts.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -450,7 +444,7 @@ static void scan_parse_name(const uint8_t *ad, uint8_t ad_len, char *out)
  * (instances append the name to the SCAN RESPONSE -- kernel
  * MGMT_ADV_FLAG_LOCAL_NAME semantics; hardware-measured: the host showed
  * up as a strong nameless ADV_SCAN_IND), so the reverse-nonce oracle
- * ships its nonce as ASCII after the 'TK' company id (0x4B54, our own
+ * ships its nonce as ASCII after the 'TK' company id (0x4B54, the tikuOS
  * beacon marker) -- manufacturer data DOES ride in the ADV payload.
  * Restricted to the TK id so ambient vendor blobs (Apple beacons etc.)
  * can never masquerade as a name. */

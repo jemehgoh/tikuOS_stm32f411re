@@ -5,43 +5,11 @@
  *
  * Authors: Ambuj Varshney <ambuj@tiku-os.org>
  *
- * tiku_lcd.h - Platform-independent segment-LCD interface
+ * tiku_lcd.h - platform-independent segment-LCD interface.
  *
- * A small, ergonomic API for fixed-segment LCDs (e.g. the FH-1138P
- * 96-segment glass on the MSP-EXP430FR6989 LaunchPad). Designed so
- * application code can talk to the display without caring which
- * controller is underneath.
- *
- * QUICK START
- * -----------
- *   #include <interfaces/lcd/tiku_lcd.h>
- *
- *   tiku_lcd_init();
- *   tiku_lcd_puts("HELLO");          // left-aligned banner
- *   tiku_lcd_puts_right("3");        // right-aligned, e.g. version
- *   tiku_lcd_put_uint(1234);         // counter / sensor value
- *   tiku_lcd_put_int(-42);           // signed value
- *   tiku_lcd_puts_at(4, "OK");       // partial overwrite at pos 4..
- *   tiku_lcd_clear();                // blank everything
- *
- * Icons (optional, board declares them via TIKU_BOARD_LCD_HAS_ICONS):
- *
- *   tiku_lcd_icon_on(TIKU_LCD_ICON_HEART);
- *   tiku_lcd_icon_toggle(TIKU_LCD_ICON_DOT2);
- *   tiku_lcd_icons_clear();
- *
- * PORTABILITY
- * -----------
- * Boards without an LCD compile this header just fine; every entry
- * point is a no-op when TIKU_BOARD_HAS_LCD is 0, and the runtime
- * predicate TIKU_LCD_PRESENT folds to a constant so portable code
- * can branch without #ifdef:
- *
- *   if (TIKU_LCD_PRESENT) { tiku_lcd_puts("ALIVE"); }
- *
- * The icon API is only declared when the board sets
- * TIKU_BOARD_LCD_HAS_ICONS — guard calls with #ifdef if you want
- * the same source to compile on icon-less boards.
+ * A small API for fixed-segment glass, with optional icons where the board sets
+ * TIKU_BOARD_LCD_HAS_ICONS.  Boards without an LCD compile fine: entry points
+ * become no-ops and TIKU_LCD_PRESENT folds to a constant for branching.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -85,10 +53,9 @@ uint8_t tiku_lcd_num_chars(void);
 /**
  * @brief Bring up the LCD controller and clear the panel.
  *
- * Configures the LCD peripheral (charge pump, mux ratio, frame
- * frequency, pin muxing) and blanks every segment. Safe to call
- * once at boot before the scheduler starts. No-op on boards
- * without an LCD.
+ * Configures the peripheral -- charge pump, mux ratio, frame frequency, pin
+ * muxing -- and blanks every segment.  Safe to call at boot before the
+ * scheduler starts, and a no-op on boards without an LCD.
  */
 void tiku_lcd_init(void);
 
@@ -190,23 +157,12 @@ void tiku_lcd_put_int(int32_t value);
 void tiku_lcd_put_hex(uint32_t value, uint8_t digits);
 
 /**
- * @brief Display a fixed-point value, right-aligned, with the
- *        decimal point shown via the board's inter-digit dot icon.
+ * @brief Display a fixed-point value, right-aligned, with the decimal point
+ *        shown via the board's inter-digit dot icon.
  *
- * Renders @p value as an integer and lights the dot icon between
- * the integer and fractional cells, so e.g.
- * `tiku_lcd_put_fixed(2345, 2)` shows `   23.45` (last 2 digits
- * are the fractional part) and `tiku_lcd_put_fixed(-50, 1)` shows
- * `   -5.0`. Negative values reserve one cell for the leading
- * '-'. If the magnitude has fewer digits than @p decimals + 1, a
- * leading zero is added so the integer cell is never empty.
- * Values that would not fit (including the sign) are clamped to
- * all-9s and the dot is cleared.
- *
- * On boards that do not declare TIKU_BOARD_LCD_DOT_COUNT the
- * function is still callable but no dot is lit — the digits
- * appear without a visible separator. On boards without an LCD
- * the call is a no-op.
+ * Renders @p value as an integer and lights the dot before the last @p decimals
+ * digits, reserving a cell for a leading '-' and adding a leading zero so the
+ * integer cell is never empty.  A value that will not fit clamps to all-9s.
  *
  * @param value     Signed value to render (raw, no scaling).
  * @param decimals  Number of fractional digits. 0 behaves like

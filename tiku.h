@@ -29,12 +29,12 @@
 
 /*
  * The Makefile sets exactly one PLATFORM_* define on the command line.
- * If nothing is set we fall back to MSP430 to keep the historical
- * default working out-of-the-box for legacy targets.
+ * With nothing set the build falls back to MSP430, so the historical
+ * default keeps working out-of-the-box for legacy targets.
  */
-
-#if !defined(PLATFORM_MSP430) && !defined(PLATFORM_RP2350) && !defined(PLATFORM_STM32F411) \
-    && !defined(PLATFORM_AMBIQ) && !defined(PLATFORM_NORDIC)
+#if !defined(PLATFORM_MSP430) && !defined(PLATFORM_RP2350) && \
+    !defined(PLATFORM_STM32F411) && !defined(PLATFORM_AMBIQ) && !defined(PLATFORM_NORDIC) && \
+    !defined(PLATFORM_STM32N6) && !defined(PLATFORM_RA8P1)
 #define PLATFORM_MSP430 1
 #endif
 
@@ -42,11 +42,10 @@
 /* DEVICE SELECTION                                                          */
 /*---------------------------------------------------------------------------*/
 
-/**
- * Device selection: passed via -DTIKU_DEVICE_<PART>=1 from the Makefile.
- * CCS passes -D__MSP430FRxxxx__ for MSP430 parts, so map those automatically.
- * Default to FR2433 (MSP430) if no MSP430 device is defined and we're on
- * the MSP430 platform.
+/*
+ * Device selection, passed as -DTIKU_DEVICE_<PART>=1 from the Makefile.  CCS
+ * passes -D__MSP430FRxxxx__ instead, so those are mapped automatically, and an
+ * MSP430 build with no device named defaults to the FR2433.
  */
 #if defined(PLATFORM_MSP430)
 
@@ -113,7 +112,7 @@
 /*
  * Nordic nRF54L silicon. The Makefile derives one TIKU_DEVICE_NRF54* macro
  * from MCU=... and passes it on the command line, along with the matching
- * board define. When no nordic device is selected we fall back to the
+ * board define. With no nordic device selected the build falls back to the
  * nRF54L15 (the first-supported / primary part) so a bare PLATFORM_NORDIC
  * build still resolves a device.
  */
@@ -128,19 +127,29 @@
 /* SYSTEM CONFIGURATION (before includes to avoid circular dependencies)    */
 /*---------------------------------------------------------------------------*/
 
-/** Clock time type definition */
+/*
+ * Clock time type.
+ *
+ * 16 bits wraps every 512 s at 128 Hz, and any interval measured as a single
+ * difference past that is silently wrong -- a 605 s measurement once read
+ * back as 92 s.  A 16-bit MCU keeps the narrow type because every timer
+ * compare pays for the width; parts with a 32-bit ALU do not, and 32 bits
+ * moves the wrap from 512 seconds to 388 days.
+ *
+ * TIKU_CLOCK_LT / _DIFF follow this type's width automatically, so changing
+ * it here is sufficient -- they no longer assume 16 bits.
+ */
+#if defined(PLATFORM_MSP430)
 #define TIKU_CLOCK_CONF_TIME_T unsigned short
+#else
+#define TIKU_CLOCK_CONF_TIME_T unsigned long
+#endif
 
-/** Target CPU frequency setting.
- *
- *  On MSP430 this is an enum index into a small table of DCO presets
- *  (1=1MHz ... 7=8MHz). On RP2350 there is only one shipped configuration
- *  (PLL_SYS = 150 MHz) so the value is ignored at the arch level — it
- *  is kept here only to satisfy callers of tiku_cpu_full_init().
- *
- *  MSP430 enum:
- *    1=1MHz, 2=2.67MHz, 3=3.5MHz, 4=4MHz, 5=5.33MHz, 6=7MHz, 7=8MHz (max)
- *    NOTE: 16MHz (value 8) is currently DISABLED due to stability issues.
+/*
+ * Target CPU frequency setting.  On MSP430 an enum index into a small table of
+ * DCO presets (1=1MHz .. 7=8MHz; 16 MHz is disabled for stability).  On RP2350
+ * there is one shipped configuration, so the value is ignored at the arch level
+ * and kept only to satisfy callers of tiku_cpu_full_init().
  */
 #if defined(PLATFORM_RP2350)
 /* RP2350 PLL_SYS target in MHz. Supported values (see
@@ -179,6 +188,22 @@
 #ifndef MAIN_CPU_FREQ
 #define MAIN_CPU_FREQ 128
 #endif
+#elif defined(PLATFORM_RA8P1)
+/* Boot rate: MEASURED, not chosen.  SCKDIVCR reads 0 out of reset, so every
+ * divider is /1 and the core runs from the 8 MHz middle-speed oscillator.
+ * R4 brings the PLL up to 1 GHz; until then every derived constant -- the
+ * console divisor, the SysTick reload -- follows this number. */
+#ifndef MAIN_CPU_FREQ
+#define MAIN_CPU_FREQ 240
+#endif
+#elif defined(PLATFORM_STM32N6)
+/* Boot rate, applied by tiku_cpu_freq_init(): 150 MHz is what the boot ROM
+ * hands over, so booting here changes nothing but makes the tree ours rather
+ * than inherited. `freq <mhz>` moves it up to 800 or down to 10 at runtime;
+ * the tick and console run from HSI and do not follow. */
+#ifndef MAIN_CPU_FREQ
+#define MAIN_CPU_FREQ 150
+#endif
 #else
 #define MAIN_CPU_FREQ 7    /* MSP430: 8 MHz (maximum supported) */
 #endif
@@ -187,7 +212,9 @@
  *  and other subsystems that need the clock frequency as a compile-time
  *  constant.
  */
-#if defined(PLATFORM_RP2350) || defined(PLATFORM_STM32F411) || defined(PLATFORM_AMBIQ) || defined(PLATFORM_NORDIC)
+#if defined(PLATFORM_RP2350) || defined(PLATFORM_STM32F411) || defined(PLATFORM_AMBIQ) || \
+    defined(PLATFORM_NORDIC) || defined(PLATFORM_STM32N6) || \
+    defined(PLATFORM_RA8P1)
 #define TIKU_MAIN_CPU_HZ  ((unsigned long)MAIN_CPU_FREQ * 1000000UL)
 #elif MAIN_CPU_FREQ == 1
 #define TIKU_MAIN_CPU_HZ  1000000UL
@@ -226,17 +253,20 @@
 #include <arch/ambiq/tiku_device_select.h>
 #elif defined(PLATFORM_NORDIC)
 #include <arch/nordic/tiku_device_select.h>
+#elif defined(PLATFORM_STM32N6)
+#include <arch/stm32n6/tiku_device_select.h>
+#elif defined(PLATFORM_RA8P1)
+#include <arch/ra8p1/tiku_device_select.h>
 #endif
 
 /*---------------------------------------------------------------------------*/
 /* PLATFORM-ROUTED PRINTF                                                    */
 /*---------------------------------------------------------------------------*/
 
-/**
- * TIKU_PRINTF() is routed through hal/tiku_printf_hal.h which selects
- * the correct output channel for the active platform and compiler
- * (semihosting, UART, RTT, etc.).  Transport conflicts such as
- * SLIP-over-UART are handled there as well.
+/*
+ * TIKU_PRINTF() routes through hal/tiku_printf_hal.h, which picks the output
+ * channel for the active platform and compiler and resolves transport conflicts
+ * such as SLIP over the console UART.
  */
 #include <hal/tiku_printf_hal.h>
 
@@ -270,6 +300,10 @@
 #include <arch/ambiq/tiku_timer_arch.h>
 #elif defined(PLATFORM_NORDIC)
 #include <arch/nordic/tiku_timer_arch.h>
+#elif defined(PLATFORM_STM32N6)
+#include <arch/stm32n6/tiku_timer_arch.h>
+#elif defined(PLATFORM_RA8P1)
+#include <arch/ra8p1/tiku_timer_arch.h>
 #endif
 #include <kernel/timers/tiku_clock.h>
 #include <kernel/timers/tiku_htimer.h>
@@ -333,22 +367,10 @@
 
 /**
  * @defgroup TIKU_DEBUG_CONFIG Debug Configuration Flags
- * @brief Configuration flags for enabling/disabling debug output
+ * @brief Per-subsystem debug output switches.
  *
- * Each subsystem has its own debug macro following the pattern:
- * - MAIN_PRINTF()       - Main application debug
- * - PROCESS_PRINTF()    - Process management debug
- * - HTIMER_PRINTF()     - Hardware timer debug
- * - TIMER_PRINTF()      - Event timer debug
- * - CPU_FREQ_PRINTF()   - CPU frequency debug
- * - CLOCK_PRINTF()      - Clock architecture debug
- * - TEST_PRINTF()       - Test module debug
- * - HTIMER_ARCH_PRINTF()- Hardware timer arch debug
- * - SCHED_PRINTF()      - Scheduler debug
- * - WDT_PRINTF()        - Watchdog timer debug
- *
- * All debug messages are disabled by default (flags set to 0).
- * Set any flag to 1 to enable debug output for that subsystem.
+ * Each subsystem has its own <NAME>_PRINTF() macro gated by its own flag.  All
+ * are 0 by default; set one to 1 to enable that subsystem's output.
  * @{
  */
 

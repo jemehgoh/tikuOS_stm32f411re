@@ -5,32 +5,11 @@
  *
  * Authors: Ambuj Varshney <ambuj@tiku-os.org>
  *
- * tiku_mem_apollo4l.c - Apollo4 Lite memory architecture + MRAM-backed NVM
+ * tiku_mem_apollo4l.c - Apollo4 Lite memory architecture and MRAM-backed NVM.
  *
- * Persistent state lives in the TCM .uninit region (warm-reset durable). For
- * power-cycle durability it is mirrored to a 32 KB MRAM page reserved at the top
- * of MRAM (apollo4l.ld __tiku_nvm_mram_*). tiku_mem_arch_nvm_flush() snapshots
- * .uninit (prefixed with a magic word) into a TCM staging buffer and programs
- * the page via the Apollo4 on-chip bootrom helper nv_program_main2. On boot,
- * tiku_mem_arch_init() copies the page back into .uninit if the magic matches;
- * a fresh chip has no magic, so .uninit keeps its NOLOAD value and each
- * subsystem's "no magic -> init fresh" path runs.
- *
- * Mirrors arch/ambiq/tiku_mem_arch.c (Apollo510), with the Apollo4 deltas:
- *   - bootrom helper nv_program_main2 lives at 0x0800006D (verified in the
- *     R4.5.0 g_am_hal_bootrom_helper table) -- a DIFFERENT address than
- *     Apollo5's 0x0200ff20. The value is already Thumb-encoded (bit 0 set).
- *   - MRAM array origin is 0x0 (so the destination word offset is addr >> 2),
- *     vs Apollo5's 0x00400000.
- *   - the Cortex-M4 has NO SCB L1 D-cache, so the TCM staging buffer needs no
- *     clean before the bootrom reads it (unlike the M55/SSRAM path on 510).
- *     The Apollo4 CACHECTRL does, however, cache MRAM reads, so the mirror
- *     page is invalidated after a real program -- and the flush dirty-check
- *     relies on that invalidate to keep its compare coherent.
- *   - the staging buffer lives in the always-on TCM (.bss), not a separately
- *     powered SSRAM bank; 0x10000000 is a valid bootrom source (SRAM_BASEADDR).
- * MRAM is direct-write (no erase, unlike NOR flash). The reserved page is far
- * above the firmware code; the SBL (low MRAM) is untouched.
+ * Persistent state lives in TCM .uninit and is mirrored to a reserved MRAM page
+ * through the on-chip bootrom helper, restored at boot when the magic matches.
+ * MRAM is direct-write, so there is no erase step; the bootloader is untouched.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -66,10 +45,11 @@ extern uint32_t __tiku_nvm_mram_start[]; /* base of the mirror page (linker
  * @brief On-chip bootrom MRAM programmer function type
  *
  * Fixed ROM entry from the AmbiqSuite R4.5.0 bootrom helper table
- * (g_am_hal_bootrom_helper.nv_program_main2, am_hal_bootrom_helper.c).
- * Signature: nv_program_main2(key, op, src_addr, dst_word_offset, num_words).
- * The stored value 0x0800006D already carries the Thumb bit (bit 0), so it is
- * used as-is. MRAM is direct-write (no erase required).
+ * (g_am_hal_bootrom_helper.nv_program_main2).  The stored value 0x0800006D
+ * already carries the Thumb bit, so it is used as-is.
+ *
+ * @note Signature: nv_program_main2(key, op, src_addr, dst_word_offset,
+ *       num_words).  MRAM is direct-write; no erase required.
  */
 typedef int (*nv_program_main2_t)(uint32_t, uint32_t, uint32_t, uint32_t, uint32_t);
 #define NV_PROGRAM_MAIN2  ((nv_program_main2_t)0x0800006DUL)
@@ -114,10 +94,9 @@ static size_t uninit_bytes(void) {
 /**
  * @brief Restore .uninit state from the MRAM mirror on boot
  *
- * Checks word[0] of the reserved MRAM page for TIKU_NVM_MAGIC. If it matches,
- * copies the stored .uninit image back into RAM, making power-cycle-durable
- * state visible to subsequent subsystem init. On a fresh chip the magic is
- * absent and .uninit retains its NOLOAD value. No cache to flush on the M4.
+ * Checks word[0] of the reserved MRAM page for TIKU_NVM_MAGIC and, on a match,
+ * copies the stored .uninit image back into RAM before subsystem init.  On a
+ * fresh chip the magic is absent and .uninit keeps its NOLOAD value.
  */
 void tiku_mem_arch_init(void) {
     const uint32_t *mirror = (const uint32_t *)__tiku_nvm_mram_start;
@@ -191,13 +170,12 @@ void tiku_mem_arch_nvm_write(uint8_t *dst, const uint8_t *src,
 /**
  * @brief Snapshot .uninit into the reserved MRAM page for power-cycle durability
  *
- * Composes a TIKU_NVM_MAGIC header + the entire .uninit image into the TCM
- * staging buffer g_nvm_snap, pads to a 16-byte boundary, and programs the
- * result into the reserved MRAM page via the Apollo4 bootrom nv_program_main2
- * helper. The destination is passed as a word offset from the MRAM origin
- * (0x0), so dst_word_offset = page_addr >> 2. Interrupts are masked across the
- * program call (the helper executes from ROM, so MRAM stays fetchable). MRAM is
- * direct-write; no erase and -- on the cacheless M4 -- no cache maintenance.
+ * Composes a TIKU_NVM_MAGIC header plus the whole .uninit image into the TCM
+ * staging buffer, pads to 16 bytes, and programs the reserved MRAM page via the
+ * bootrom nv_program_main2 helper (destination as a word offset from 0x0).
+ *
+ * @note Interrupts are masked across the program call; the helper executes from
+ *       ROM, so MRAM stays fetchable.  Direct-write, and no cache on the M4.
  */
 void tiku_mem_arch_nvm_flush(void) {
     size_t   n = uninit_bytes();
@@ -209,8 +187,8 @@ void tiku_mem_arch_nvm_flush(void) {
         n = TIKU_NVM_MRAM_BYTES - TIKU_NVM_MIRROR_HDR_BYTES;
     }
 
-    /* Compose the IMAGE first (header words filled only if we program:
-     * the CRC is the expensive part and a clean relock must stay free). */
+    /* Compose the IMAGE first (header words filled only when a program
+     * follows: the CRC is expensive and a clean relock must stay free). */
     memcpy((uint8_t *)&g_nvm_snap[4], &__uninit_start, n);
     snap_bytes = TIKU_NVM_MIRROR_HDR_BYTES + n;
     prog_bytes = (snap_bytes + 15U) & ~((size_t)15U);
@@ -322,9 +300,9 @@ uint8_t tiku_mem_arch_nvm_bench(tiku_mem_nvm_bench_row_t *rows, uint8_t max,
     TIKU_DWT_CYCCNT = 0U;
     TIKU_DWT_CTRL  |= 1UL;             /* CYCCNTENA */
 
-    /* Calibrate DWT ticks/second against the trusted SysTick us-delay, so the
-     * us conversion is right regardless of the part's DWT:core ratio (1x on the
-     * M4, 2x on the M55).  Raw cycles below are rate-independent for shape. */
+    /* Calibrate DWT ticks/second against the trusted SysTick microsecond
+     * delay, so the conversion holds whatever the part's DWT:core ratio is
+     * (1x on the M4, 2x on the M55).  Raw cycles below are rate-independent. */
     c0 = TIKU_DWT_CYCCNT;
     tiku_cpu_ambiq_delay_us(5000u);    /* 5 ms */
     c1 = TIKU_DWT_CYCCNT;
@@ -337,9 +315,9 @@ uint8_t tiku_mem_arch_nvm_bench(tiku_mem_nvm_bench_row_t *rows, uint8_t max,
             (uint32_t)(((mirror + bench_off) - AMBIQ_MRAM_BASE) >> 2);
         uint32_t w;
 
-        /* Varied source pattern (bit transitions) so we don't measure an
-         * all-identical fast path. Clobbers the staging buffer; the closing
-         * lock_nvm flush recomposes it. */
+        /* Varied source pattern (bit transitions) so the measurement cannot
+         * land on an all-identical fast path. Clobbers the staging buffer;
+         * the closing lock_nvm flush recomposes it. */
         for (w = 0U; w < words; w++) {
             g_nvm_snap[w] = 0xA5A50000UL ^ (uint32_t)(w * 2654435761UL);
         }

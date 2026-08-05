@@ -5,17 +5,11 @@
  *
  * Authors: Ambuj Varshney <ambuj@tiku-os.org>
  *
- * tiku_trng_arch.h - RP2350 True Random Number Generator HAL
+ * tiku_trng_arch.h - RP2350 true random number generator HAL.
  *
- * Wraps the dedicated TRNG block (datasheet §12.13). One blocking
- * read API; a 192-bit ring buffer in static RAM is kept full
- * automatically across calls so the typical read_u32() returns from
- * RAM and only re-arms the hardware when the cache is empty.
- *
- * Use cases:
- *   - Seed for the existing software PRNG in tikukits/crypto/
- *   - Nonce / IV for ephemeral session keys
- *   - One-time stack canary refresh
+ * One blocking read API over the dedicated TRNG block, backed by a 192-bit cache
+ * kept full across calls, so a typical read returns from RAM and only re-arms the
+ * hardware when the cache empties.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -26,8 +20,8 @@
 #include <stdint.h>
 #include <stddef.h>
 
-/**
- * @brief Return codes for the TRNG driver.
+/*
+ * Return codes for the TRNG driver.
  *
  * TIKU_TRNG_OK            — success.
  * TIKU_TRNG_ERR_INVALID   — NULL pointer or zero-length buffer.
@@ -50,10 +44,9 @@ void tiku_trng_arch_init(void);
 /**
  * @brief Block until a 32-bit random word is available; return it.
  *
- * On the fast path the word comes from the 6-word software cache
- * already filled by the hardware. On the slow path the hardware is
- * armed and we spin on the VALID flag for up to a few thousand
- * cycles before giving up — see TIKU_TRNG_ERR_TIMEOUT.
+ * The fast path takes the word from the 6-word software cache the hardware
+ * already filled; the slow path arms the hardware and spins on VALID for a few
+ * thousand cycles before giving up with TIKU_TRNG_ERR_TIMEOUT.
  *
  * @param out  Where to store the random word. Must not be NULL.
  * @return TIKU_TRNG_OK or a negative error code.

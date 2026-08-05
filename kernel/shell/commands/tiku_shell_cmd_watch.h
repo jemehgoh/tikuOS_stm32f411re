@@ -5,14 +5,11 @@
  *
  * Authors: Ambuj Varshney <ambuj@tiku-os.org>
  *
- * tiku_shell_cmd_watch.h - "watch" command: live view of a VFS node
+ * tiku_shell_cmd_watch.h - "watch" command: live view of a VFS node.
  *
- * Rebuilt on the watch primitive: writable nodes stream
- * event-driven (a print per write, zero work in between),
- * read-only nodes re-read on an interval.  The command is a
- * non-blocking shell-loop MODE — it returns immediately and the
- * shell stays interactive while values stream; Ctrl+C stops it.
- * The shell main loop drives the mode through the hooks below.
+ * Writable nodes stream event-driven, read-only nodes re-read on an interval.
+ * The command returns immediately and the shell main loop drives the mode through
+ * the hooks below, so the shell stays interactive.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -25,20 +22,12 @@
 /**
  * @brief "watch" command — live view of a VFS node until Ctrl+C.
  *
- * Usage: watch <path> [interval]
+ * Mode comes from the node: a writable node subscribes via tiku_vfs_watch()
+ * and prints on every accepted write, a read-only sensor node re-reads every
+ * interval seconds (1..255, default 1).  A second `watch` replaces the first.
  *
- *   path     Absolute or CWD-relative path to a readable FILE node
- *   interval Seconds between reads in INTERVAL mode (1..255,
- *            default 1); ignored in EVENT mode, where the display
- *            is change-driven
- *
- * Mode is chosen from the node: writable nodes subscribe via
- * tiku_vfs_watch() and print on every accepted write; read-only
- * (sensor) nodes re-read periodically.  Prints the current value
- * once, immediately, then returns — values stream asynchronously
- * while the shell remains fully interactive.  A second `watch`
- * replaces the running one.
- *
+ * @note Prints the current value once immediately and returns; values then
+ *       stream asynchronously while the shell stays fully interactive.
  * @param argc  Argument count
  * @param argv  Argument vector
  */
@@ -60,10 +49,9 @@ uint8_t tiku_shell_cmd_watch_active(void);
 /**
  * @brief Per-poll-tick service.
  *
- * INTERVAL mode: counts ticks, re-prints each elapsed interval.
- * EVENT mode: idempotent re-subscribe — self-heals the
- * subscription after the rules engine's wholesale
- * tiku_vfs_unwatch_all() re-arm drops it.
+ * INTERVAL mode counts ticks and re-prints each elapsed interval.  EVENT mode
+ * re-subscribes idempotently, self-healing after the rules engine's wholesale
+ * tiku_vfs_unwatch_all() re-arm drops the subscription.
  */
 void tiku_shell_cmd_watch_tick(void);
 

@@ -5,26 +5,11 @@
  *
  * Authors: Ambuj Varshney <ambuj@tiku-os.org>
  *
- * tiku_bt_transport.h — driver-agnostic Bluetooth transport interface
+ * tiku_bt_transport.h - driver-agnostic Bluetooth transport interface.
  *
- * The TikuOS BLE stack lives in tikukits/net/bluetooth/ and is
- * portable across HCI-capable chips (CYW43439, nRF52 with HCI UART,
- * ESP32 BT, TI CC256x, external dongles). Each driver implements
- * the small @ref tiku_bt_transport_t vtable below and registers
- * itself via @ref tiku_bt_register_transport(); the generic stack
- * then drives BLE end-to-end without knowing the chip's transport
- * details (BTSDIO vs HCI-UART vs HCI-SPI vs USB-HCI).
- *
- * The expected HCI packet framing is the standard Bluetooth Core
- * Spec form:
- *
- *   byte 0   packet type (0x01 = HCI cmd, 0x02 = ACL data,
- *                          0x04 = HCI event)
- *   byte 1+  type-specific bytes (HCI cmd opcode+len+params,
- *                                  ACL handle+len+L2CAP, etc.)
- *
- * The transport hides whatever wrapping the chip needs around that
- * (BTSDIO 4-byte header on CYW43, raw UART on Nordic, etc.).
+ * The vtable each driver implements to carry HCI for the portable stack, whether
+ * that is BTSDIO over a chip's shared RAM rings or an HCI UART.  Keeps the stack
+ * independent of any one Bluetooth part.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -39,13 +24,11 @@ extern "C" {
 #endif
 
 /**
- * @brief Driver-supplied transport vtable
+ * @brief Driver-supplied transport vtable.
  *
- * Each function is called by the generic stack as it pumps HCI
- * traffic. Implementations must be synchronous (no PT_YIELD) since
- * they may be called from shell context, the BT runner, and ISR
- * follow-ups. Reentrancy: only the BT runner and shell touch the
- * transport at most one-at-a-time (single-process BT use today).
+ * Called by the generic stack as it pumps HCI traffic.  Implementations must be
+ * synchronous, since they run from shell context, the runner and ISR
+ * follow-ups; only one caller touches the transport at a time today.
  */
 typedef struct {
     /**
@@ -72,15 +55,9 @@ typedef struct {
 /**
  * @brief Register the active BT transport.
  *
- * Drivers call this once during their init, typically right after
- * the chip-side bring-up (BTFW upload + ring-buffer handshake on
- * CYW43, or pin/baud config on a UART-HCI driver). The generic
- * stack stashes the pointer and uses it for every subsequent send /
- * recv operation. Only one transport may be registered at a time;
- * a second call replaces the first.
- *
- * The vtable storage must outlive every BT operation -- usually
- * declared `static const` in the driver's translation unit.
+ * A driver calls this once during init, after its chip-side bring-up.  Only one
+ * transport is active and a second call replaces the first, so the vtable must
+ * outlive every BT operation -- usually a static const in the driver.
  *
  * @return 0 on success, non-zero on bad args.
  */

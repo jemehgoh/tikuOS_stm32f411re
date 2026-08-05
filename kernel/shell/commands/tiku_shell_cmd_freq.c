@@ -7,14 +7,9 @@
  *
  * tiku_shell_cmd_freq.c - "freq" command: show or set the CPU core frequency.
  *
- *   freq          -- print the current core clock in MHz
- *   freq <mhz>    -- request a core frequency (e.g. 96, or 192 for Ambiq turbo)
- *
- * Setting drives the platform tiku_cpu_freq_init() path: on MSP430 it
- * reconfigures the DCO; on the Ambiq parts it selects the Low-Power / High-
- * Performance perf mode. A request the platform can't honour leaves the clock
- * unchanged and is reported back. (A runtime change can affect peripherals
- * whose clock derives from the core on some parts.)
+ * Setting drives the platform's frequency path -- the DCO on MSP430, the
+ * performance mode on Ambiq.  A request the platform cannot honour leaves the
+ * clock unchanged and is reported back.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -23,6 +18,14 @@
 #include <kernel/shell/tiku_shell.h>   /* SHELL_PRINTF */
 #include <hal/tiku_cpu.h>              /* tiku_cpu_freq_init / tiku_cpu_mclk_hz */
 #include <string.h>                    /* strcmp ("probe" subcommand)          */
+
+/* Round to nearest: a measured clock sits a hair under its nominal rate, and
+ * truncating reported an exact 600 MHz switch as 599. */
+#define TIKU_HZ_TO_MHZ(hz)  (((hz) + 500000UL) / 1000000UL)
+
+#if defined(PLATFORM_STM32N6)
+#include <arch/stm32n6/tiku_cpu_freq_boot_arch.h> /* clock-tree read-back */
+#endif
 
 #if defined(PLATFORM_AMBIQ) && defined(AM_PART_APOLLO510)
 #include <arch/ambiq/tiku_cpu_freq_boot_arch.h>   /* HP identity probe */
@@ -66,6 +69,58 @@ freq_cmd_probe(void)
                  (((p.mcuperfreq >> 3) & 3u) == 2u) ? "HP" : "LP");
     SHELL_PRINTF("  MEASURED    %lu Hz core clock (SysTick vs 32 kHz XT)\n",
                  tiku_cpu_freq_ambiq_measured_hz());
+    /* VDDF plan.  Measured HP active power sat 53% above the datasheet's
+     * IRUNHPFB row while LP was within 6% of IRUNLPFB, and P ~ V^2 makes an
+     * over-volt the prime suspect -- so print the boost this port computes and
+     * the trim the silicon is actually running.  The plan is built on the FIRST
+     * HP request, so run `freq 250` before expecting numbers here. */
+    SHELL_PRINTF("  VDDF trim   applied=0x%02x (live MCUCTRL.VREFGEN4"
+                 ".TVRGFVREFTRIM)\n", (unsigned)p.vddf_applied);
+    if (p.vddf_plan_ok) {
+        SHELL_PRINTF("    plan      ps5=0x%02x ps13=0x%02x (raw) -> lp=0x%02x "
+                     "hp=0x%02x (boosted%s)\n",
+                     (unsigned)p.vddf_ps5_raw, (unsigned)p.vddf_ps13_raw,
+                     (unsigned)p.vddf_lp, (unsigned)p.vddf_hp,
+                     p.vddf_clamped ? ", CLAMPED at 0x7F" : "");
+        SHELL_PRINTF("    boost     %lu.%lu mV -> %u codes  (L=0x%08lx "
+                     "E=0x%08lx)\n",
+                     (unsigned long)(p.vddf_mv_x10 / 10u),
+                     (unsigned long)(p.vddf_mv_x10 % 10u),
+                     (unsigned)p.vddf_boost_codes,
+                     (unsigned long)p.vddf_ltrim,
+                     (unsigned long)p.vddf_etrim);
+        /* Plain %u only: SHELL_PRINTF's lightweight formatter has no %+d (it
+         * printed the format string verbatim), and no %p either. */
+        if (p.vddf_hp == p.vddf_ps13_raw) {
+            SHELL_PRINTF("    -> HP runs the FACTORY state-13 trim exactly "
+                         "(no boost applied)\n");
+        } else {
+            SHELL_PRINTF("    -> HP runs 0x%02x vs factory 0x%02x = %u codes "
+                         "above\n", (unsigned)p.vddf_hp,
+                         (unsigned)p.vddf_ps13_raw,
+                         (unsigned)(p.vddf_hp - p.vddf_ps13_raw));
+        }
+    } else {
+        SHELL_PRINTF("    plan      not computed yet -- run `freq 250` first\n");
+    }
+    /* Raw regulator/buck state, for diffing LP vs HP from the host.  Raw hex
+     * on purpose: interpretation belongs to the analysis, and a firmware
+     * formatter that decodes fields is a second place for a transcription bug
+     * to hide.  Reads only. */
+    SHELL_PRINTF("  REGS vrefgen2=%08lx vrefgen3=%08lx vrefgen4=%08lx\n",
+                 (unsigned long)p.r_vrefgen2,
+                 (unsigned long)p.r_vrefgen3,
+                 (unsigned long)p.r_vrefgen4);
+    SHELL_PRINTF("       ldoreg1=%08lx ldoreg2=%08lx vrctrl=%08lx d2a=%08lx\n",
+                 (unsigned long)p.r_ldoreg1,
+                 (unsigned long)p.r_ldoreg2,
+                 (unsigned long)p.r_vrctrl,
+                 (unsigned long)p.r_d2aspare);
+    SHELL_PRINTF("       sb0=%08lx sb2=%08lx sb4=%08lx sb6=%08lx sb7=%08lx "
+                 "sb15=%08lx\n",
+                 (unsigned long)p.r_sb[0], (unsigned long)p.r_sb[1],
+                 (unsigned long)p.r_sb[2], (unsigned long)p.r_sb[3],
+                 (unsigned long)p.r_sb[4], (unsigned long)p.r_sb[5]);
     SHELL_PRINTF("  POWERSTATE  trim table (INFO1 0x970..):\n");
     for (i = 0u; i < 20u; i += 4u) {
         SHELL_PRINTF("    [%2u] %08lx %08lx %08lx %08lx\n", i,
@@ -77,6 +132,52 @@ freq_cmd_probe(void)
 }
 #endif /* PLATFORM_AMBIQ && AM_PART_APOLLO510 */
 
+#if defined(PLATFORM_STM32N6)
+/** @brief Names for the CPUSWS/SYSSWS source encoding. */
+static const char *freq_n6_src(uint8_t s)
+{
+    switch (s) {
+    case 0:  return "HSI";
+    case 1:  return "MSI";
+    case 2:  return "HSE";
+    default: return "IC";
+    }
+}
+
+/**
+ * @brief Print the live STM32N6 clock tree.
+ *
+ * Reads RCC and PWR back rather than reporting what was requested, so a
+ * setting that did not take shows up as itself.
+ */
+static void freq_cmd_probe_n6(void)
+{
+    tiku_stm32n6_clock_t c;
+
+    tiku_cpu_stm32n6_clock_probe(&c);
+
+    SHELL_PRINTF("  CPU src   %s", freq_n6_src(c.cpu_src));
+    if (c.cpu_src == 3u) {
+        SHELL_PRINTF(" (IC1 = PLL%u / %u)", (unsigned)(c.ic1_sel + 1u),
+                     (unsigned)c.ic1_div);
+    }
+    SHELL_PRINTF("\n");
+    SHELL_PRINTF("  BUS src   %s (IC2 / %u), AHB / %lu\n",
+                 freq_n6_src(c.sys_src), (unsigned)c.ic2_div,
+                 (unsigned long)c.ahb_div);
+    SHELL_PRINTF("  PLL1      %s%s src %s  M %u  N %u  frac %lu  P %u/%u\n",
+                 c.pll1_on ? "on" : "off", c.pll1_ready ? ", locked" : "",
+                 freq_n6_src(c.pll1_src), (unsigned)c.pll1_m,
+                 (unsigned)c.pll1_n, (unsigned long)c.pll1_frac,
+                 (unsigned)c.pll1_p1, (unsigned)c.pll1_p2);
+    SHELL_PRINTF("  PLL1 out  %lu Hz\n", (unsigned long)c.pll1_hz);
+    SHELL_PRINTF("  VOS       range %u (%s)\n", c.vos_high ? 0u : 1u,
+                 c.vos_high ? "overdrive rail" : "nominal");
+    SHELL_PRINTF("  CPU       %lu Hz from the tree, %lu Hz measured\n",
+                 (unsigned long)c.cpu_hz, tiku_cpu_mclk_hz());
+}
+#endif /* PLATFORM_STM32N6 */
+
 void
 tiku_shell_cmd_freq(uint8_t argc, const char *argv[])
 {
@@ -85,13 +186,19 @@ tiku_shell_cmd_freq(uint8_t argc, const char *argv[])
     unsigned long now;
 
     if (argc < 2) {
-        SHELL_PRINTF("CPU: %lu MHz\n", tiku_cpu_mclk_hz() / 1000000UL);
+        SHELL_PRINTF("CPU: %lu MHz\n", TIKU_HZ_TO_MHZ(tiku_cpu_mclk_hz()));
         return;
     }
 
 #if defined(PLATFORM_AMBIQ) && defined(AM_PART_APOLLO510)
     if (strcmp(argv[1], "probe") == 0) {
         freq_cmd_probe();
+        return;
+    }
+#endif
+#if defined(PLATFORM_STM32N6)
+    if (strcmp(argv[1], "probe") == 0) {
+        freq_cmd_probe_n6();
         return;
     }
 #endif
@@ -104,14 +211,20 @@ tiku_shell_cmd_freq(uint8_t argc, const char *argv[])
         p++;
     }
     if (*p != '\0' || req == 0u) {
-        SHELL_PRINTF("Usage: freq [<mhz>]\n");
+        SHELL_PRINTF("Usage: freq [<mhz>|probe]\n");
+#if defined(PLATFORM_STM32N6)
+        SHELL_PRINTF("  no arg: show the core clock; probe: the clock tree;\n");
+        SHELL_PRINTF("  <mhz>: 64 (HSI), any exact divisor of 1200 up to 600, "
+                     "or 800 (overdrive).\n");
+#else
         SHELL_PRINTF("  no arg: show the core clock; <mhz>: request a frequency "
                      "(96, or turbo: 192 on Apollo4, 250 on Apollo510).\n");
+#endif
         return;
     }
 
     tiku_cpu_freq_init((unsigned int)req);
-    now = tiku_cpu_mclk_hz() / 1000000UL;
+    now = TIKU_HZ_TO_MHZ(tiku_cpu_mclk_hz());
     if (now == req) {
         SHELL_PRINTF("CPU: %lu MHz\n", now);
     } else {

@@ -5,36 +5,11 @@
  *
  * Authors: Ambuj Varshney <ambuj@tiku-os.org>
  *
- * tiku_ble_adv.h - driver-agnostic BLE broadcaster/observer facade
+ * tiku_ble_adv.h - driver-agnostic BLE broadcaster/observer facade.
  *
- * The connection-less sibling of tiku_ble_serial.h: advertise a beacon
- * (non-connectable ADV_NONCONN_IND with Flags + Complete Local Name + a
- * 2-byte 'TK' manufacturer marker) and observe the advertising channels
- * (passive scan with RSSI).  It is what a high-level consumer (the BASIC
- * BLEBEACON/BLESCAN$ words, /sys/radio, shell commands) wants from a
- * broadcast radio, without touching the radio registers.
- *
- * tiku_ble_serial.h is connection-shaped (advertise -> connect -> byte
- * pipe) and needs a link-layer-capable backend (today the EM9305 host
- * stack).  This facade is broadcast-shaped and is backed by the nRF54L15
- * on-die RADIO (arch/nordic/tiku_radio_arch); the two capabilities are
- * independent: a build may have either, both, or neither.
- *
- * The background beacon is a kernel software timer in CALLBACK mode: each
- * expiry transmits one 3-channel burst (~1.3 ms) and re-arms drift-free
- * with tiku_timer_reset().  Between bursts the system idles normally
- * (tickless WFI; the session holds Constant Latency per nRF54L15 erratum
- * 20, and the arch send path issues the per-burst HF clock kick that makes
- * a post-sleep burst decodable), which is what keeps a beacon compatible
- * with microwatt operation.
- * The callback runs in the context of the process that started the beacon,
- * dispatched by the cooperative scheduler -- so it never preempts a
- * blocking scan; radio ownership needs no locking.
- *
- * Capability: TIKU_BLE_ADV_PRESENT is 1 when the build compiled in a
- * backend.  The Makefile maps the concrete radio to the generic
- * TIKU_HAS_BLE_ADV capability (nRF54L15 today); consumers gate on the
- * capability, never on a chip.
+ * The connection-less sibling of tiku_ble_serial.h: advertise a non-connectable
+ * beacon and passively scan with RSSI, without touching radio registers.  The
+ * beacon is a re-arming software timer, so a build stays microwatt-compatible.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -88,12 +63,9 @@ int tiku_ble_adv_beacon(const char *name, uint16_t interval_ms);
 /**
  * @brief Start (or retune) the beacon with a telemetry payload.
  *
- * Like tiku_ble_adv_beacon(), with @p data appended to the manufacturer
- * data after the 'TK' company id -- the beacon becomes a broadcast
- * sensor: any observer reads the payload without a connection.  Calling
- * again while active swaps the payload (the offloaded coprocessor path
- * receives the fresh PDU too).  Payload has AD-budget priority; the name
- * is truncated when both cannot fit.
+ * As tiku_ble_adv_beacon(), with @p data appended to the manufacturer data, so
+ * any observer reads it without connecting.  Calling again swaps the payload.
+ * Payload has AD-budget priority; the name is truncated if both cannot fit.
  *
  * @param data      Payload bytes (NULL -> none).
  * @param data_len  Payload length (capped at TIKU_BLE_ADV_DATA_CAP).
@@ -126,12 +98,9 @@ uint32_t tiku_ble_adv_bursts(void);
 /**
  * @brief Set the beacon TX power in dBm (default +8, the strongest).
  *
- * Only the silicon's discrete steps are legal (+8..+1, 0..-10, -12..-20
- * even, -22, -28, -40, -46 on nRF54L); anything else is rejected, never
- * rounded.  Takes effect from the next burst; safe while a beacon is
- * active -- on the FLPR-offloaded path the facade transparently reclaims
- * the radio, applies the power, and re-arms the offload (or falls back to
- * the M33 timer if the coprocessor died).
+ * Only the silicon's discrete steps are legal; anything else is rejected, never
+ * rounded.  It takes effect from the next burst and is safe while a beacon runs
+ * -- the facade reclaims the radio, applies it and re-arms any offload.
  *
  * @return 0 on success, negative if @p dbm is not a legal step.
  */
@@ -143,10 +112,9 @@ int8_t tiku_ble_adv_txpower(void);
 /**
  * @brief Passive scan of the advertising channels (blocking, watchdog-safe).
  *
- * Deduplicates by address, keeps the strongest RSSI per device and the
- * first non-empty name.  A running background beacon is unaffected: its
- * bursts are timer callbacks dispatched cooperatively, so they simply
- * queue behind the scan.
+ * Deduplicates by address, keeping the strongest RSSI and the first non-empty
+ * name.  A running background beacon is unaffected: its bursts are cooperative
+ * timer callbacks and simply queue behind the scan.
  *
  * @param out  Report array.
  * @param max  Capacity of @p out.
@@ -157,15 +125,11 @@ int8_t tiku_ble_adv_txpower(void);
 int tiku_ble_adv_scan(tiku_ble_adv_report_t *out, uint8_t max, uint16_t ms);
 
 /**
- * @brief Passive scan keeping only advertisers whose Local Name starts
- *        with @p prefix.
+ * @brief Passive scan keeping only advertisers whose name starts with @p prefix.
  *
- * The filter gates SLOT ALLOCATION, not display: ambient advertisers can
- * no longer fill the small report table before the sought device is heard
- * -- what makes a "did the board hear THIS beacon?" oracle deterministic
- * in a busy office.  Nameless advertisements are dropped while a filter
- * is armed.  @p prefix NULL or "" behaves exactly like
- * tiku_ble_adv_scan().
+ * The filter gates SLOT ALLOCATION, not display, so ambient advertisers cannot
+ * fill the small report table before the sought device is heard.  Nameless
+ * advertisements are dropped while armed; an empty prefix behaves like _scan().
  */
 int tiku_ble_adv_scan_filter(tiku_ble_adv_report_t *out, uint8_t max,
                              uint16_t ms, const char *prefix);
@@ -174,13 +138,12 @@ int tiku_ble_adv_scan_filter(tiku_ble_adv_report_t *out, uint8_t max,
 /* Radio ownership + background observer (R7)                                */
 /*---------------------------------------------------------------------------*/
 
-/**
- * One radio, one owner (kintsugi/radio.md R7): the beacon (M33 timer or
- * FLPR-offloaded), a blocking scan, or the background observer.  Claims
- * are denied, never queued -- a beacon cannot start while observing and
- * vice versa (they would interleave TX bursts into live RX windows);
- * the blocking scan keeps its historical coexistence with an M33-timer
- * beacon (cooperative scheduling already serialises them).
+/*
+ * One radio, one owner: the beacon, a blocking scan, or the background
+ * observer.  Claims are denied rather than queued, since a beacon and an
+ * observer would interleave TX bursts into live RX windows.  The blocking scan
+ * keeps its historical coexistence with a timer beacon, which scheduling
+ * already serialises.
  */
 typedef enum {
     TIKU_BLE_ADV_OWNER_IDLE = 0,
@@ -227,12 +190,9 @@ void tiku_ble_adv_154_release(void);
 /**
  * @brief Start the background observer (non-blocking scan).
  *
- * The IRQ+hardware-window engine runs while the shell stays interactive;
- * a kernel timer callback drains the packet ring every couple of ticks
- * into the live results (tiku_ble_adv_last_scan_count/_best and the
- * /sys/radio/scan node), firing the scan-notify hook whenever new
- * packets landed -- `watch /sys/radio/scan` and the rules engine see
- * every update.  Holds Constant Latency for the session (erratum 20).
+ * The IRQ and hardware-window engine runs while the shell stays interactive; a
+ * timer callback drains the packet ring into the live results and fires the
+ * notify hook, so `watch /sys/radio/scan` and the rules engine see updates.
  *
  * @param secs  Auto-stop after this many seconds; 0 = until
  *              tiku_ble_adv_observe_stop().

@@ -7,24 +7,9 @@
  *
  * tiku_basic_expr.inl - recursive-descent numeric expression parser.
  *
- * NOT a standalone translation unit.  Included from tiku_basic.c.
- *
- * Bottom-up grammar layers:
- *
- *   expr_prim   - literal / paren / call / var / const
- *   expr_unary  - unary `-` `+` `NOT`
- *   expr_term   - `*` `/`
- *   expr_sum    - `+` `-`
- *   expr_rel    - `=` `<>` `<` `>` `<=` `>=`
- *   expr_and    - AND
- *   expr_or     - OR / XOR
- *   parse_expr  - entry point (just calls expr_or)
- *
- * parse_cond is also defined here: it accepts either a numeric
- * expression or a top-level string-vs-string comparison (the
- * latter is used by IF / WHILE / UNTIL conditions only -- we
- * don't allow mixed-type subexpressions inside larger expressions
- * because the implementation cost outweighs the convenience).
+ * Grammar layers run from primary through unary, term, sum, relation, AND and OR.
+ * parse_cond also accepts a top-level string comparison, used only by IF, WHILE
+ * and UNTIL -- mixed-type subexpressions are deliberately not allowed.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -93,18 +78,14 @@ expr_prim(const char **p)
 /**
  * @brief Right-associative power operator: base ^ exp -- INTEGER only.
  *
- * `^` is integer exponentiation, unconditionally.  It does NOT infer a
- * value's type from its magnitude, so `2000 ^ 2` is 4000000 (consistent
- * with `2000 * 2000`), never 4000.  The engine carries no per-value type
- * bit -- it cannot tell the integer 2000 from the Q.3 value 2.000, which
- * share a representation -- so guessing from magnitude produced the same
- * operands yielding incompatible readings (fixed in A6).  For Q.3
- * fixed-point power, use the explicit FPOW(base, n) builtin instead.
+ * `^` is integer exponentiation unconditionally, and does NOT infer a type from
+ * magnitude: `2000 ^ 2` is 4000000, consistent with `2000 * 2000`.  For Q.3
+ * fixed-point power use the explicit FPOW(base, n) builtin.
  *
- * The exponent is an integer count; a negative exponent yields 0 (no
- * fractions in the integer domain).  `x ^ 0 == 1` and `0 ^ 0 == 1`
- * (BASIC convention).  Precedence is higher than unary minus so
- * `-2^2 == -(2^2) == -4`, matching Microsoft BASIC.
+ * @note The engine carries no per-value type bit -- it cannot tell the integer
+ *       2000 from the Q.3 value 2.000 -- so guessing from magnitude gave the
+ *       same operands incompatible readings.  A negative exponent yields 0,
+ *       `x ^ 0 == 1`, and precedence beats unary minus so `-2^2 == -4`.
  */
 static long
 expr_pow(const char **p)

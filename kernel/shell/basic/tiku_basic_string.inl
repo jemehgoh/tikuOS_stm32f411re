@@ -7,25 +7,9 @@
  *
  * tiku_basic_string.inl - string heap and string-expression parser.
  *
- * NOT a standalone translation unit.  Included from tiku_basic.c.
- *
- * Manages the bump-allocated heap that backs A$..Z$ string
- * variables (reset at every RUN start, no GC, no per-line
- * reclamation), the string-expression-start detector used by PRINT
- * and condition parsing, and the recursive-descent parser for
- * string expressions (literals, variables, LEFT$ / RIGHT$ / MID$ /
- * CHR$ / STR$ / FSTR$ / HEX$ / BIN$, concatenation with `+`, array
- * indexing).
- *
- * The whole TU is gated on TIKU_BASIC_STRVARS_ENABLE.  When off,
- * none of these symbols are emitted and PRINT falls back to
- * numeric-only.
- *
- * The forward declarations near the top tie this piece to symbols
- * defined further down the orchestrator (parse_expr in
- * tiku_basic_expr.inl, VFSREAD glue in tiku_basic_stmt.inl) so we
- * can call them from string expressions without reordering the
- * whole include list.
+ * A bump-allocated heap backs the string variables, reset at each RUN start with
+ * no GC and no per-line reclamation.  The whole piece is gated: with strings off,
+ * none of these symbols are emitted and PRINT falls back to numeric only.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -66,7 +50,7 @@ static int basic_net_mqtt_wait(const char *ipstr, const char *topic,
 #if TIKU_BASIC_STRVARS_ENABLE
 
 /*---------------------------------------------------------------------------*/
-/* STRING-HEAP MARK-COMPACT (A4)                                             */
+/* STRING-HEAP MARK-COMPACT                                                  */
 /*---------------------------------------------------------------------------*/
 /*
  * The heap bump-allocates and never frees a string mid-RUN, so the reassigning
@@ -81,7 +65,7 @@ static int basic_net_mqtt_wait(const char *ipstr, const char *topic,
  * no tracing, no marks in the heap.  Assignment always allocates a fresh copy
  * (RHS is evaluated into a stack buffer first) and SWAP only exchanges two root
  * pointers, so each live heap string has EXACTLY ONE root -- no aliasing to
- * dedup.  We slide the live strings down in address order, rewriting each root
+ * dedup.  Live strings slide down in address order, rewriting each root
  * to its new home, and reclaim everything in between.
  */
 
@@ -90,8 +74,7 @@ static int basic_net_mqtt_wait(const char *ipstr, const char *topic,
  *
  * Scans the complete root set (scalar string vars + string-array elements).
  * Repeated calls with @p from advanced past each moved string walk the live
- * strings in ascending heap-address order without a temp array (compaction is
- * a rare heap-full event, so the O(roots) per step is fine).
+ * strings in ascending heap-address order without a temp array.
  */
 static char **
 basic_str_lowest_root(char *from)
@@ -148,10 +131,9 @@ basic_str_lowest_root(char *from)
  * @brief Reclaim dead strings: slide every live string down to fill the gaps
  *        left by reassigned/overwritten allocations, rewriting the roots.
  *
- * After this, basic_str_heap_pos is the compacted high-water and [0, pos) holds
- * exactly the live strings, packed.  Strings move only DOWN and are processed
- * in ascending address order, so a live string never overlaps a not-yet-moved
- * one (memmove is used regardless).
+ * Afterwards basic_str_heap_pos is the compacted high-water and [0, pos) holds
+ * exactly the live strings, packed.  Strings move only DOWN, in ascending
+ * address order, so a live string never overlaps a not-yet-moved one.
  */
 static void
 basic_str_compact(void)
@@ -1047,7 +1029,7 @@ parse_strprim(const char **p, char *out, size_t cap)
     }
 #endif
 #if TIKU_BASIC_BLE_ENABLE && TIKU_BLE_SERIAL_PRESENT
-    /* BLEGET$() -- pop any bytes a connected central has written to us (up to
+    /* BLEGET$() -- pop any bytes a connected central has written (up to
      * the string buffer), "" if none.  Polls the BLE stack, so a BLEGET$() poll
      * loop keeps the link serviced.  0-arg-with-parens. */
     if (match_kw(p, "BLEGET$")) {
@@ -1490,7 +1472,7 @@ parse_strprim(const char **p, char *out, size_t cap)
      * aren't mis-tokenised as a variable named LEFT followed by a
      * stray `$` and `(`.
      *
-     * For arrays of named string variables we'd need
+     * For arrays of named string variables this would need
      * `NAME$(idx)` -- not supported (string arrays are still
      * single-letter; see DIM). */
     {

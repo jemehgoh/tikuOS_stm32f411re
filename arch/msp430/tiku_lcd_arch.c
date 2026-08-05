@@ -5,22 +5,11 @@
  *
  * Authors: Ambuj Varshney <ambuj@tiku-os.org>
  *
- * tiku_lcd_arch.c - MSP430 LCD_C peripheral driver
+ * tiku_lcd_arch.c - MSP430 LCD_C peripheral driver.
  *
- * Drives the LCD_C controller present on FR6989 (and other FR6xx
- * parts) with a board-specific pin map provided by the board
- * header. Built only when both TIKU_DEVICE_HAS_LCD_C (silicon
- * carries LCD_C) and TIKU_BOARD_HAS_LCD (board wires it to a
- * panel) are set; otherwise this translation unit is empty.
- *
- * Current target: MSP-EXP430FR6989 LaunchPad with the on-board
- * FH-1138P 96-segment LCD (4-mux, 1/3 bias, six 14-segment
- * alphanumeric positions plus icons). The font and per-position
- * LCDMEM index map are derived from TI's lcd_c_lib reference
- * example for that board. Other boards using the same LCD_C
- * peripheral with a different glass can supply their own segment
- * encoding by overriding the per-position byte indices in their
- * board header (see TIKU_BOARD_LCD_POSx_BYTE0/1).
+ * Drives the LCD_C controller with a board-supplied pin map, built only where the
+ * silicon has LCD_C and the board wires a panel.  The font and per-position
+ * LCDMEM map suit the FH-1138P glass; a board may override the byte indices.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -117,7 +106,7 @@ static const uint8_t font_alpha[26][2] = {
 
 /*
  * Pull each position's two LCDMEM indices out of the board header
- * into an array we can index by position. Adding more positions or
+ * into an array indexable by position. Adding more positions or
  * porting to a different glass is a board-header-only change.
  */
 static const uint8_t pos_byte0_idx[TIKU_BOARD_LCD_NUM_CHARS] = {
@@ -189,7 +178,7 @@ tiku_lcd_arch_init(void)
     /* 2. Configure LCD controller:
      *      - Source: ACLK (32.768 kHz from LFXT). On FR6989 the
      *        clock select bit LCDSSEL is 0=ACLK / 1=VLOCLK; ACLK is
-     *        the reset default so we leave the bit clear.
+     *        the reset default, so the bit is left clear.
      *      - Pre-divider 16, divider 1 → frame freq ~64 Hz at 4-mux
      *      - 4-mux operation with low-power waveform (LCDLP)
      *      - Bias defaults to 1/3 (LCD2B not set)
@@ -208,8 +197,8 @@ tiku_lcd_arch_init(void)
     /* 4. Charge pump clock sync (per FR6989 errata recommendation). */
     LCDCCPCTL = LCDCPCLKSYNC;
 
-    /* 5. Clear all LCD memory before turning the panel on so we
-     *    don't latch random RAM contents into the glass. */
+    /* 5. Clear all LCD memory before turning the panel on, so no
+     *    random RAM contents get latched into the glass. */
     LCDCMEMCTL = LCDCLRM;
 
     /* 6. Enable the controller and turn the panel on. */
