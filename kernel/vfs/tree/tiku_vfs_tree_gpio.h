@@ -24,16 +24,9 @@
  * @brief Number of GPIO ports exposed under /dev/gpio and
  *        /dev/gpio_dir.
  *
-<<<<<<< HEAD
- * Computed from the per-device TIKU_DEVICE_HAS_PORTn macros (each
- * 0 or 1), so selecting a different MSP430 variant resizes both
- * tables without touching this module.  Every device header must
- * define all eight flags.
-=======
  * Computed from the per-device TIKU_DEVICE_HAS_PORTn macros (each 0 or 1), so
  * selecting a different variant resizes both tables without touching this
  * module.  Every device header must define all four flags.
->>>>>>> main
  */
 #define TIKU_VFS_TREE_GPIO_NPORTS ( \
     TIKU_DEVICE_HAS_PORT1 + TIKU_DEVICE_HAS_PORT2 + \

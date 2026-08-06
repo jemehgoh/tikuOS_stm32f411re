@@ -7,33 +7,9 @@
  *
  * tiku_vfs_tree_boot.c - /sys/boot VFS nodes and boot bookkeeping.
  *
-<<<<<<< HEAD
- * Everything a postmortem wants to know about how and how often
- * this device boots:
- *
- *   /sys/boot/reason     decoded reset cause ("wdt-timeout", "brownout"...)
- *   /sys/boot/count      monotonic FRAM boot counter
- *   /sys/boot/stage      current boot stage from boot/tiku_boot.c
- *   /sys/boot/rstiv      raw reset-cause value in hex, for scripting
- *   /sys/boot/clock/...  live MCLK/SMCLK/ACLK frequencies + fault flag
- *   /sys/boot/mpu/...    MPU violation diagnostics
- *   /sys/last_reset      coarse 4-bucket reset cause (top-level /sys)
- *   /sys/cold_boots      lifetime uptime accumulator (top-level /sys)
- *
- * Persistence model: two uint32 values live in .persistent (FRAM)
- * — boot_count_persist and lifetime_seconds_persist — each declared
- * as a magic-gated persist cell (TIKU_PERSIST_CELL, kernel/memory).
- * The shared cell API owns the gate validation, first-boot priming
- * and MPU-window writes that this module used to hand-roll, and
- * each cell validates independently (no more shared magic across
- * modules).  Read paths serve SRAM mirrors so the hot path never
- * unlocks the MPU; only init and the lazy cold_boots save write to
- * FRAM, through the cell API.
-=======
  * Exposes the decoded reset reason, boot count, boot stage, live clocks and MPU
  * diagnostics.  The boot counter and lifetime accumulator are magic-gated persist
  * cells; reads serve SRAM mirrors so the hot path never unlocks the MPU.
->>>>>>> main
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -60,27 +36,12 @@
 /* /sys/boot/reason — last reset cause from SYSRSTIV                         */
 /*---------------------------------------------------------------------------*/
 
-<<<<<<< HEAD
-/**
- * Reset-cause snapshot taken once in tiku_vfs_tree_boot_init() via the
- * per-arch tiku_common_reset_reason() HAL (an MSP430-SYSRSTIV-compatible
- * code on every platform).
- *
- * On MSP430 reading the live SYSRSTIV register pops the highest pending
- * vector (hardware walks toward 0 on each read), so the cause must be
- * latched exactly once at boot and served from this copy ever after; the
- * HAL does that latching.  RP2350 maps WD_REASON; Ambiq decodes
- * RSTGEN->STAT (watchdog / reboot / power) in the arch layer.
- * On STM32F411, the raw RCC_CSR reset flags are
- * sampled here before any later code might clear them.
-=======
 /*
  * Reset-cause snapshot, taken once in tiku_vfs_tree_boot_init() via
  * tiku_common_reset_reason() (an MSP430-SYSRSTIV-compatible code on every
  * platform).  MSP430 must latch it exactly once because reading the live
  * register pops the highest pending vector; RP2350 maps WD_REASON and Ambiq
  * decodes RSTGEN->STAT.
->>>>>>> main
  */
 static uint16_t boot_reset_cause;
 
@@ -359,16 +320,9 @@ boot_stage_read(char *buf, size_t max)
 /**
  * @brief Read handler for /sys/boot/rstiv.
  *
-<<<<<<< HEAD
- * Renders the latched reset-cause snapshot as four hex digits
- * ("0x0016\n").  This is the escape hatch when the decoded names
- * are not enough — e.g. correlating against the device errata or
- * a vector reset_cause_str() does not know yet.
-=======
  * Renders the latched SYSRSTIV snapshot as four hex digits ("0x0016\n") -- the
  * escape hatch when the decoded names are not enough, e.g. a vector that
  * reset_cause_str() does not know yet.
->>>>>>> main
  *
  * @param buf  Output buffer for the rendered text
  * @param max  Capacity of @p buf in bytes
@@ -587,29 +541,11 @@ _Static_assert(sizeof(tiku_vfs_tree_boot_children) /
 /**
  * @brief Capture the reset cause and bump the FRAM boot counter.
  *
-<<<<<<< HEAD
- * Runs as the first step of tiku_vfs_tree_init() — see the header
- * for why ordering matters (MSP430 SYSRSTIV reads are destructive,
- * and STM32 flags should be sampled before later code can clear
- * them).
- *
- * Sequence:
- *   1. Latch the platform reset cause into boot_reset_cause:
- *      SYSRSTIV on MSP430, RCC_CSR flags on STM32F411, RP2350
- *      leaves it 0 = "none".
- *   2. Validate both persist cells — tiku_persist_cell_init()
- *      primes a virgin (all-zero or junk) FRAM to 0 with the
- *      gate stamped last, and keeps real persisted values.
- *   3. Increment the boot counter (so the very first boot reads
- *      1), refresh the SRAM mirror, and snapshot the lifetime
- *      accumulator for cold_boots reads.
-=======
  * Latches SYSRSTIV (MSP430 only; elsewhere 0 = "none"), validates both persist
  * cells -- virgin or corrupt FRAM is primed to 0 with the gate stamped last --
  * then increments the counter and snapshots the lifetime accumulator.
  *
  * @note Runs first in tiku_vfs_tree_init(): SYSRSTIV reads are destructive.
->>>>>>> main
  */
 void
 tiku_vfs_tree_boot_init(void)

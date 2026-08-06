@@ -1301,16 +1301,7 @@ ifeq ($(TIKU_PLATFORM),msp430)
 $(error TIKU_THREADS_ENABLE=1 requires a Cortex-M part; MSP430 \
 stays cooperative -- 2 KB of SRAM has no room for per-thread stacks)
 endif
-<<<<<<< HEAD
-ifeq ($(filter apollo510 apollo510b apollo4l apollo4p stm32f411re rp2350 nrf54l15 nrf54lm20a nrf54lm20b,$(MCU)),)
-$(error TIKU_THREADS_ENABLE=1 needs a supported Cortex-M part -- \
-apollo510/apollo510b, apollo4l/apollo4p or stm32f411re (M4F), rp2350 or \
-nrf54l15/nrf54lm20a (M33); $(MCU) has no thread backend. The switcher is generic \
-Cortex-M asm (kernel/threads/tiku_thread_cortexm.inl); adding a part = a \
-two-line shim that names its PendSV vector symbol (plus a custom cycle \
-source if the part's DWT freezes standalone), and proving the torture suite)
-=======
-ifeq ($(filter apollo510 apollo510b apollo4l apollo4p rp2350 nrf54l15 nrf54lm20a nrf54lm20b ra8p1,$(MCU)),)
+ifeq ($(filter apollo510 apollo510b apollo4l apollo4p stm32f411re rp2350 nrf54l15 nrf54lm20a nrf54lm20b ra8p1,$(MCU)),)
 $(error TIKU_THREADS_ENABLE=1 needs a supported Cortex-M part -- \
 apollo510/apollo510b (M55), apollo4l/apollo4p (M4F), rp2350 or \
 nrf54l15/nrf54lm20a (M33), ra8p1 (M85); $(MCU) has no thread backend. The \
@@ -1318,7 +1309,6 @@ switcher is generic Cortex-M asm (kernel/threads/tiku_thread_cortexm.inl); \
 adding a part = a two-line shim that names its PendSV vector symbol (plus a \
 custom cycle source if the part's DWT freezes standalone), and proving the \
 torture suite)
->>>>>>> main
 endif
 CFLAGS += -DTIKU_THREADS_ENABLE=1
 endif
@@ -3284,11 +3274,12 @@ $(TARGET_BIN): $(TARGET)
 # No -la/-ep: the tool derives the entry point from vector word 1, which
 # carries the Thumb bit. An even entry point locks the core up before the
 # first instruction. The tool writes its output read-only and prompts before
-# overwriting, so the stale file goes first and stdin is closed.
+# overwriting, so the stale file goes first and stdin is closed. CubeProgrammer
+# 2.19 rejects the older -align flag; header v2.3 adds the needed padding.
 $(TARGET_SIGNED): $(TARGET_BIN)
 	@test -x "$(STM32N6_SIGN)" || { $(call STM32N6_NEED_CUBE,sign); }
 	@rm -f $@
-	@$(STM32N6_SIGN) -bin $< -nk -of 0x80000000 -t fsbl -hv 2.3 -align -s -o $@ \
+	@$(STM32N6_SIGN) -bin $< -nk -of 0x80000000 -t fsbl -hv 2.3 -s -o $@ \
 	    < /dev/null > /dev/null
 	@echo "  [sign]  $< -> $@"
 endif
@@ -3768,7 +3759,6 @@ deploy: clean flash monitor
 
 # RP2350, STM32F411xE, Apollo510 default to 115200; MSP430 to 9600.
 ifeq ($(TIKU_PLATFORM),msp430)
->>>>>>> main
 BAUD ?= $(if $(UART_BAUD),$(UART_BAUD),9600)
 else
 BAUD ?= $(if $(UART_BAUD),$(UART_BAUD),115200)

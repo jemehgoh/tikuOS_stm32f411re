@@ -27,11 +27,7 @@
 #include "kernel/memory/tiku_mem.h"
 #include "kernel/timers/tiku_clock.h"
 #include "kernel/scheduler/tiku_sched.h"
-<<<<<<< HEAD
-#include <hal/tiku_cpu.h>
-=======
 #include "hal/tiku_cpu.h"        /* tiku_cpu_irq_enable() at boot-complete */
->>>>>>> main
 #if defined(PLATFORM_MSP430)
 #include "arch/msp430/tiku_uart_arch.h"
 #elif defined(PLATFORM_RP2350)

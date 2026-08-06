@@ -59,38 +59,6 @@
 /*---------------------------------------------------------------------------*/
 
 /*
- * `.persistent` promises power-cycle durability — FRAM in place on
- * MSP430, NVM-mirrored SRAM on Ambiq/RP2350.  But some state only
- * WANTS the weaker half of that deal: skip zero-init so it survives a
- * warm reset, without earning a slot in the (small, wear-limited)
- * NVM mirror.  On RP2350 the net stack held exactly that shape via a
- * linker carve-out, which left one attribute meaning two different
- * things.  TIKU_PERSIST_WARM names the weaker grade explicitly:
- *
- *   .persistent        survives power cycles (durable, mirrored/FRAM)
- *   TIKU_PERSIST_WARM  survives warm resets only; never mirrored,
- *                      never MPU-protected, costs zero NVM
- *
- * On MSP430 (FRAM in place, everything cheap and durable) WARM
- * degrades to plain `.persistent` — strictly stronger than promised,
- * which the contract allows.  RP2350 and Ambiq physically separate
- * the grades: warm data sits outside the NVM mirror, so its churn
- * costs no NVM programs and it stays writable outside MPU windows.
- *
- * nRF54L (nordic) MUST separate them too, and harder than the others:
- * the DURABLE grade physically lives in RRAM behind the RRAMC WEN
- * write gate, and warm data (e.g. the hang detector's cross-reset
- * record) is written WITHOUT the NVM window by design — mapping WARM
- * to plain `.persistent` there puts it in RRAM and the first store
- * takes a precise bus fault (found on-device: tiku_hang_boot_init's
- * one-shot clear was the first boot-time write to hit the closed gate).
- */
-<<<<<<< HEAD
-#if defined(PLATFORM_RP2350) || defined(PLATFORM_STM32F411) || defined(PLATFORM_AMBIQ) || defined(PLATFORM_NORDIC)
-#define TIKU_PERSIST_WARM  __attribute__((section(".persistent.warm")))
-#else
-=======
-/*
  * MSP430 is the EXCEPTION and is named as such; everyone else separates.
  *
  * This was the other way round -- an allow-list of the platforms that
@@ -104,7 +72,6 @@
  * next port.  Naming the exception costs a future port nothing.
  */
 #if defined(PLATFORM_MSP430)
->>>>>>> main
 #define TIKU_PERSIST_WARM  __attribute__((section(".persistent")))
 #else
 #define TIKU_PERSIST_WARM  __attribute__((section(".persistent.warm")))

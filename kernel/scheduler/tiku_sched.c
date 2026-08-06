@@ -63,11 +63,6 @@ static uint8_t idle_tick_wakes = 1;
 void tiku_sched_init(void)
 {
     sched_state = TIKU_SCHED_RUNNING;
-<<<<<<< HEAD
-    idle_hook = (tiku_sched_idle_hook_t)0;
-    idle_count = 0u;
-    idle_tick_wakes = 1u;
-=======
 
     /*
      * IDLE SLEEPS BY DEFAULT.  With no hook installed an idle scheduler spins
@@ -91,7 +86,6 @@ void tiku_sched_init(void)
     idle_hook = tiku_cpu_idle_hook(TIKU_CPU_IDLE_LIGHT);
     tiku_sched_set_idle_tick_wakes(
         (uint8_t)tiku_cpu_idle_mode_wakes_on_tick(TIKU_CPU_IDLE_LIGHT));
->>>>>>> main
 
     SCHED_PRINTF("Init: process subsystem\n");
     tiku_process_init();
