@@ -3249,7 +3249,7 @@ $(TARGET_BIN): $(TARGET)
 $(TARGET_SIGNED): $(TARGET_BIN)
 	@test -x "$(STM32N6_SIGN)" || { $(call STM32N6_NEED_CUBE,sign); }
 	@rm -f $@
-	@$(STM32N6_SIGN) -bin $< -nk -of 0x80000000 -t fsbl -hv 2.3 -align -s -o $@ \
+	@"$(STM32N6_SIGN)" -bin $< -nk -of 0x80000000 -t fsbl -hv 2.3 -align -s -o $@ \
 	    < /dev/null > /dev/null
 	@echo "  [sign]  $< -> $@"
 endif
@@ -3618,7 +3618,7 @@ else ifeq ($(TIKU_PLATFORM),stm32n6)
 # timeout: that is the handoff succeeding, not a failure.
 flash: all
 	@test -x "$(STM32N6_PROG)" || { $(call STM32N6_NEED_CUBE,flash); }
-	-@$(STM32N6_PROG) -c port=usb1 -w $(TARGET_SIGNED) $(STM32N6_PART) \
+	-@"$(STM32N6_PROG)" -c port=usb1 -w $(TARGET_SIGNED) $(STM32N6_PART) \
 	    -g $(STM32N6_PART)
 
 run: flash
@@ -3627,7 +3627,7 @@ run: flash
 # ready for the next load.
 dfu-reset:
 	@test -x "$(STM32N6_PROG)" || { $(call STM32N6_NEED_CUBE,dfu-reset); }
-	@$(STM32N6_PROG) -c port=SWD mode=UR -hardRst
+	@"$(STM32N6_PROG)" -c port=SWD mode=UR -hardRst
 
 erase:
 	@echo "stm32n6: nothing to erase -- the image lives in SRAM, so a reset"
