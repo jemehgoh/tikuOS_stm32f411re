@@ -310,6 +310,15 @@ unsigned long tiku_cpu_ra8p1_pclka_get_hz(void)
                         RA8P1_SCKDIVCR_PCKA_SHIFT);
 }
 
+unsigned long tiku_cpu_ra8p1_bclk_get_hz(void)
+{
+    unsigned long src = cpu_hz_now *
+        div_of(TIKU_REG32(RA8P1_SCKDIVCR2) >> RA8P1_SCKDIVCR2_CPUCK0_SHIFT);
+
+    return src / div_of(TIKU_REG32(RA8P1_SCKDIVCR) >>
+                        RA8P1_SCKDIVCR_BCK_SHIFT);
+}
+
 unsigned long tiku_cpu_ra8p1_pclkd_get_hz(void)
 {
     unsigned long src = cpu_hz_now *
@@ -322,4 +331,22 @@ unsigned long tiku_cpu_ra8p1_pclkd_get_hz(void)
 unsigned long tiku_cpu_ra8p1_sciclk_get_hz(void)
 {
     return sci_hz_now;
+}
+
+void tiku_cpu_boot_ra8p1_power_wfi_enter(void)
+{
+    /*
+     * Sleep mode: WFI with SBYCR.SSBY clear, which is the reset state and the
+     * only mode this port enters.  The core stops, every clock keeps running,
+     * and any unmasked interrupt resumes it -- so the tick, the console and an
+     * armed htimer all still wake it.
+     *
+     * Software Standby (SSBY=1) would be deeper, but it stops the clocks, so
+     * coming back needs a wake source the ICU is told to honour while stopped.
+     * Entering it before that is wired means a part that never wakes, and the
+     * saving cannot be shown until R9 puts a PPK2 on the measurement header.
+     * Deliberately not entered here, rather than mapped and hoped for.
+     */
+    __asm__ volatile ("dsb 0xF" ::: "memory");
+    __asm__ volatile ("wfi" ::: "memory");
 }

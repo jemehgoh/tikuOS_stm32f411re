@@ -67,6 +67,16 @@
 #ifndef TIKU_SHELL_CMD_TRNG
 #define TIKU_SHELL_CMD_TRNG    1  /**< trng    - Dump hardware TRNG bytes */
 #endif
+#ifndef TIKU_SHELL_CMD_USBHS
+/* Auto-on where the build carries the USB-HS device driver; off elsewhere.
+ * TIKU_DRV_USBHS_ENABLE is a -D from the Makefile, so this resolves the same
+ * way in every translation unit regardless of include order. */
+#if (TIKU_DRV_USBHS_ENABLE + 0)
+#define TIKU_SHELL_CMD_USBHS   1  /**< usb, store - device disk + model store */
+#else
+#define TIKU_SHELL_CMD_USBHS   0
+#endif
+#endif
 #ifndef TIKU_SHELL_CMD_XFLASH
 /* Auto-on where an XSPI NOR is wired; off elsewhere. */
 #if defined(PLATFORM_STM32N6)
@@ -85,7 +95,7 @@
 #endif
 #ifndef TIKU_SHELL_CMD_DIAG
 /* Auto-on where the port owns fault/EXTI/watchdog silicon; off elsewhere. */
-#if defined(PLATFORM_STM32N6)
+#if defined(PLATFORM_STM32N6) || defined(PLATFORM_RA8P1)
 #define TIKU_SHELL_CMD_DIAG    1  /**< diag - faults, EXTI and the watchdog */
 #else
 #define TIKU_SHELL_CMD_DIAG    0
@@ -93,6 +103,14 @@
 #endif
 #ifndef TIKU_SHELL_CMD_HISTORY
 #define TIKU_SHELL_CMD_HISTORY 1  /**< history - Last N commands from FRAM */
+#endif
+#ifndef TIKU_SHELL_CMD_SDRAM
+/* Auto-on where the board wires external SDRAM to the bus. */
+#if defined(PLATFORM_RA8P1)
+#define TIKU_SHELL_CMD_SDRAM   1  /**< sdram - bring up, attach, bench */
+#else
+#define TIKU_SHELL_CMD_SDRAM   0
+#endif
 #endif
 #ifndef TIKU_SHELL_CMD_MRAMBENCH
 /* Auto-on on Ambiq (benches the Ambiq bootrom MRAM programmer); off

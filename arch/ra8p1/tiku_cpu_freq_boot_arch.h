@@ -135,6 +135,16 @@ unsigned long tiku_cpu_ra8p1_sciclk_get_hz(void);
 unsigned long tiku_cpu_ra8p1_pclkd_get_hz(void);
 
 /**
+ * @brief External bus clock (BCLK), which is also the SDRAM clock source.
+ *
+ * Read live rather than assumed: the SDRAM timings are derived from it, and a
+ * clock change that outran the part would otherwise corrupt data silently.
+ *
+ * @return BCLK in Hz
+ */
+unsigned long tiku_cpu_ra8p1_bclk_get_hz(void);
+
+/**
  * @brief Delay-loop iterations per millisecond.
  *
  * Measured against the kernel tick on first call once the tick is running;
@@ -143,5 +153,13 @@ unsigned long tiku_cpu_ra8p1_pclkd_get_hz(void);
  * @return Loop iterations that occupy one millisecond
  */
 unsigned long tiku_cpu_ra8p1_spin_per_ms(void);
+
+/**
+ * @brief Enter Sleep mode (WFI) until any unmasked interrupt.
+ *
+ * Clocks keep running, so the tick, console RX and an armed htimer all wake
+ * the core.  Software Standby is deeper but is not entered by this port.
+ */
+void tiku_cpu_boot_ra8p1_power_wfi_enter(void);
 
 #endif /* TIKU_RA8P1_CPU_FREQ_BOOT_ARCH_H_ */

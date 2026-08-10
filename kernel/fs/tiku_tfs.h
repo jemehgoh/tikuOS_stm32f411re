@@ -49,7 +49,8 @@
  * bitmap; the largest shipped extent needs 903.
  */
 #  if defined(PLATFORM_AMBIQ) || defined(PLATFORM_RP2350) || \
-      defined(PLATFORM_NORDIC) || defined(PLATFORM_STM32N6)
+      defined(PLATFORM_NORDIC) || defined(PLATFORM_STM32N6) || \
+      defined(PLATFORM_RA8P1)
 #    define TIKU_TFS_MAX_SLOTS  2048
 #  else
 #    define TIKU_TFS_MAX_SLOTS  32      /* msp430/host: 4 bytes of bitmap */
@@ -93,7 +94,8 @@
  */
 #  if defined(PLATFORM_RP2350) || defined(PLATFORM_STM32N6)
 #    define TIKU_TFS_SLOT_DATA  4092   /**< 4 B length + 4092 = 4096 (one sector) */
-#  elif defined(PLATFORM_AMBIQ) || defined(PLATFORM_NORDIC)
+#  elif defined(PLATFORM_AMBIQ) || defined(PLATFORM_NORDIC) || \
+       defined(PLATFORM_RA8P1)
 #    define TIKU_TFS_SLOT_DATA  4096   /**< MRAM/RRAM: no erase granule */
 #  else
 #    define TIKU_TFS_SLOT_DATA  512    /**< max bytes per file */
