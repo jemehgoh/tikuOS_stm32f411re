@@ -13,6 +13,7 @@
 #include "tiku_timer_arch.h"
 #include "tiku_ra8p1_regs.h"
 #include "tiku_cpu_freq_boot_arch.h"
+#include "tiku_cpu_common.h"
 
 #include <hal/tiku_clock_hal.h>
 
@@ -23,7 +24,7 @@
 /** @brief Monotonic tick counter, advanced by the SysTick exception. */
 static volatile tiku_clock_arch_time_t clock_ticks;
 
-/** @brief Reload currently programmed, so fine() can invert the down-counter. */
+/** @brief Reload programmed now, so fine() can invert the down-counter. */
 static uint32_t clock_reload = TIKU_CLOCK_ARCH_INTERVAL;
 
 /**
@@ -55,9 +56,9 @@ void tiku_clock_arch_init(void)
 {
     /*
      * From the LIVE clock, not TIKU_CLOCK_ARCH_INTERVAL.  The boot constant is
-     * an 8 MHz figure, and the kernel starts the tick AFTER the frequency
-     * request -- so using it silently undid R4's retune and left the tick 30x
-     * fast, with uptime racing and every timeout short by the same factor.
+     * an 8 MHz figure and the kernel starts the tick AFTER the frequency
+     * request, so the reload has to be derived here or the tick runs fast by
+     * the ratio between the live clock and 8 MHz.
      */
     unsigned long hz = tiku_cpu_ra8p1_clock_get_hz();
     unsigned long reload = hz / (unsigned long)TIKU_CLOCK_ARCH_SECOND;
@@ -149,16 +150,33 @@ uint32_t tiku_ra8p1_clock_arch_fine_hz(void)
 
 void tiku_clock_arch_wait(tiku_clock_arch_time_t t)
 {
-    /* DURATION, not a deadline -- that is the kernel contract, and reading it
-     * as absolute is a bug the Nordic port already made and recorded: any wait
-     * shorter than the current uptime returns instantly, so every tick-paced
-     * caller stops waiting once the system has been up a while.  Here it made
-     * all five software-timer tests fail at once. */
+    /* DURATION, not a deadline -- that is the kernel contract.  Read as
+     * absolute, any wait shorter than the current uptime returns instantly, so
+     * every tick-paced caller stops waiting once the system has been up a
+     * while. */
     tiku_clock_arch_time_t target = clock_ticks + t;
+    uint32_t primask;
+
+    /*
+     * A masked tick can never end this wait: with PRIMASK set the ISR cannot
+     * run, but a pending SysTick still wakes every wfi, so the loop spins at
+     * the tick rate on a counter that will never move.  Early boot holds
+     * interrupts off, so substitute a calibrated spin there.
+     */
+    __asm__ volatile ("mrs %0, primask" : "=r" (primask));
+    if (primask != 0UL || !tiku_ra8p1_clock_arch_running()) {
+        while (t-- != 0U) {
+            tiku_cpu_ra8p1_delay_us(1000000UL /
+                                    (unsigned long)TIKU_CLOCK_ARCH_SECOND);
+        }
+        return;
+    }
 
     while ((long)(target - clock_ticks) > 0) {
-        /* WFI, not a spin: only the tick ISR can end this wait. */
-        __asm__ volatile ("wfi");
+        /* WFI, not a spin: only the tick ISR can end this wait.  Through the
+         * arch entry point rather than a bare instruction, because above
+         * 240 MHz sleeping needs the divider step-down that lives there. */
+        tiku_cpu_boot_ra8p1_power_wfi_enter();
     }
 }
 

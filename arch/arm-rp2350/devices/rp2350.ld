@@ -74,19 +74,18 @@ __flash_end   = ORIGIN(FLASH) + LENGTH(FLASH);
  *
  * Size is one QSPI erase granule (4 KB) today; the arch driver commits
  * the mirror sector-by-sector, so growing it really is the one-number
- * change: raise __tiku_layout_durable_size below (in whole 4 KB
+ * change: raise __tiku_layout_persist_size below (in whole 4 KB
  * sectors) and flush, restore and the .uninit budget ASSERT follow. */
 /* Canonical NVM layout: inputs + shared derivation (arch/common). */
 __tiku_layout_top          = ORIGIN(FLASH) + LENGTH(FLASH);
 __tiku_layout_code_cap     = ORIGIN(FLASH) + 0x60000;      /* 384 KB code */
-__tiku_layout_module_size  = 0x8000;                       /* 32 KB slot  */
-__tiku_layout_durable_size = 0x1000;                       /* 4 KB sector */
+__tiku_layout_persist_size = 0x1000;                       /* 4 KB sector */
 INCLUDE arch/common/tiku_nvm_layout.ld
 
-__tiku_nvm_flash_size   = __tiku_layout_durable_size;
-__tiku_nvm_flash_start  = __tiku_layout_durable_start;
+__tiku_nvm_flash_size   = __tiku_layout_persist_size;
+__tiku_nvm_flash_start  = __tiku_layout_persist_start;
 __tiku_nvm_flash_end    = __tiku_layout_top;
-__tiku_nvm_flash_offset = __tiku_layout_durable_start - ORIGIN(FLASH);
+__tiku_nvm_flash_offset = __tiku_layout_persist_start - ORIGIN(FLASH);
 
 /* Carved NVM region (substrate B): a ~3.7 MB slice of QSPI flash just below the
  * 4 KB .uninit backup sector, owned by the /data file store + NVM tier via the
@@ -219,8 +218,8 @@ SECTIONS
         *(.uninit*)
         /* Durable cells (boot counter, aliases, persist cells) -- backed up to
          * the 4 KB flash sector and MPU-protected. */
-        /* DURABLE grade: exact-match `.persistent` only, so the WARM
-         * grade below (`.persistent.warm`) cannot be swallowed by a
+        /* DURABLE grade: exact-match `.persistent` only, so the RETAINED
+         * grade below (`.retained`) cannot be swallowed by a
          * wildcard into the mirrored window.  (The old
          * EXCLUDE_FILE(*tiku_kits_net_*.o) object-name routing is
          * retired: the net kits' transient buffers are now placed
@@ -229,11 +228,11 @@ SECTIONS
         *(.persistent)
         . = ALIGN(32);
         __uninit_end = .;
-        /* WARM grade (TIKU_PERSIST_WARM): NOLOAD SRAM after
+        /* RETAINED grade: NOLOAD SRAM after
          * __uninit_end — survives warm resets, but sits outside the
          * backed-up + MPU-protected window.  Everything here chose the
          * grade on purpose at its declaration. */
-        *(.persistent.warm*)
+        *(.retained*)
     } > SRAM
 
     /* End of static allocations (heap-style growth would start here).
@@ -247,6 +246,30 @@ SECTIONS
     end = .;
     __end__ = .;
     __datastart = __data_start;
+
+    /*
+     * SRAM TIER -- what .bss left over, less a small reserve.
+     *
+     * Derived rather than compiled in.  A compiled-in size has to be chosen
+     * per build configuration by hand-computing what the cert-TLS and cyw43
+     * statics take; those are statics, so the linker places them first and
+     * the remainder is the answer.
+     *
+     * 0x9000, not 0x8000: the guard here sits below the 32 KB stack reserve
+     * (mpu_stack_guard_base() in tiku_mpu_arch.c subtracts both), unlike the
+     * RA8P1 where it is inside.  Using the wrong one parks the tier on the
+     * guard.  Being outside .bss also keeps the span out of the crt's zero
+     * loop, which the allocator has never needed.
+     */
+    /* The reserve is the margin between the tier's top and the guard: a
+     * frame striding past the 4 KB guard lands there before it lands on the
+     * tier.  The fragment applies it, resolves the floor from the make line
+     * and asserts both. */
+    __tiku_tier_span_start      = ALIGN(32);
+    __tiku_tier_span_limit      = __stack - 0x9000;
+    __tiku_tier_reserve_default = 32K;
+    __tiku_tier_floor_default   = 0x40000;
+    INCLUDE arch/common/tiku_sram_layout.ld
 
     /* Sanity check: static data must clear the MPU's stack + guard reservation.
      * The ARMv8-M MPU (arch/arm-rp2350/tiku_mpu_arch.c) carves the top
@@ -271,7 +294,7 @@ SECTIONS
 
     /* The flash image (code + rodata + the .data load copy) must not grow up
      * into the carved NVM region below the backup sector. */
-    ASSERT(__data_load + (__data_end - __data_start) <= __tiku_module_slot,
+    ASSERT(__data_load + (__data_end - __data_start) <= __tiku_code_limit,
            "ERROR: flash image overruns the carved NVM region")
 
     /DISCARD/ :

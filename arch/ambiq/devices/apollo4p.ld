@@ -50,7 +50,7 @@ MEMORY
 {
     /* Code window: a fixed 384 KB budget for code/rodata (the module slot is
      * 4 KB loadable-module slot carved off its top). Everything between the
-     * module slot and the 64 KB mirror becomes the carved NVM region, so the
+     * module slot and the 16 KB mirror becomes the carved NVM region, so the
      * NVM store/tier gets the bulk of MRAM. A region overflow here means code
      * outgrew its budget. */
     MRAM  (rx)  : ORIGIN = 0x00018000, LENGTH = 0x60000   /* 384 KB code window (M4) */
@@ -70,23 +70,22 @@ __flash_end   = ORIGIN(MRAM) + LENGTH(MRAM);
 /* Canonical NVM layout: inputs + shared derivation (arch/common). */
 __tiku_layout_top          = 0x00200000;
 __tiku_layout_code_cap     = ORIGIN(MRAM) + LENGTH(MRAM);  /* end of code */
-__tiku_layout_module_size  = 0x8000;                       /* 32 KB slot  */
-__tiku_layout_durable_size = 0x10000;                      /* 64 KB mirror */
+__tiku_layout_persist_size = 0x4000;                       /* 16 KB mirror */
 INCLUDE arch/common/tiku_nvm_layout.ld
 
 /* Carved NVM store/tier region (substrate B): ALL MRAM between the module
- * slot and the 64 KB mirror -- ~1.34 MB on this part. Read in place by
+ * slot and the 16 KB mirror -- ~1.34 MB on this part. Read in place by
  * pointer (MPU region 0 maps all MRAM RO); written via the bootrom backend
  * (kernel/memory/tiku_nvm_region). The NVM memory tier and the file store ride
  * this. Base is PINNED (not derived from the code window) so the module-slot
  * carve cannot move the FS/persist layout. */
 /* (__tiku_nvmfs_base/__tiku_nvmfs_size come from the shared derivation.) */
 
-/* NVM mirror page (Proposal A, small hot state): 64 KB at the top of MRAM
+/* NVM mirror page (Proposal A, small hot state): 16 KB at the top of MRAM
  * (0x1F0000..0x200000), where tiku_mem_arch_nvm_flush() programs the .uninit
  * snapshot. Grown from 32 KB for more durable cells/aliases headroom. */
-__tiku_nvm_mram_start = __tiku_layout_durable_start;
-__tiku_nvm_mram_size  = __tiku_layout_durable_size;
+__tiku_nvm_mram_start = __tiku_layout_persist_start;
+__tiku_nvm_mram_size  = __tiku_layout_persist_size;
 __sram_start  = ORIGIN(TCM);
 __sram_end    = ORIGIN(TCM) + LENGTH(TCM);
 
@@ -178,20 +177,20 @@ SECTIONS
         *(.uninit*)
         /* DURABLE grade: exact-match .persistent -- this window is
          * MRAM-mirrored and MPU-read-only outside unlock windows.
-         * Exact match so the WARM grade below cannot be
+         * Exact match so the RETAINED grade below cannot be
          * wildcard-swallowed into it.  (The old EXCLUDE_FILE net-kit
          * routing is retired: net buffers are placed explicitly at
          * their declarations, so no net object emits .persistent.) */
         *(.persistent)
         . = ALIGN(32);
         __uninit_end = .;
-        /* WARM grade (TIKU_PERSIST_WARM): survives warm resets, but
+        /* RETAINED grade: survives warm resets, but
          * sits OUTSIDE the mirror and the MPU-RO window.  Everything
          * here chose the grade on purpose at its declaration. */
-        /* Pad to the full 8 KB MPU envelope FIRST: the WARM grade
+        /* Pad to the full 8 KB MPU envelope FIRST: the RETAINED grade
          * below must sit outside the read-only region. */
         . = __uninit_start + 8192;
-        *(.persistent.warm*)
+        *(.retained*)
     } > TCM
 
     ASSERT((__uninit_end - __uninit_start) <= 8192,
@@ -218,7 +217,31 @@ SECTIONS
     {
         KEEP(*(.resource_table))
         *(.shared*)
+        . = ALIGN(32);
+        __ssram_top = .;
     } > SSRAM
+
+    /*
+     * SRAM TIER -- the rest of the shared bank, less a small reserve.
+     *
+     * Derived rather than compiled in, for the reason the RA8P1 script gives:
+     * a constant has to be chosen per build configuration and silently stops
+     * matching the moment a .ssram buffer is added.  Placed after .shared so
+     * it clears every other tenant of the bank.
+     *
+     * Being outside .ssram also keeps it out of the crt's zero loop
+     * (__ssram_start..__ssram_end), which the allocator has never needed --
+     * it does not promise zeroed memory.
+     */
+    /* The reserve protects nothing here: the stack lives in TCM and nothing
+     * sits above the tier in this bank.  The figure is arbitrary, kept equal
+     * to the stack-side ports' margin; reclaim it if the capacity is wanted.
+     */
+    __tiku_tier_span_start      = __ssram_top;
+    __tiku_tier_span_limit      = ORIGIN(SSRAM) + LENGTH(SSRAM);
+    __tiku_tier_reserve_default = 32K;
+    __tiku_tier_floor_default   = 0x40000;
+    INCLUDE arch/common/tiku_sram_layout.ld
 
     /* Sanity: leave >=4 KB between end-of-statics and the stack top. */
     ASSERT((__stack - _end) >= 0x1000,
@@ -228,17 +251,12 @@ SECTIONS
     ASSERT((__uninit_end - __uninit_start) <= (__tiku_nvm_mram_size - 4),
            "ERROR: .uninit too large for the 32 KB NVM mirror page")
 
-    /* The module slot must sit exactly between the code window and the NVM
-     * region -- a hole in neither, an overlap with neither. */
-    ASSERT(__tiku_module_slot + __tiku_module_slot_size == __tiku_nvmfs_base,
-           "ERROR: module slot does not abut __tiku_nvmfs_base (layout drift)")
-
 
     /* .ssram must stay inside the 2 MB physical SSRAM (0x10060000..0x10260000);
      * the Plus's MPU region 1 is 4 MB so it already covers this.  If the SRAM
      * tier ever outgrows physical SSRAM, the tail would fault at runtime. */
     ASSERT(__ssram_end <= 0x10260000,
-           "ERROR: .ssram (SRAM tier) runs past the 2 MB physical SSRAM -- shrink TIKU_TIER_SRAM_SIZE")
+           "ERROR: .ssram (SRAM tier) runs past the 2 MB physical SSRAM -- shrink the .ssram statics")
 
     /DISCARD/ :
     {

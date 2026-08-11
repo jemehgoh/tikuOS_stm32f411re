@@ -26,12 +26,16 @@
 #define TIKU_MODULE_ABI      1u
 
 /* Fixed module slot -- EXECUTABLE NVM (32 KB on ARM parts, ~4 KB on
- * MSP430), kept in sync with
- * __tiku_module_slot in the device linker script and the module's own .ld.
+ * MSP430).  The slot is the TOP 32 KB of the code window, [cap - 32 KB,
+ * cap): not a layout estate of its own, but a reserve inside slack the code
+ * contract already guarantees, claimed only in builds that compile this
+ * loader (the Makefile passes --defsym=__tiku_module_reserve so the link
+ * ASSERT keeps the image below it).  Keep these addresses equal to the
+ * device script's code cap less 32 KB, and to the module's own .ld VMA.
  * The module is linked at this VMA; the loader installs the image here and
  * runs it XIP (durable in place -- it survives reboot and power loss).
  *
- *   nordic (nRF54L15 + nRF54LM20): RRAM at the top of the shared 256 KB code
+ *   nordic (nRF54L15 + nRF54LM20): RRAM at the top of the shared 384 KB code
  *     window -- the SAME address on both parts, so one module image is
  *     family-portable.  SRAM is W^X (execute-never), so a module MUST run
  *     from RRAM -- which is byte-writable, so install is a store loop
@@ -59,11 +63,11 @@
  * would program over live tier data, so leaving this undefined turns that
  * mistake into a compile error instead. */
 #elif defined(AM_PART_APOLLO4L)
-#define TIKU_MODULE_CARVE_ADDR  0x78000u
+#define TIKU_MODULE_CARVE_ADDR  0x70000u
 #elif defined(PLATFORM_RP2350)
 /* Top 32 KB (8 erase sectors) of the flash code window; XIP.
  * Install goes sector-by-sector through the boot-ROM erase/program path. */
-#define TIKU_MODULE_CARVE_ADDR  0x10060000u
+#define TIKU_MODULE_CARVE_ADDR  0x10058000u
 #elif defined(TIKU_DEVICE_MSP430FR5994) || defined(__MSP430FR5994__)
 /* Top 4 KB of HIFRAM (which the MPU already maps R+W+X, SAM 0x0755).
  * FRAM: byte-writable in place AND natively executable.  The slot ends
@@ -73,18 +77,28 @@
 #elif defined(TIKU_DEVICE_MSP430FR6989) || defined(__MSP430FR6989__)
 #define TIKU_MODULE_CARVE_ADDR  0x23000u
 #define TIKU_MODULE_CARVE_SIZE  0xFF0u
+#elif defined(PLATFORM_NORDIC)
+/* nRF54L15 and nRF54LM20 alike: RRAM slot at the top of the shared 384 KB
+ * code window.  Both parts use the SAME slot address, so one module image
+ * is binary-compatible across the Nordic family. */
+#define TIKU_MODULE_CARVE_ADDR  0x58000u
 #else
-/* Nordic (nRF54L15 and nRF54LM20 alike): RRAM slot at the top of the
- * shared 256 KB code window.  Both parts use the SAME slot address, so
- * one module image is binary-compatible across the Nordic family. */
-#define TIKU_MODULE_CARVE_ADDR  0x60000u
+/* Deliberately UNDEFINED, not defaulted: a platform without its own branch
+ * inheriting another's slot address is how a module gets installed over
+ * whatever happens to live there.  With the loader compiled in that is a
+ * hard error right here; without it, any stray use of the address fails to
+ * compile instead.  Porting Tier-3 means choosing this part's address (its
+ * code cap less 32 KB) on purpose. */
+#if defined(TIKU_BASIC_MODULE_ENABLE) && TIKU_BASIC_MODULE_ENABLE
+#error "no Tier-3 module slot defined for this platform"
+#endif
 #endif
 #ifndef TIKU_MODULE_CARVE_SIZE
 #define TIKU_MODULE_CARVE_SIZE  0x8000u
 #endif
 
 /*
- * WHERE THE IMAGE COMES FROM.  A blob linked into the firmware would be
+ * Where the image comes from.  A blob linked into the firmware would be
  * counted TWICE -- once as .rodata in the code window, once as the reserved
  * slot it is copied into.  The image is therefore an ordinary store file, and
  * the embedded blob is only an optional
@@ -122,7 +136,7 @@
  *   rp2350      XIP from the 32 KB NVM carve
  *   MSP430      XIP from its 4 KB HIFRAM slot (natively executable; non-goal)
  *
- * WHY APOLLO510 IS THE EXCEPTION.  Its ITCM sits at 0x00000000 in a separate
+ * Why APOLLO510 is the exception.  Its ITCM sits at 0x00000000 in a separate
  * address space and is not even declared in the linker script's MEMORY block --
  * dedicated instruction memory that nothing else can use.  Spending it costs
  * nothing, which is what let the NVM carve go.  The window starts 4 KB in
@@ -130,7 +144,7 @@
  * a null pointer, by the loader's checks or the module's; it must match the
  * module's .ld exactly.
  *
- * THE POWER QUESTION IS NOW MEASURED, not inferred.  ITCM and DTCM power share
+ * The power question is now measured, not inferred.  ITCM and DTCM power share
  * one field, PWRCTRL->MEMPWREN.PWRENTCM, and nothing in arch/ambiq programs it,
  * so the reset default is what applies.  Arguing "the linker declares 512 KB
  * of DTCM, therefore PWRENTCM must be 7" would be unsound -- the port uses
@@ -166,7 +180,7 @@
  *   And apollo4l/4p simply have no idle instruction memory to spend: one 384 KB
  *   TCM at 0x10000000, already carrying .data, .bss, heap and stack.
  *
- * TWO ALTERNATIVES CONSIDERED AND REJECTED.  Punching a permanently executable
+ * Two alternatives considered and rejected.  Punching a permanently executable
  * hole in W^X recreates the exact write-then-execute primitive the hardening
  * removes.  Flipping a window's permissions in time instead (RW+XN to hold the
  * image, RO+X to run it, never both at once) preserves the invariant honestly --

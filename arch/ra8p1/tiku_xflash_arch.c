@@ -18,6 +18,7 @@
 #include "tiku_xflash_arch.h"
 #include "tiku_ra8p1_regs.h"
 #include "tiku_cpu_common.h"
+#include "tiku_cpu_freq_boot_arch.h"
 #include <kernel/fs/tiku_nvm_backend.h>
 
 /*
@@ -73,14 +74,6 @@ static uint8_t xf_dqs_width; /**< how many cells worked, i.e. margin */
 #define XF_LATE_REG   (xf_opi ? 4U : 0U)
 #define XF_LATE_ARRAY (xf_opi ? 20U : 8U)
 
-/*
- * Last controller state after a request, kept because the interesting failure
- * is not "the transaction errored" but "the transaction ran and the device
- * said nothing" -- which these separate.
- */
-uint32_t xf_last_ctl0;
-uint32_t xf_last_comstt;
-
 void tiku_ra8p1_xflash_init(void)
 {
     unsigned i;
@@ -126,7 +119,7 @@ void tiku_ra8p1_xflash_init(void)
      * and no edge is produced.  A device left in octal mode by the previous
      * session then stays there, and every single-bit command at boot returns
      * 0xFF -- a "dead flash" that is really a live one mid-conversation in
-     * another protocol.  Observed exactly that; the pulse is the fix.
+     * another protocol.
      */
     tiku_ra8p1_xflash_reset();
 
@@ -152,6 +145,11 @@ void tiku_ra8p1_xflash_init(void)
  * preserved by read-modify-write, as at init.
  */
 
+int tiku_ra8p1_xflash_in_opi(void)
+{
+    return (int)xf_opi;
+}
+
 /** @brief Drive OM_RESET low and back, then wait out recovery. */
 void tiku_ra8p1_xflash_reset(void)
 {
@@ -163,16 +161,78 @@ void tiku_ra8p1_xflash_reset(void)
     tiku_cpu_ra8p1_delay_us(1000U);
 }
 
+/*
+ * OM_SCLK is OCTACLK/2 (UM Table 4.4) and three ceilings apply: OCTACLK
+ * 333.33, OCTADIVCLK 166.67, and the fitted MX25LW's own 133.  The part
+ * binds, so this targets OM_SCLK just under 125 -- where the DQS eye was
+ * calibrated -- rather than the fastest legal setting.  A hardcoded 1/1 is
+ * correct only while PLL1P is 240; deriving from the live rate is what stops
+ * a raised core clock driving the flash past its rating.
+ */
+
 /**
- * @brief Point OCTACLK at @p sel with divider 1/1, per the UM handshake.
+ * @brief The OCTACLK divider that keeps OM_SCLK inside every limit.
  *
- * The division ratio is left at 1/1 throughout, which is what lets the
- * MSTPCRB dance in steps 1-2 of the manual's procedure be skipped: it is
- * required only when changing away from 1/n, n != 1.
+ * @param src_hz  Rate of the clock OCTACLK is about to be pointed at
+ * @return An OCTACKDIVCR divider code
+ */
+static uint8_t xflash_octa_div(unsigned long src_hz)
+{
+    if (src_hz <= 250000000UL) {
+        return (uint8_t)RA8P1_CKDIV_1;      /* <=125 MHz OM_SCLK */
+    }
+    if (src_hz <= 500000000UL) {
+        return (uint8_t)RA8P1_CKDIV_2;
+    }
+    return (uint8_t)RA8P1_CKDIV_4;
+}
+
+/** @brief Both OSPI units, which the divider change has to stop together. */
+#define XF_MSTPB_BOTH   (RA8P1_MSTPB_OSPI0 | RA8P1_MSTPB_OSPI1)
+
+/** @brief Bring both OSPI units out of module stop, if they were put in. */
+static void xflash_mstp_restart(int stopped)
+{
+    if (!stopped) {
+        return;
+    }
+    TIKU_REG32(RA8P1_MSTPCRB) &= ~XF_MSTPB_BOTH;
+    (void)TIKU_REG32(RA8P1_MSTPCRB);
+    tiku_cpu_ra8p1_delay_us(30U);
+}
+
+/**
+ * @brief Point OCTACLK at @p sel, per the UM handshake.
+ *
+ * @param sel  OCTACKCR source select
+ * @return TIKU_RA8P1_XFLASH_OK, or ERR_TIMEOUT if the handshake stalled
+ * @note Leaving a 1/n divider with n != 1 needs both OSPI units in module
+ *       stop first (UM 9.2.40); that is the return to MOCO from any rung
+ *       above 250 MHz, where xflash_octa_div() installs 1/2 or 1/4.  Module
+ *       stop retains internal state (UM 11.4), so the calibrated protocol
+ *       and DQS delay survive it.
  */
 static int xflash_set_clock(uint8_t sel)
 {
     uint32_t spins;
+    uint8_t  divcode;
+    int      stopped = 0;
+
+    /* MOCO when that is the selection, otherwise the live PLL1P -- which is
+     * the core rate, since CPUCK0 divides PLL1P by one. */
+    divcode = (sel == RA8P1_OCTACKCR_SEL_MOCO)
+                  ? (uint8_t)RA8P1_CKDIV_1
+                  : xflash_octa_div(tiku_cpu_ra8p1_clock_get_hz());
+
+    if ((TIKU_REG8(RA8P1_OCTACKDIVCR) & 0x0FU) !=
+        (uint8_t)RA8P1_OCTACKDIV_1) {
+        TIKU_REG32(RA8P1_MSTPCRB) |= XF_MSTPB_BOTH;
+        (void)TIKU_REG32(RA8P1_MSTPCRB);
+        /* UM Figure 11.2: 30 us of NOP after an MSTP change while CPUCLK0 is
+         * above the ICLK ceiling, which it is at every rung over 240. */
+        tiku_cpu_ra8p1_delay_us(30U);
+        stopped = 1;
+    }
 
     TIKU_REG16(RA8P1_PRCR_S) = RA8P1_PRCR_KEY | RA8P1_PRCR_PRC0;
 
@@ -184,12 +244,13 @@ static int xflash_set_clock(uint8_t sel)
     }
     if (spins == 0UL) {
         TIKU_REG16(RA8P1_PRCR_S) = RA8P1_PRCR_KEY;
+        xflash_mstp_restart(stopped);
         return TIKU_RA8P1_XFLASH_ERR_TIMEOUT;
     }
 
     /* Source and divider are only writable while the ready flag is set --
      * that window is the whole point of the handshake. */
-    TIKU_REG8(RA8P1_OCTACKDIVCR) = (uint8_t)RA8P1_OCTACKDIV_1;
+    TIKU_REG8(RA8P1_OCTACKDIVCR) = divcode;
     TIKU_REG8(RA8P1_OCTACKCR) = (uint8_t)(RA8P1_OCTACKCR_SREQ | sel);
 
     TIKU_REG8(RA8P1_OCTACKCR) &= (uint8_t)~RA8P1_OCTACKCR_SREQ;
@@ -199,6 +260,8 @@ static int xflash_set_clock(uint8_t sel)
         }
     }
     TIKU_REG16(RA8P1_PRCR_S) = RA8P1_PRCR_KEY;
+
+    xflash_mstp_restart(stopped);
 
     return (spins != 0UL) ? TIKU_RA8P1_XFLASH_OK
                           : TIKU_RA8P1_XFLASH_ERR_TIMEOUT;
@@ -689,8 +752,8 @@ int tiku_ra8p1_xflash_mmap_enable(void)
     }
 
     /* Prefetch on.  A mapped read without it re-sends command, address and
-     * twenty latency cycles for every burst the CPU asks for, which on a bus
-     * this fast is nearly all of the time. */
+     * the frame's latency cycles for every burst the CPU asks for, which on a
+     * bus this fast is nearly all of the time. */
     TIKU_REG32(RA8P1_OSPI_BMCFG(XF_UNIT, 0U)) =
         TIKU_REG32(RA8P1_OSPI_BMCFG(XF_UNIT, 0U)) | RA8P1_BMCFG_PREEN;
 
@@ -873,8 +936,8 @@ static tiku_nvm_backend_t xf_backend = {
 tiku_nvm_backend_t *tiku_ra8p1_xflash_backend(void)
 {
     /*
-     * OCTAL FIRST, ALWAYS, AND THAT IS A CORRECTNESS REQUIREMENT RATHER THAN
-     * A SPEED ONE.  DOPI moves bytes pair-swapped relative to single-bit SPI,
+     * Octal is entered first, and for correctness rather than speed.  DOPI
+     * moves bytes pair-swapped relative to single-bit SPI,
      * so content written through this backend in one protocol reads back as
      * nonsense in the other -- a stored object's header magic simply fails to
      * match and the slot reports itself empty.  Entering here makes the
