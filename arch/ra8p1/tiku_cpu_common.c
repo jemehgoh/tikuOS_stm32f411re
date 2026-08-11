@@ -20,7 +20,7 @@
 
 #include <stdint.h>
 
-/** @brief Measured spin rate, 0 until the tick has been available to time it. */
+/** @brief Measured spin rate, 0 until the tick is available to time it. */
 static unsigned long spin_per_ms;
 
 /**
@@ -45,8 +45,8 @@ static void cpu_spin(unsigned long iters)
 /**
  * @brief Spin a total iteration count in as few calls as the range allows.
  *
- * One long spin rather than N short ones, for the same reason: the call
- * overhead the measurement never saw would otherwise be spent N times.
+ * One long spin rather than N short ones: the calibration does not include
+ * call overhead, so N calls would spend it N times outside the measurement.
  *
  * @param iters  Total iterations
  */
@@ -83,6 +83,11 @@ static int tick_can_advance(void)
         return 0;         /* inside an exception; SysTick may not preempt */
     }
     return 1;
+}
+
+void tiku_cpu_ra8p1_spin_invalidate(void)
+{
+    spin_per_ms = 0UL;
 }
 
 unsigned long tiku_cpu_ra8p1_spin_per_ms(void)
@@ -193,10 +198,7 @@ uint16_t tiku_cpu_ra8p1_reset_reason(void)
     /*
      * Report the MSP430 SYSRSTIV-style codes the kernel already speaks, as
      * nordic and ambiq do -- /sys/boot/reason renders those and nothing else.
-     * This returned a private TIKU_RA8P1_RESET_* bitmask until R6, which
-     * rendered as "unknown"; nothing caught it earlier because until the
-     * image moved into MRAM there was no way to come back from a reset and
-     * read it.
+     * A private code here renders as "unknown".
      *
      * Most specific first: a watchdog reset also raises the power-on flag.
      */

@@ -8,8 +8,8 @@
  * nrf54l15.ld - Nordic nRF54L15 (nRF54L15-DK) linker script.
  *
  * Vectors at the RRAM base (VTOR=0), then code and the .data image, with the
- * top 40 KB reserved for the byte-writable filestore and durable-persist
- * regions behind the RRAMC WEN gate.  Map and exported symbols below.
+ * NVM region and the persist partition above the code window, both
+ * byte-writable behind the RRAMC WEN gate.  Map and exported symbols below.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -27,17 +27,17 @@
  *   0x00000xxx .text/.rodata (code + read-only data)
  *   0x000xxxxx .data (LMA)   (initialised-data image, copied to SRAM at boot)
  *   ...        <free RRAM>    (code budget grows toward the reserved NVM tail)
- *   top-40 KB  reserved      (two byte-writable NVM regions written behind the
- *                            RRAMC WEN gate: a 32 KB filestore -- the
- *                            tiku_nvm_region backend / TFS /data / nvmprobe --
- *                            and, at the very top, an 8 KB durable-persist
- *                            region holding exact `.persistent`; symbols below)
+ *   above code reserved      (two byte-writable NVM spans behind the RRAMC
+ *                            WEN gate: the carved NVM region -- 32 KB tier +
+ *                            TFS /data -- and, at the very top, the 16 KB
+ *                            persist partition holding exact `.persistent`;
+ *                            symbols below)
  *
  * Layout in SRAM (stack grows down from the top):
  *   .data              (initialised RAM, copied from its RRAM LMA at boot)
  *   .bss               (zeroed at boot)
  *   .uninit/.persistent(skipped by zero-init: warm-reset survivor state)
- *   .persistent.warm   (warm-survivor SRAM, outside any future NVM mirror)
+ *   .retained   (warm-survivor SRAM, outside any future NVM mirror)
  *   __stack            (top of SRAM, grows downward)
  *
  * Symbols exposed to the kernel mirror the other ARM ports (see rp2350.ld):
@@ -71,9 +71,9 @@ __flash_end   = ORIGIN(RRAM) + LENGTH(RRAM);
 __sram_start  = ORIGIN(SRAM);
 __sram_end    = ORIGIN(SRAM) + LENGTH(SRAM);
 
-/* Reserved durable-persist region at the top of RRAM (byte-writable NVM
- * behind the RRAMC WEN gate; exact `.persistent` lands here, durable in
- * place).  16 KB: persist cells + aliases + lc + inittab + headroom.
+/* Persist partition at the top of RRAM (byte-writable NVM behind the
+ * RRAMC WEN gate; exact `.persistent` lands here, durable in place).
+ * 16 KB: persist cells + aliases + lc + inittab + headroom.
  * NOTE (2026-07-15 Ambiq-parity layout, kintsugi/memoryfix.md B.0): growing
  * these carves MOVES every cell/TFS address -- established DKs re-prime once
  * (primed != 0, /data empty).  Expected, one-time. */
@@ -83,19 +83,18 @@ __tiku_layout_code_cap     = 0x60000;                       /* 384 KB code */
 /* 384 KB is the shared Nordic budget and the fleet-wide contract; the LM20 uses
  * the same figure, so the module slot is at the same address on both parts.
  * The L15 has no NPU and its largest measured image is 123 KB. */
-__tiku_layout_module_size  = 0x8000;                        /* 32 KB slot  */
-__tiku_layout_durable_size = 0x4000;                        /* 16 KB persist */
+__tiku_layout_persist_size = 0x4000;                        /* 16 KB partition */
 INCLUDE arch/common/tiku_nvm_layout.ld
 
-__tiku_nvm_rram_size  = __tiku_layout_durable_size;
-__tiku_nvm_rram_start = __tiku_layout_durable_start;
+__tiku_nvm_rram_size  = __tiku_layout_persist_size;
+__tiku_nvm_rram_start = __tiku_layout_persist_start;
 __tiku_nvm_rram_end   = __tiku_layout_top;
 
 /* Carved NVM region (the tiku_nvm_region backend), Ambiq-style layout:
  * NVM tier at the front (32 KB) | TFS FS extent (all the rest,
  * TIKU_NVMFS_FS_BYTES -- BASIC's saved program and run-state checkpoint are
  * files in it, not a carved tail).  A byte-writable RRAM span just BELOW
- * the durable-persist region; written in place behind the WEN gate (no
+ * the persist partition; written in place behind the WEN gate (no
  * erase).  1092 KB of region sits below a 384 KB code window (largest measured
  * image 123 KB; the ASSERT at the bottom is the hard cap).  __tiku_nvmfs_size is an
  * absolute symbol whose ADDRESS is the size (matches rp2350/ambiq). */
@@ -161,7 +160,7 @@ SECTIONS
     } > SRAM
 
     /* -------- 5. Warm-reset survivor state (SRAM) ------------------- */
-    /* The WARM grade (`.persistent.warm` + the net stack's transient pools)
+    /* The RETAINED grade (`.retained` + the net stack's transient pools)
      * plus `.uninit` live in SRAM: skipped by zero-init, survive a warm reset,
      * reseeded on a power cycle.  The DURABLE grade (exact `.persistent`) is
      * NOT here -- it lives in RRAM below and survives power loss too. */
@@ -171,9 +170,9 @@ SECTIONS
         *(.uninit*)
         . = ALIGN(32);
         __uninit_end = .;
-        /* WARM grade only (EXCLUDE_FILE net routing retired: net kits
+        /* RETAINED grade only (EXCLUDE_FILE net routing retired: net kits
          * place their buffers explicitly at the declarations). */
-        *(.persistent.warm*)
+        *(.retained*)
     } > SRAM
 
     /* End of static allocations. Aliases for whichever name libc/kernel use. */
@@ -187,6 +186,15 @@ SECTIONS
      * -- rp2350-parity sizing. */
     ASSERT((__stack - _end) >= 0x9000,
            "ERROR: SRAM exhausted — need >= 36 KB (32K stack reserve + 4K MPU guard) below the stack")
+
+    /* The SRAM tier fills the single bank between the statics and the MPU
+     * stack budget.  No further reserve: the bank is tight (240 KB), and
+     * the floor plus the budget already carry the contract. */
+    __tiku_tier_span_start      = ALIGN(_end, 32);
+    __tiku_tier_span_limit      = __stack - 0x9000;
+    __tiku_tier_reserve_default = 0;
+    __tiku_tier_floor_default   = 4K;
+    INCLUDE arch/common/tiku_sram_layout.ld
 
     /* -------- 6. DURABLE persist (RRAM, byte-writable NVM) ---------- */
     /* Exact `.persistent` lives at the reserved top of RRAM, written behind the
@@ -212,14 +220,14 @@ SECTIONS
 
     /* The RRAM code image (code + rodata + .data load copy) must not grow up
      * into the reserved NVM regions at the top of RRAM -- the filestore sits
-     * just below the durable-persist region, so guard against the lower of
+     * just below the persist partition, so guard against the lower of
      * the two bases. */
-    ASSERT(__data_load + (__data_end - __data_start) <= __tiku_module_slot,
+    ASSERT(__data_load + (__data_end - __data_start) <= __tiku_code_limit,
            "ERROR: RRAM image overruns the reserved NVM/persist regions")
 
-    /* The durable persist data must fit inside the reserved region. */
+    /* The persist-partition data must fit inside the reserved span. */
     ASSERT(__persistent_end <= __tiku_nvm_rram_end,
-           "ERROR: durable .persistent overruns the reserved RRAM region")
+           "ERROR: .persistent overruns the persist partition")
 
     /DISCARD/ :
     {

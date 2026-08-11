@@ -26,6 +26,12 @@
 #include <interfaces/bluetooth/tiku_ble_adv.h>  /* /sys/radio beacon + scan */
 #include <arch/nordic/tiku_radio_arch.h>        /* /sys/radio/mode (live)   */
 #endif
+#if (TIKU_HAS_COPROC + 0)
+#include "tiku_vfs_tree_coproc.h"
+#endif
+#if (TIKU_HAS_NPU + 0)
+#include "tiku_vfs_tree_npu.h"
+#endif
 #if (TIKU_FLPR_ENABLE + 0)
 #include <arch/nordic/tiku_flpr_arch.h>         /* /sys/flpr coprocessor    */
 #include <arch/nordic/flpr/tiku_flpr_ipc.h>     /* TIKU_FLPR_MSG_CAP        */
@@ -49,7 +55,7 @@
 #include "tiku_vfs_tree_emmc.h"      /* /sys/emmc -- on-board 8 GB eMMC      */
 #endif
 #include "tiku_vfs_tree_persist.h"
-#if (TIKU_DRV_USBHS_ENABLE + 0)
+#if (TIKU_DRV_USBHS_ENABLE + 0) || (TIKU_DRV_USB_ENABLE + 0)
 #include "tiku_vfs_tree_usb.h"
 #endif
 #include "tiku_vfs_tree_watch.h"
@@ -219,6 +225,10 @@ static int
 nvmfree_read(char *buf, size_t max)
 {
     tiku_mem_stats_t st;
+    /* Same self-wire as /sys/mem/tiers: before the first allocation the tier
+     * is unwired and stats fail, so this node read 0 on a board with a full
+     * 32 KB tier free.  Init is idempotent. */
+    (void)tiku_tier_init();
     if (tiku_tier_stats(TIKU_MEM_NVM, &st) != TIKU_MEM_OK) {
         return snprintf(buf, max, "0\n");
     }
@@ -244,11 +254,19 @@ mem_tiers_read(char *buf, size_t max)
         { TIKU_MEM_SRAM,   "sram"   },
         { TIKU_MEM_NVM,    "nvm"    },
         { TIKU_MEM_HIFRAM, "hifram" },
+        { TIKU_MEM_PSRAM,  "psram"  },   /* listed only while attached */
     };
     tiku_mem_stats_t st;
     size_t off = 0;
     uint8_t i;
     int n;
+
+    /* The tier wires itself on first use, so on a board where nothing has
+     * allocated yet every stats call fails and this node reads back EMPTY --
+     * which looks like "no tiers" rather than "none used".  Init is idempotent
+     * and costs nothing once done, so ask for it here: reading capacity must
+     * not depend on somebody having spent some first. */
+    (void)tiku_tier_init();
 
     for (i = 0; i < (uint8_t)(sizeof(tiers) / sizeof(tiers[0])); i++) {
         if (tiku_tier_stats(tiers[i].t, &st) != TIKU_MEM_OK) {
@@ -523,6 +541,37 @@ device_id_read(char *buf, size_t max)
 }
 
 /**
+ * @brief Read handler for /sys/device/uid.
+ *
+ * The whole per-die identifier as hex, however many bytes this part has --
+ * /sys/device/id renders only the first two as a friendly name.  Empty when
+ * the part has no unique ID rather than inventing one.
+ *
+ * @param buf  Output buffer for the rendered text
+ * @param max  Capacity of @p buf in bytes
+ * @return Bytes written, or -1 on error
+ */
+static int
+device_uid_read(char *buf, size_t max)
+{
+    uint8_t  id[16];
+    uint8_t  n;
+    unsigned i;
+    int      used = 0;
+
+    n = tiku_common_unique_id(id, (uint8_t)sizeof(id));
+    for (i = 0U; i < (unsigned)n; i++) {
+        int w = snprintf(buf + used, max - (size_t)used, "%02x",
+                         (unsigned)id[i]);
+        if (w < 0 || (size_t)(used + w) >= max) {
+            return -1;
+        }
+        used += w;
+    }
+    return used + snprintf(buf + used, max - (size_t)used, "\n");
+}
+
+/**
  * @brief Read handler for /sys/device/mcu.
  *
  * Renders the silicon name from the selected device header
@@ -637,6 +686,7 @@ static const tiku_vfs_node_t sys_device_children[] = {
     { "name",    TIKU_VFS_FILE, device_name_read,    device_name_write, NULL, 0,
       NULL, NULL, TIKU_VFS_CAP_FS },   /* writes commit to the persistent store */
     { "id",      TIKU_VFS_FILE, device_id_read,      NULL,              NULL, 0 },
+    { "uid",     TIKU_VFS_FILE, device_uid_read,     NULL,              NULL, 0 },
     { "mcu",     TIKU_VFS_FILE, device_mcu_read,     NULL,              NULL, 0 },
     { "version", TIKU_VFS_FILE, device_version_read, NULL,              NULL, 0 },
 };
@@ -1224,7 +1274,7 @@ static const tiku_vfs_node_t sys_flpr_children[] = {
 
 static const tiku_vfs_node_t sys_children[] = {
     { "version",    TIKU_VFS_FILE, version_read,    NULL, NULL, 0 },
-    { "device",     TIKU_VFS_DIR,  NULL, NULL, sys_device_children, 4 },
+    { "device",     TIKU_VFS_DIR,  NULL, NULL, sys_device_children, 5 },
     { "uptime",     TIKU_VFS_FILE, uptime_read,     NULL, NULL, 0,
       &desc_uptime },
     { "time",       TIKU_VFS_FILE, time_read,       time_write, NULL, 0,
@@ -1267,9 +1317,11 @@ static const tiku_vfs_node_t sys_children[] = {
       tiku_vfs_tree_boot_children,     TIKU_VFS_TREE_BOOT_NCHILD },
     { "persist",  TIKU_VFS_DIR,  NULL, NULL,
       tiku_vfs_tree_persist_children,  TIKU_VFS_TREE_PERSIST_NCHILD },
-#if (TIKU_DRV_USBHS_ENABLE + 0)
+#if (TIKU_DRV_USBHS_ENABLE + 0) || (TIKU_DRV_USB_ENABLE + 0)
     { "usb",      TIKU_VFS_DIR,  NULL, NULL,
       tiku_vfs_tree_usb_children,      TIKU_VFS_TREE_USB_NCHILD },
+#endif
+#if (TIKU_DRV_USBHS_ENABLE + 0)
     { "store",    TIKU_VFS_DIR,  NULL, NULL,
       tiku_vfs_tree_store_children,    TIKU_VFS_TREE_STORE_NCHILD },
 #endif
@@ -1290,6 +1342,14 @@ static const tiku_vfs_node_t sys_children[] = {
 #endif
 #if (TIKU_FLPR_ENABLE + 0)
     { "flpr",     TIKU_VFS_DIR,  NULL, NULL, sys_flpr_children,   8 },
+#endif
+#if (TIKU_HAS_COPROC + 0)
+    { "coproc",   TIKU_VFS_DIR,  NULL, NULL,
+      tiku_vfs_tree_coproc_children,   TIKU_VFS_TREE_COPROC_NCHILD },
+#endif
+#if (TIKU_HAS_NPU + 0)
+    { "npu",      TIKU_VFS_DIR,  NULL, NULL,
+      tiku_vfs_tree_npu_children,      TIKU_VFS_TREE_NPU_NCHILD },
 #endif
 #if TIKU_INIT_ENABLE
     { "init",     TIKU_VFS_DIR,  NULL, NULL,

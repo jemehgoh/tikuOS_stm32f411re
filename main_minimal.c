@@ -101,9 +101,9 @@ volatile uint32_t g_nordic_loop_count;
  *   T2  8 back-to-back byte stores into the 32-entry write buffer, then
  *       TASKS_COMMITWRITEBUF + READY wait
  *   T3  WEN set, immediate store, no waits (the minimal path)
- * Scratch target: the durable-persist region base (0x17B000) -- NOTE this
- * clobbers the first persist words, so a kernel image flashed afterwards
- * re-primes its cells (fine: the probe is a MINIMAL-only diagnostic).
+ * Scratch target: 0x17B000, inside the L15 persist partition (inside the
+ * NVM region on the LM20) -- NOTE this clobbers durable words, so a kernel
+ * image flashed afterwards re-primes (fine: a MINIMAL-only diagnostic).
  */
 #include "arch/nordic/tiku_nordic_mdk.h"   /* per-device MDK router */
 
@@ -901,7 +901,7 @@ int main(void)
              * or scheduler shares the CPU this has to become an interrupt.
              */
             /*
-             * BOUNDED BY TIME, NOT BY ITERATIONS.  A million turns of this
+             * Bounded by time, NOT BY ITERATIONS.  A million turns of this
              * loop is about a tenth of a second at 240 MHz, while the host
              * takes seconds just to start asking -- so an iteration count
              * silently decides how much of the enumeration gets serviced,
@@ -1042,7 +1042,7 @@ int main(void)
     }
 
     /*
-     * NOTHING BELOW MAY WRITE THE STAGING WINDOW OR THE FLASH SLOT.  Both
+     * Nothing below may write the staging window or the flash slot.  Both
      * now hold a real model, restored above, and a probe that fills either
      * with a test pattern destroys it at every boot -- silently, because the
      * pattern verifies against itself perfectly.  Exercise the store through

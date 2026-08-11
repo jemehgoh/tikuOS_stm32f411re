@@ -64,6 +64,45 @@
 #ifndef TIKU_SHELL_CMD_REBOOT
 #define TIKU_SHELL_CMD_REBOOT  1  /**< reboot  - System reset */
 #endif
+#ifndef TIKU_SHELL_CMD_CPU1
+/* Auto-on where the build carries the second-core driver; off elsewhere.
+ * TIKU_DRV_CPU1_ENABLE is a -D from the Makefile, so this resolves the same
+ * way in every translation unit regardless of include order. */
+#if (TIKU_DRV_CPU1_ENABLE + 0)
+#define TIKU_SHELL_CMD_CPU1    1  /**< cpu1    - the RA8P1 Cortex-M33 */
+#else
+#define TIKU_SHELL_CMD_CPU1    0
+#endif
+#endif
+#ifndef TIKU_SHELL_CMD_NPU
+/* Follows the driver opt-in, not the platform: every RA8P1 carries the
+ * Ethos-U55, but its static buffers are the largest .bss on the part and a
+ * build that never loads a model should not carry them.  TIKU_HAS_NPU is a -D
+ * from the Makefile, so it resolves the same way in every translation unit
+ * regardless of include order. */
+#if (TIKU_HAS_NPU + 0)
+#define TIKU_SHELL_CMD_NPU     1  /**< npu     - the RA8P1 Ethos-U55 */
+#else
+#define TIKU_SHELL_CMD_NPU     0
+#endif
+#endif
+#ifndef TIKU_SHELL_CMD_CAM
+/* Follows the driver opt-in: the camera is an expansion board. */
+#if (TIKU_HAS_CAM + 0)
+#define TIKU_SHELL_CMD_CAM     1  /**< cam     - camera bring-up/capture */
+#else
+#define TIKU_SHELL_CMD_CAM     0
+#endif
+#endif
+#ifndef TIKU_SHELL_CMD_PANEL
+/* Follows the driver opt-in: the parallel RGB panel is an expansion board,
+ * and a build without the display controller has nothing to drive. */
+#if (TIKU_HAS_GLCDC + 0)
+#define TIKU_SHELL_CMD_PANEL   1  /**< panel   - the parallel RGB display */
+#else
+#define TIKU_SHELL_CMD_PANEL   0
+#endif
+#endif
 #ifndef TIKU_SHELL_CMD_TRNG
 #define TIKU_SHELL_CMD_TRNG    1  /**< trng    - Dump hardware TRNG bytes */
 #endif

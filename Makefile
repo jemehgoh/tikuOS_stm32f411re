@@ -337,6 +337,30 @@ TIKU_DRV_USBHS_ENABLE.)
 endif
 endif
 
+ifeq ($(TIKU_NPU_ENABLE),1)
+ifneq ($(TIKU_PLATFORM),ra8p1)
+$(error TIKU_NPU_ENABLE=1 requires a part with the Ethos-U55 (currently \
+MCU=$(MCU)). RA8P1 is the only one in this tree; elsewhere the flag would be \
+silently ignored and the build would claim an accelerator it has not got.)
+endif
+endif
+
+ifeq ($(TIKU_DRV_DRW_ENABLE),1)
+ifneq ($(TIKU_PLATFORM),ra8p1)
+$(error TIKU_DRV_DRW_ENABLE=1 requires a part with the 2D drawing engine \
+(currently MCU=$(MCU)). RA8P1 is the only one in this tree; elsewhere the flag \
+would be silently ignored and the build would claim an accelerator it lacks.)
+endif
+endif
+
+ifeq ($(TIKU_DRV_GLCDC_ENABLE),1)
+ifneq ($(TIKU_PLATFORM),ra8p1)
+$(error TIKU_DRV_GLCDC_ENABLE=1 requires a part with the GLCDC (currently \
+MCU=$(MCU)). RA8P1 is the only one in this tree; elsewhere the flag would be \
+silently ignored and the build would claim a display controller it lacks.)
+endif
+endif
+
 ifeq ($(TIKU_DRV_EMMC_ENABLE),1)
 ifeq ($(call board_has,EMMC),)
 $(error TIKU_DRV_EMMC_ENABLE=1 requires a board with an eMMC fitted \
@@ -591,6 +615,19 @@ _FLAG_GUARD := $(shell mkdir -p $(BUILD_DIR); \
     else rm -f $(BUILD_DIR)/.buildflags.new; fi)
 ifeq ($(_FLAG_GUARD),wiped)
 $(info [flags changed -> $(BUILD_DIR) objects wiped for a clean rebuild])
+endif
+
+# main.elf is one path shared by every MCU, while the flag guard above is
+# per build dir -- so an MCU switch trips neither stamp: the previous
+# target's image is newer than every object of the new one, make skips the
+# link, and the stale image is what gets sized, flashed and tested.  Record
+# which MCU linked it and drop it on a switch.
+_ELF_MCU_GUARD := $(shell \
+    if [ -f main.elf ] && [ "`cat .main-elf-mcu 2>/dev/null`" != "$(MCU)" ]; \
+    then rm -f main.elf main.hex; echo relink; fi; \
+    echo "$(MCU)" > .main-elf-mcu)
+ifeq ($(_ELF_MCU_GUARD),relink)
+$(info [MCU changed -> stale main.elf dropped, will relink for $(MCU)])
 endif
 
 # ---------------------------------------------------------------------------
@@ -999,12 +1036,16 @@ CFLAGS += -ffunction-sections -fdata-sections -fno-common
 # in the part's 520 KB SRAM. Gated on BASIC so non-BASIC builds keep the lean
 # default. A _Static_assert in tiku_basic_arena.inl now checks the two numbers
 # against each other at build time.
+# The tier is now carved by the linker from what .bss left over (rp2350.ld),
+# so the sizes this block used to pick per configuration are gone: the TLS and
+# cyw43 buffers are statics and get placed first, which is exactly what the
+# 128 KB HAS_TLS case was hand-computing.  What remains is the guaranteed
+# minimum, which must cover BASIC_ARENA_BYTES at the configured line count.
+TIKU_TIER_SRAM_MIN ?= 262144
+CFLAGS += -DTIKU_TIER_SRAM_MIN=$(TIKU_TIER_SRAM_MIN)
+CFLAGS += -DTIKU_TIER_SRAM_DERIVED=1
 ifeq ($(TIKU_SHELL_BASIC_ENABLE),1)
 ifeq ($(HAS_TLS),1)
-# HTTPS (HAS_TLS) adds the cert-TLS client's static buffers to .bss; trim the
-# BASIC tier to 128 KB so the cyw43 bring-up + stack keep their SRAM (the
-# 117 KB 512-line arena still fits, with 13.6 KB spare).
-CFLAGS += -DTIKU_TIER_SRAM_SIZE=131072    # 128 KB: arena + TLS .bss + radio
 # TLS server flights are multi-KB; the lean 512 B TCP receive window turns
 # each one into fragile 512-byte stop-and-wait (a lost window-update ACK
 # stalls the handshake).  Widen the window so a flight streams in a couple of
@@ -1012,8 +1053,6 @@ CFLAGS += -DTIKU_TIER_SRAM_SIZE=131072    # 128 KB: arena + TLS .bss + radio
 # keeps the SRAM bump small (4 KB x 2 = 8 KB vs 512 B x 4).
 CFLAGS += -DTIKU_KITS_NET_TCP_RX_BUF_SIZE=4096
 CFLAGS += -DTIKU_KITS_NET_TCP_MAX_CONNS=2
-else
-CFLAGS += -DTIKU_TIER_SRAM_SIZE=163840    # 160 KB: fits the 512-line BASIC arena
 endif
 endif
 
@@ -1046,13 +1085,18 @@ CFLAGS += -DPLATFORM_AMBIQ=1
 # including BASIC's program arena (a 2048-line program needs ~195 KB). The mem
 # size type is 32-bit here (arch/ambiq/tiku_mem_arch.h), so multi-hundred-KB
 # tiers are fine.
-ifeq ($(MCU),apollo4p)
-CFLAGS += -DTIKU_TIER_SRAM_SIZE=1703936   # 1.625 MB tier in the Plus's 2 MB SSRAM (4 MB MPU window; +~182 KB other .ssram still fits, ~206 KB spare)
-else ifeq ($(MCU),apollo4l)
-CFLAGS += -DTIKU_TIER_SRAM_SIZE=524288    # 512 KB of the Lite's 1 MB mapped SSRAM
+# The tier is linker-derived, so this is the guaranteed minimum, not the size.
+# It must cover BASIC_ARENA_BYTES, which differs by part because the BASIC
+# capacity profile does; the 510 asks for more than the 4-series.
+ifeq ($(MCU),apollo510)
+TIKU_TIER_SRAM_MIN ?= 327680
+else ifeq ($(MCU),apollo510b)
+TIKU_TIER_SRAM_MIN ?= 327680
 else
-CFLAGS += -DTIKU_TIER_SRAM_SIZE=1048576   # 1 MB of the 3 MB SSRAM (Apollo510)
+TIKU_TIER_SRAM_MIN ?= 262144
 endif
+CFLAGS  += -DTIKU_TIER_SRAM_MIN=$(TIKU_TIER_SRAM_MIN)
+CFLAGS  += -DTIKU_TIER_SRAM_DERIVED=1
 CFLAGS += -DTIKU_TIER_NVM_SIZE=16384      # 16 KB NVM tier
 # HTTPS over TCP on Ambiq -- two coupled fixes:
 # (1) BUF_PERSIST=0: put the RX ring + TX pool in regular ZERO-INITIALISED .bss,
@@ -1144,45 +1188,36 @@ CFLAGS += --specs=nano.specs --specs=nosys.specs
 CFLAGS += -I$(PROJ_DIR)
 CFLAGS += -ffunction-sections -fdata-sections -fno-common
 
-# SRAM (AUTO) tier size.  BASIC's program arena is the tier's ONLY consumer,
-# and its size is exact, not an estimate:
+# SRAM (AUTO) tier: linker-derived on nordic like the other ARM ports --
+# RAM2 after the AXON statics on LM20, the primary bank between .bss and the
+# MPU stack budget on L15.  The floor is the guaranteed minimum the BASIC
+# arena is asserted against, and the arena's size is exact, not an estimate:
 #
 #     BASIC_ARENA_BYTES = 148 * TIKU_BASIC_PROGRAM_LINES + 41344
 #
-# (the invariant 41 KB is mostly two fixed reserves -- 16 KB for DIMmed arrays
-# and 16 KB of big buffers -- carried whether a program uses them or not).
-# The tiku_mem.h default is 128 B, so `basic` OOMs at entry without an
-# override.  A _Static_assert in tiku_basic_arena.inl now checks the pool
-# against the request at BUILD time; before v0.06 nothing did, and a short
-# pool produced a clean build that failed on the board.
+# (the invariant 41 KB is mostly two fixed reserves -- 16 KB for DIMmed
+# arrays and 16 KB of big buffers -- carried whether a program uses them or
+# not).  LM20 1400 lines -> 248,544 B; L15 256 lines -> 79,232 B.  One L15
+# value regardless of TIKU_THREADS_ENABLE: the worker/TLS state threads add
+# is .bss and stack, NOT tier allocations, so lowering the floor does not
+# pay for it.
 ifeq ($(TIKU_SHELL_BASIC_ENABLE),1)
 ifneq (,$(filter nrf54lm20a nrf54lm20b,$(MCU)))
-# LM20, 1400 lines -> 248,544 B.  Its tier lives in RAM2 (the upper SRAM bank,
-# linker section .ram2) and so does not compete with the primary bank's
-# .bss/stack at all, which is why the LM20 can afford the largest program
-# capacity outside Apollo510: 248 KB of the 255 KB usable bank (the top 1 KB of
-# RAM2 is unbacked on this silicon), leaving ~5 KB of tier slack.  Threads make
-# no difference here.
-CFLAGS += -DTIKU_TIER_SRAM_SIZE=253952    # 248 KB tier arena in RAM2
+TIKU_TIER_SRAM_MIN ?= 253952
 else
-# L15, 256 lines -> 79,232 B.  One value regardless of TIKU_THREADS_ENABLE:
-# the worker/TLS state threads add is .bss and stack, NOT tier allocations, so
-# shrinking the tier does not pay for it.  The threaded build used to set
-# 65,536 here -- 13.7 KB short of the arena -- from a tally that counted the
-# line table, big buffers and string heap but missed the DIM reserve; `basic`
-# then failed at entry on any threaded L15 image.  96 KB in the single 240 KB
-# application bank still leaves ~56 KB above .bss for the stack, against the
-# linker's 36 KB floor.
-CFLAGS += -DTIKU_TIER_SRAM_SIZE=98304     # 96 KB: BIG-256 BASIC arena
+TIKU_TIER_SRAM_MIN ?= 98304
 endif
 endif
+TIKU_TIER_SRAM_MIN ?= 4096
+CFLAGS += -DTIKU_TIER_SRAM_MIN=$(TIKU_TIER_SRAM_MIN)
+CFLAGS += -DTIKU_TIER_SRAM_DERIVED=1
 
 else ifeq ($(TIKU_PLATFORM),stm32n6)
 
 # STM32N657: Cortex-M55 with Helium, same core as Apollo510. The whole image
 # runs from the 255 KB SRAM window the boot ROM loads it into, so there is no
 # flash region and no XIP -- code, data and stack share that window.  The rest
-# of the 3.75 MB array is claimed separately (see TIKU_TIER_SRAM_SIZE below).
+# of the 3.75 MB array is claimed separately (the linker-carved tier below).
 CFLAGS  = -mcpu=cortex-m55 -mthumb
 CFLAGS += -mfpu=auto -mfloat-abi=hard
 CFLAGS += -Os -Wall -Wextra -Wno-psabi
@@ -1197,15 +1232,17 @@ CFLAGS += -ffunction-sections -fdata-sections
 # tier arena takes 1.5 MB of that (linker section .axisram, woken and zeroed in
 # tiku_crt_early.c), which costs the image window nothing and leaves 512 KB of
 # the block for the NPU-side buffers N6-11 will want.
-CFLAGS += -DTIKU_TIER_SRAM_SIZE=1572864   # 1.5 MB tier arena above the window
+# The tier is linker-derived, so this is the guaranteed minimum, not the size.
+TIKU_TIER_SRAM_MIN ?= 262144
+CFLAGS += -DTIKU_TIER_SRAM_MIN=$(TIKU_TIER_SRAM_MIN)
+CFLAGS += -DTIKU_TIER_SRAM_DERIVED=1
 
 else ifeq ($(TIKU_PLATFORM),ra8p1)
 
 # R7KA8P1KF: Cortex-M85 with Helium, the same ISA the ASR and LLM kernels are
-# written against on the M55 parts.  R2 runs the whole image out of SRAM: the
-# 1 MB of code MRAM is real non-volatile memory, but writing it is R6's
-# milestone, and a port that cannot yet erase safely should not be linking
-# against the region it would erase.
+# written against on the M55 parts.  The image links into the 1 MB of code
+# MRAM, which is byte-writable in place, so a reset re-enters the image
+# rather than the factory one.
 CFLAGS  = -mcpu=cortex-m85 -mthumb
 CFLAGS += -mfpu=auto -mfloat-abi=hard
 CFLAGS += -Os -Wall -Wextra -Wno-psabi
@@ -1213,8 +1250,19 @@ CFLAGS += --specs=nano.specs --specs=nosys.specs
 CFLAGS += -D$(DEVICE_DEFINE)=1
 CFLAGS += -D$(TIKU_BOARD_DEFINE)=1
 CFLAGS += -DPLATFORM_RA8P1=1
+# The software entropy source conditions with SHA-256, so the crypto kit is
+# part of this platform rather than an opt-in: without it `trng` reports no
+# source and cert-TLS has no seed, which is not a choice worth offering on a
+# part whose hardware generator sits behind an unpublished vendor library.
+TIKU_KIT_CRYPTO_ENABLE := 1
 CFLAGS += -I$(PROJ_DIR)
 CFLAGS += -ffunction-sections -fdata-sections
+# The SRAM tier is carved by the linker from what .bss left over, so there is
+# no size on this line -- only the floor the BASIC arena is asserted against,
+# which r7ka8p1kf.ld also asserts the derived span never falls below.
+TIKU_TIER_SRAM_MIN ?= 262144
+CFLAGS  += -DTIKU_TIER_SRAM_MIN=$(TIKU_TIER_SRAM_MIN)
+CFLAGS  += -DTIKU_TIER_SRAM_DERIVED=1
 
 else
 
@@ -1501,6 +1549,15 @@ endif
 
 endif # TIKU_PLATFORM == msp430
 
+# The SRAM-tier floor is single-authored: the TIKU_TIER_SRAM_MIN the BASIC
+# arena is compile-time asserted against travels to the linker as
+# __tier_sram_floor, where arch/common/tiku_sram_layout.ld asserts the carved
+# span never falls below it (the device default stands in for builds that
+# bypass make).
+ifneq (,$(findstring TIKU_TIER_SRAM_DERIVED=1,$(CFLAGS)))
+LDFLAGS += -Wl,--defsym=__tier_sram_floor=$(TIKU_TIER_SRAM_MIN)
+endif
+
 # ---------------------------------------------------------------------------
 # Source files — core OS (always compiled)
 #
@@ -1554,6 +1611,7 @@ SRCS += arch/ra8p1/tiku_crt_early.c
 SRCS += arch/ra8p1/tiku_cpu_freq_boot_arch.c
 SRCS += arch/ra8p1/tiku_cpu_common.c
 SRCS += arch/ra8p1/tiku_uart_arch.c
+SRCS += arch/ra8p1/tiku_trng_arch.c
 SRCS += arch/ra8p1/tiku_gpio_arch.c
 # The tick joins the minimal build here and nowhere else: R2's whole claim is
 # that it counts at 128 Hz against a wall clock, and MINIMAL is the build with
@@ -1567,6 +1625,7 @@ SRCS += arch/ra8p1/tiku_fault_arch.c
 SRCS += arch/ra8p1/tiku_dma_arch.c
 SRCS += arch/ra8p1/tiku_sdram_arch.c
 SRCS += arch/ra8p1/tiku_xflash_arch.c
+SRCS += arch/ra8p1/tiku_npu_arch.c
 # The harness exercises the USB-HS disk and the model store, so it needs the
 # same sources the kernel build gates -- and the same gate, so a board without
 # the connector does not build code it cannot run.
@@ -1715,6 +1774,12 @@ endif
 SRCS += interfaces/bluetooth/tiku_ble_host.c
 # (SMP pairing crypto + engine build with the BLE_ADV capability above, so the
 #  central test peer gets them too -- not gated on the FLPR coprocessor.)
+# The portable coprocessor contract over the FLPR, plus /sys/coproc.  The
+# published message cap must match the FLPR mailbox; the backend's
+# _Static_assert holds the two together.
+SRCS += arch/nordic/tiku_coproc_arch.c           # interfaces/coproc backend
+SRCS += kernel/vfs/tree/tiku_vfs_tree_coproc.c   # /sys/coproc
+CFLAGS += -DTIKU_HAS_COPROC=1 -DTIKU_COPROC_MSG_CAP=240u
 RISCV_PREFIX ?= temp/toolchains/xpack-riscv-none-elf-gcc-15.2.0-1/bin/riscv-none-elf-
 RISCV_CC      = $(RISCV_PREFIX)gcc
 FLPR_BUILD    = $(BUILD_DIR)/flpr
@@ -1832,6 +1897,7 @@ SRCS += arch/ambiq/tiku_gpio_arch.c
 ifeq ($(TIKU_DRV_USB_ENABLE),1)
 SRCS += arch/ambiq/tiku_usb_arch.c
 SRCS += kernel/usb/tiku_usbd_msc.c              # BOT + SCSI (host-tested)
+SRCS += kernel/vfs/tree/tiku_vfs_tree_usb.c     # /sys/usb (no /sys/store here)
 CFLAGS += -DTIKU_DRV_USB_ENABLE=1
 endif
 ifeq ($(TIKU_DRV_EMMC_ENABLE),1)
@@ -1875,7 +1941,9 @@ endif
 endif
 ifeq ($(TIKU_DRV_DC_ENABLE),1)
 SRCS += arch/ambiq/tiku_dc_arch.c
-SRCS += interfaces/display/tiku_display.c    # GPU-accelerated compositor
+SRCS += arch/ambiq/tiku_display_arch.c       # interfaces/display backend
+SRCS += interfaces/display/tiku_display.c    # portable damage tracking
+CFLAGS += -DTIKU_HAS_DISPLAY=1
 endif
 endif
 # No AmbiqSuite sources compiled in (de-SDK complete): system_apollo510.c,
@@ -1938,6 +2006,7 @@ SRCS += arch/ra8p1/tiku_crt_early.c
 SRCS += arch/ra8p1/tiku_cpu_common.c
 SRCS += arch/ra8p1/tiku_cpu_freq_boot_arch.c
 SRCS += arch/ra8p1/tiku_uart_arch.c
+SRCS += arch/ra8p1/tiku_trng_arch.c
 SRCS += arch/ra8p1/tiku_gpio_arch.c
 SRCS += arch/ra8p1/tiku_crit_arch.c
 SRCS += arch/ra8p1/tiku_timer_arch.c
@@ -1958,6 +2027,53 @@ SRCS += arch/ra8p1/tiku_dma_arch.c
 SRCS += arch/ra8p1/tiku_region_arch.c
 SRCS += arch/ra8p1/tiku_sdram_arch.c
 SRCS += arch/ra8p1/tiku_xflash_arch.c
+# Opt-in: the driver's buffers are static, and at the ceiling a real network
+# needs they are the largest .bss on the part.  A build that never loads a
+# model should not carry them.
+# The 2D drawing engine renders into memory and needs no panel, but a build
+# with no display has no use for it -- opt in, like the NPU.
+SRCS += arch/ra8p1/tiku_i2c_arch.c               # IIC1: camera + touch bus
+
+# Camera bring-up rides the same bus; opt-in like every expansion driver.
+ifeq ($(TIKU_DRV_CAM_ENABLE),1)
+SRCS += arch/ra8p1/tiku_camera_arch.c
+SRCS += arch/ra8p1/tiku_vin_arch.c
+CFLAGS += -DTIKU_HAS_CAM=1
+ifeq ($(TIKU_SHELL_ENABLE),1)
+SRCS += kernel/shell/commands/tiku_shell_cmd_cam.c
+endif
+endif
+
+ifeq ($(TIKU_DRV_DRW_ENABLE),1)
+SRCS += arch/ra8p1/tiku_drw_arch.c
+CFLAGS += -DTIKU_HAS_DRW=1
+endif
+
+ifeq ($(TIKU_DRV_GLCDC_ENABLE),1)
+SRCS += arch/ra8p1/tiku_glcdc_arch.c
+CFLAGS += -DTIKU_HAS_GLCDC=1
+# The portable screen needs both halves: the 2D engine draws, the controller
+# scans.  Only wire it when the drawing engine is in too.
+ifeq ($(TIKU_DRV_DRW_ENABLE),1)
+SRCS += arch/ra8p1/tiku_display_arch.c
+SRCS += interfaces/display/tiku_display.c
+CFLAGS += -DTIKU_HAS_DISPLAY=1
+endif
+ifeq ($(TIKU_SHELL_ENABLE),1)
+SRCS += kernel/shell/commands/tiku_shell_cmd_panel.c
+endif
+endif
+
+ifeq ($(TIKU_NPU_ENABLE),1)
+SRCS += arch/ra8p1/tiku_npu_arch.c
+SRCS += arch/ra8p1/tiku_npu_iface.c              # interfaces/npu backend
+SRCS += kernel/vfs/tree/tiku_vfs_tree_npu.c      # /sys/npu
+# Presence is a -D global so every translation unit resolves it identically.
+CFLAGS += -DTIKU_HAS_NPU=1
+ifeq ($(TIKU_SHELL_ENABLE),1)
+SRCS += kernel/shell/commands/tiku_shell_cmd_npu.c
+endif
+endif
 ifeq ($(TIKU_DRV_USBHS_ENABLE),1)
 SRCS += arch/ra8p1/tiku_usbhs_arch.c
 SRCS += arch/ra8p1/tiku_store_arch.c            # staged-over-USB model store
@@ -1966,6 +2082,32 @@ SRCS += kernel/fs/tiku_bigblob.c                # model-sized objects on flash
 SRCS += kernel/vfs/tree/tiku_vfs_tree_usb.c     # /sys/usb + /sys/store
 SRCS += kernel/shell/commands/tiku_shell_cmd_usbhs.c
 CFLAGS += -DTIKU_DRV_USBHS_ENABLE=1
+endif
+ifeq ($(TIKU_DRV_CPU1_ENABLE),1)
+SRCS += arch/ra8p1/tiku_cpu1_arch.c              # Cortex-M33 lifecycle
+SRCS += kernel/shell/commands/tiku_shell_cmd_cpu1.c
+SRCS += arch/ra8p1/tiku_coproc_arch.c            # interfaces/coproc backend
+SRCS += kernel/vfs/tree/tiku_vfs_tree_coproc.c   # /sys/coproc
+SRCS += arch/ra8p1/cpu1/tiku_cpu1_sha256.c       # A/B kernel, M85 side
+SRCS += tikukits/crypto/p256/tiku_kits_crypto_p256.c  # verify baseline
+CFLAGS += -DTIKU_DRV_CPU1_ENABLE=1
+# Presence and capacity are -D globals so every translation unit resolves
+# them the same way; the backend asserts the cap against its own mailbox.
+CFLAGS += -DTIKU_HAS_COPROC=1 -DTIKU_COPROC_MSG_CAP=192u
+# The payload is a separate link for the same ISA, so it uses the same
+# toolchain with its own flags -- notably soft-float, because CPACR is zero
+# out of reset and the first FP instruction would lock the core up.  -Os is
+# load-bearing: the code window is 32 bytes and -O2 overruns it.
+CPU1_BUILD    = $(BUILD_DIR)/cpu1
+CPU1_CFLAGS   = -mcpu=cortex-m33 -mthumb -mfloat-abi=soft -Os -Wall -Wextra \
+                -Werror -ffreestanding -fno-builtin -fno-common -nostdlib \
+                -nostartfiles -ffunction-sections -fdata-sections -MMD -MP \
+                -I$(PROJ_DIR)
+CPU1_OBJS     = $(CPU1_BUILD)/tiku_cpu1_payload.o \
+                $(CPU1_BUILD)/tiku_cpu1_sha256.o \
+                $(CPU1_BUILD)/tiku_cpu1_libc.o \
+                $(CPU1_BUILD)/tiku_kits_crypto_p256.o
+TIKU_CPU1_IMG_O = $(CPU1_BUILD)/tiku_cpu1_img.o
 endif
 SRCS += arch/ra8p1/tiku_wake_arch.c
 SRCS += arch/ra8p1/tiku_htimer_arch.c
@@ -2111,6 +2253,7 @@ SRCS += kernel/memory/tiku_mpu.c
 SRCS += kernel/memory/tiku_persist.c
 SRCS += kernel/memory/tiku_region.c
 SRCS += kernel/memory/tiku_tier.c
+SRCS += kernel/memory/tiku_noheap.c
 SRCS += kernel/memory/tiku_nvm_region.c
 SRCS += kernel/memory/tiku_cache.c
 SRCS += kernel/memory/tiku_hibernate.c
@@ -2287,6 +2430,12 @@ else
 $(error TIKU_BASIC_MODULE_ENABLE=1: no module slot for MCU=$(MCU) \
         (supported: nrf54lm20a nrf54lm20b nrf54l15 rp2350 apollo510 \
         apollo510b apollo4l apollo4p msp430fr5994 msp430fr6989))
+endif
+# The slot is the top 32 KB of the code window, reserved at link time only
+# when this loader is in the build.  apollo510 executes modules from the
+# ITCM and MSP430 keeps its own HIFRAM scheme, so neither reserves anything.
+ifeq (,$(filter apollo510 apollo510b msp430fr5994 msp430fr6989,$(MCU)))
+LDFLAGS += -Wl,--defsym=__tiku_module_reserve=0x8000
 endif
 MOD_CFLAGS     = $(MOD_CPU_FLAGS) -Os -ffreestanding \
                  -fno-builtin -fno-jump-tables -DTIKU_MODULE_BUILD=1 \
@@ -3096,6 +3245,11 @@ ifeq ($(TIKU_FLPR_ENABLE),1)
 OBJS += $(TIKU_FLPR_IMG_O)
 endif
 
+ifeq ($(TIKU_DRV_CPU1_ENABLE),1)
+# Embedded Cortex-M33 payload (recipes below `all:`, same reason).
+OBJS += $(TIKU_CPU1_IMG_O)
+endif
+
 ifeq ($(TIKU_BASIC_MODULE_ENABLE),1)
 # Embedded loadable-module image (recipes below `all:`).
 OBJS += $(TIKU_MOD_IMG_O)
@@ -3126,7 +3280,12 @@ TARGET = main.elf
 lint:
 	@rc=0; \
 	 ./tools/check_durable_placement.sh || rc=1; \
-	 ./tools/check_comment_style.py || rc=1; \
+	 if [ -x ./hygiene/check_comment_style.py ]; then \
+	   ./hygiene/check_comment_style.py || rc=1; \
+	 else \
+	   echo "check_comment_style: SKIPPED -- no hygiene/ in this working copy"; \
+	   echo "  comment style is UNCHECKED; see hygiene/commentstyle.md"; \
+	 fi; \
 	 exit $$rc
 
 # UF2 is the RP2350 deliverable; ELF is enough on MSP430.
@@ -3170,7 +3329,14 @@ $(PLATFORM_STAMP):
 # same MCU drops that build dir's objects rather than shipping stale ones.  It
 # exists for host-side tooling links (see the packing-only code-cap override in
 # the Nordic linker script), not as a way to reshape a shipped image.
-$(TARGET): $(OBJS) $(PLATFORM_STAMP) $(NOSYS_FIXED)
+# The linker script is a real input: edit a carve, a region or an ASSERT in one
+# and the image must be re-linked.  Absent from this list, make sees main.elf
+# newer than every object and skips the link, so the edit has no effect and the
+# stale image is what gets tested.  Derived from LDFLAGS so a platform adding a
+# -T is covered without a second list to keep in step.
+TIKU_LDSCRIPTS := $(patsubst -T%,%,$(filter -T%,$(LDFLAGS)))
+
+$(TARGET): $(OBJS) $(PLATFORM_STAMP) $(NOSYS_FIXED) $(TIKU_LDSCRIPTS)
 	$(CC) $(LDFLAGS) $(EXTRA_LDFLAGS) -o $@ $(OBJS) $(LDLIBS)
 
 $(BUILD_DIR)/%.o: %.c
@@ -3310,6 +3476,38 @@ $(TIKU_FLPR_IMG_O): $(FLPR_BUILD)/tiku_flpr.bin
 	    tiku_flpr.bin tiku_flpr_img.o
 
 -include $(FLPR_OBJS:.o=.d)
+endif
+
+# ---------------------------------------------------------------------------
+# Cortex-M33 payload sub-build: same toolchain as the M85 image but its own
+# flags, linker script and link, flattened to a binary and wrapped as an ARM
+# object whose _binary_tiku_cpu1_bin_* symbols tiku_cpu1_arch.c copies from.
+# The wrap runs from INSIDE the build dir so the symbol names come from the
+# bare file name rather than a path carrying the MCU.
+# ---------------------------------------------------------------------------
+ifeq ($(TIKU_DRV_CPU1_ENABLE),1)
+$(CPU1_BUILD)/%.o: arch/ra8p1/cpu1/%.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CPU1_CFLAGS) -c -o $@ $<
+
+$(CPU1_BUILD)/tiku_kits_crypto_p256.o: tikukits/crypto/p256/tiku_kits_crypto_p256.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CPU1_CFLAGS) -c -o $@ $<
+
+$(CPU1_BUILD)/tiku_cpu1.elf: $(CPU1_OBJS) arch/ra8p1/cpu1/tiku_cpu1.ld
+	$(CC) $(CPU1_CFLAGS) -T arch/ra8p1/cpu1/tiku_cpu1.ld \
+	    -Wl,--gc-sections -o $@ $(CPU1_OBJS)
+
+$(CPU1_BUILD)/tiku_cpu1.bin: $(CPU1_BUILD)/tiku_cpu1.elf
+	$(OBJCOPY) -O binary --gap-fill 0 $< $@
+	@echo "  [cpu1]  $$(stat -c%s $@) bytes"
+
+$(TIKU_CPU1_IMG_O): $(CPU1_BUILD)/tiku_cpu1.bin
+	cd $(CPU1_BUILD) && $(OBJCOPY) -I binary -O elf32-littlearm -B arm \
+	    --rename-section .data=.rodata,alloc,load,readonly,data,contents \
+	    tiku_cpu1.bin tiku_cpu1_img.o
+
+-include $(CPU1_OBJS:.o=.d)
 endif
 
 # Loadable-module sub-build: separately-compiled ARM module at the NVM slot

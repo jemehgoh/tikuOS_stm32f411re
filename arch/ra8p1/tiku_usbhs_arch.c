@@ -22,7 +22,7 @@
 #include "tiku_store_arch.h"
 
 /*
- * THE CLOCK QUESTION, SETTLED BY THE MANUAL RATHER THAN BY FAMILY RESEMBLANCE.
+ * The clock comes from the manual, not from family resemblance.
  *
  * Every other fast peripheral on this part hides a private clock register
  * behind the PRCR lock -- SCICKCR, GTCLKCR, MRCPC1, SDCKOCR, OCTACKCR -- and
@@ -318,9 +318,9 @@ static const uint8_t desc_lang[4] = { 4U, USBD_DESC_STRING, 0x09U, 0x04U };
  */
 typedef struct {
     uint16_t req, val, len, ctsq;
-    uint16_t dcp_wr, ctr_wr;   /* state right after the bytes were written */
-    uint16_t spins;            /* how long BEMP took; 0 = it was already set */
-    uint16_t dcp_pre, dcp_post; /* around the status-stage completion        */
+    uint16_t dcp_wr, ctr_wr;    /* DCPCTR/CFIFOCTR once the bytes are in   */
+    uint16_t spins;             /* FRDY handshake cost, 0xFFFF if unreached */
+    uint16_t dcp_pre, dcp_post; /* DCPCTR either side of CCPL              */
     uint8_t  sel_ok, sent_ok;
 } ep0_trace_t;
 
@@ -426,6 +426,9 @@ static int dcp_select(int writing)
      */
     for (spins = 0U; spins < 2000U; spins++) {
         if ((TIKU_REG16(RA8P1_USBHS_CFIFOCTR) & RA8P1_CFIFOCTR_FRDY) != 0U) {
+            if (tr != NULL) {
+                tr->spins = (uint16_t)spins;
+            }
             return 1;
         }
     }
@@ -446,7 +449,7 @@ static void ep0_stall(void)
     n_stall++;
 }
 
-/** @brief Finish a transfer that carries no data of ours. */
+/** @brief Finish a control transfer that has no data stage. */
 static void ep0_ack(void)
 {
     dcp_pid(RA8P1_DCPCTR_PID_BUF);
@@ -454,15 +457,8 @@ static void ep0_ack(void)
         (uint16_t)(TIKU_REG16(RA8P1_USBHS_DCPCTR) | RA8P1_DCPCTR_CCPL);
 }
 
-/**
- * @brief Send up to @p wlen bytes of @p p, then complete the transfer.
- *
- * @param p    bytes to send
- * @param len  how many exist
- * @param wlen how many the host asked for
- */
 /*
- * THE DATA STAGE CANNOT BLOCK, BECAUSE IT RUNS IN THE ISR.
+ * The data stage cannot block, because it runs in the ISR.
  *
  * Queueing a packet only makes it available for the next IN token; the host
  * still has to ask, and it asks on its own schedule.  Waiting for that in
@@ -505,6 +501,11 @@ static void ep0_tx_push(void)
                        RA8P1_CFIFOCTR_BVAL);
     }
     dcp_pid(RA8P1_DCPCTR_PID_BUF);
+
+    if (tr != NULL) {
+        tr->dcp_wr = TIKU_REG16(RA8P1_USBHS_DCPCTR);
+        tr->ctr_wr = TIKU_REG16(RA8P1_USBHS_CFIFOCTR);
+    }
 }
 
 /**
@@ -548,10 +549,16 @@ static void ep0_tx_done(void)
 
     /* Data delivered; the hardware runs the status stage from here.  CCPL
      * only takes effect while PID is BUF, so both go down together. */
+    if (tr != NULL) {
+        tr->dcp_pre = TIKU_REG16(RA8P1_USBHS_DCPCTR);
+    }
     TIKU_REG16(RA8P1_USBHS_DCPCTR) =
         (uint16_t)((TIKU_REG16(RA8P1_USBHS_DCPCTR) &
                     ~(uint16_t)RA8P1_DCPCTR_PID_MASK) |
                    RA8P1_DCPCTR_PID_BUF | RA8P1_DCPCTR_CCPL);
+    if (tr != NULL) {
+        tr->dcp_post = TIKU_REG16(RA8P1_USBHS_DCPCTR);
+    }
 }
 
 /** @brief GET_DESCRIPTOR, the request enumeration is mostly made of. */
@@ -600,15 +607,13 @@ static void ep0_on_setup(uint16_t sts)
     uint8_t type, request;
 
     /*
-     * TRIGGER ON THE STAGE TRANSITION, NOT ON VALID.
+     * The trigger is the stage transition, not VALID.
      *
      * VALID is set when the setup PACKET arrives, but the manual is careful
      * about the order: the request parameters are stored "when the USBHS
      * receives a data packet FOLLOWING a setup packet".  A poll loop tight
      * enough to land between those two reads USBREQ before it means anything
-     * and dispatches on a request the host never sent -- observed directly,
-     * as bmRequestType/bRequest pairs of 0x00/0x00 and 0x40/0x00 in a trace
-     * where the host was only ever sending GET_DESCRIPTOR.
+     * and dispatches on a request the host never sent.
      *
      * CTRT fires on the stage transition, by which time CTSQ names the stage
      * and the four request registers are populated.  That is the documented
@@ -761,7 +766,7 @@ static void ep0_on_setup(uint16_t sts)
 }
 
 /*
- * ONE EVENT LINE CARRIES EVERY SOURCE.  USBHS_USBIR aggregates VBUS, resume,
+ * One event line carries every source: USBHS_USBIR aggregates VBUS, resume,
  * frame, device state, control-stage and buffer interrupts, so an edge says
  * only "something happened" -- a handler that services one cause and returns
  * leaves the rest pending behind an edge that will not repeat, and the device
@@ -1008,15 +1013,15 @@ static uint32_t pipe_read(uint8_t *dst, uint32_t cap)
     }
 
     /*
-     * READING ALL OF IT IS WHAT RELEASES IT.  The manual is explicit: with
+     * The buffer is released by reading all of it.  The manual is explicit:
+     * with
      * RCNT = 0 the controller holds DTLN "until the CPU has read all of the
      * received data in the FIFO buffer (or until it has read a single plane
      * in double buffer mode)".  So a BCLR issued after a COMPLETE read does
      * not tidy up -- it discards the next plane, which under double
      * buffering is the packet that already arrived while this one was being
      * copied.  Every second packet then vanishes, the byte count stops
-     * advancing, and the transfer never finishes: observed as a host dd that
-     * sat for forty minutes having moved zero bytes.
+     * advancing, and the transfer never finishes.
      *
      * BCLR is therefore only for the case it is named for: throwing away
      * what will not fit.
@@ -1111,7 +1116,7 @@ static int msc_recv_blocks(uint32_t lba, uint32_t bytes)
         }
         n = pipe_read(&p[got], bytes - got);
         /*
-         * NO PROGRESS MEANS STOP.  A ready pipe that yields nothing is a
+         * No progress means stop.  A ready pipe that yields nothing is a
          * state this cannot argue its way out of, and continuing turns it
          * into a hang -- which is strictly worse than a failed command,
          * because the host cannot even time out and retry a device whose
@@ -1148,7 +1153,7 @@ void tiku_ra8p1_usbhs_msc_poll(void)
     n_cbw++;
     last_ops[last_op_i & 3u] = cbw.cdb[0];
     /*
-     * ONE WRITER AT A TIME, ENFORCED HERE.  An import is reading the staging
+     * One writer at a time, enforced here.  An import is reading the staging
      * window for minutes; a host write landing in it meanwhile would be
      * published as part of a model it was never part of.  NOT READY is the
      * sense a host understands as "ask again shortly".
