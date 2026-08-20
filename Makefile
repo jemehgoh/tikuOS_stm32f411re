@@ -1606,6 +1606,7 @@ SRCS += arch/stm32n6/tiku_cpu_freq_boot_arch.c
 SRCS += arch/stm32n6/tiku_cpu_common.c
 SRCS += arch/stm32n6/tiku_uart_arch.c
 SRCS += arch/stm32n6/tiku_gpio_arch.c
+SRCS += arch/stm32n6/tiku_dcmipp_arch.c
 else ifeq ($(TIKU_PLATFORM),ra8p1)
 SRCS += arch/ra8p1/tiku_crt_early.c
 SRCS += arch/ra8p1/tiku_cpu_freq_boot_arch.c
@@ -1970,6 +1971,7 @@ SRCS += arch/stm32n6/tiku_gpio_irq_arch.c
 SRCS += arch/stm32n6/tiku_trng_arch.c
 SRCS += arch/stm32n6/tiku_lcd_arch.c
 SRCS += arch/stm32n6/tiku_dma_arch.c
+SRCS += arch/stm32n6/tiku_dcmipp_arch.c
 SRCS += arch/stm32n6/tiku_pwm_arch.c
 SRCS += arch/stm32n6/tiku_xspi_arch.c
 SRCS += arch/stm32n6/tiku_sram_arch.c

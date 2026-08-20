@@ -77,6 +77,8 @@ void tiku_stm32n6_systick_handler(void)     __attribute__((weak, alias("stm32n6_
 /* External IRQs the port wires. The timer driver supplies the real LPTIM1
  * handler; the weak stub keeps builds that leave it out linking. */
 void tiku_stm32n6_lptim1_isr(void)          __attribute__((weak, alias("stm32n6_default_handler")));
+void tiku_stm32n6_csi_isr(void)             __attribute__((weak, alias("stm32n6_default_handler")));
+void tiku_stm32n6_dcmipp_isr(void)          __attribute__((weak, alias("stm32n6_default_handler")));
 void tiku_stm32n6_gpdma_ch0_isr(void)       __attribute__((weak, alias("stm32n6_default_handler")));
 
 /* One EXTI vector per line, so a handler never has to scan for its own line. */
@@ -190,6 +192,8 @@ const stm32n6_isr_t tiku_stm32n6_vectors[16 + STM32N6_NUM_EXT_IRQS] = {
 
     /* Named handlers last: a designated initializer overrides the positional
      * default already written at that index. */
+    [16 + STM32N6_IRQ_CSI]        = tiku_stm32n6_csi_isr,
+    [16 + STM32N6_IRQ_DCMIPP]     = tiku_stm32n6_dcmipp_isr,
     [16 + STM32N6_IRQ_LPTIM1]     = tiku_stm32n6_lptim1_isr,
     [16 + STM32N6_IRQ_GPDMA1_CH0] = tiku_stm32n6_gpdma_ch0_isr,
 
