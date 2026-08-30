@@ -83,6 +83,20 @@ uint32_t tiku_stm32n6_sram_enabled_mask(void) {
     return sram_enabled_mask;
 }
 
+int tiku_stm32n6_sram_npu_powered(void) {
+    if ((sram_enabled_mask & ((1UL << 0) | (1UL << 1) |
+                              (1UL << 2) | (1UL << 3))) !=
+        ((1UL << 0) | (1UL << 1) | (1UL << 2) | (1UL << 3))) {
+        return 0;
+    }
+    for (unsigned bank = 3U; bank <= 6U; bank++) {
+        if ((TIKU_REG32(RAMCFG_CR(bank)) & RAMCFG_CR_SRAMSD) != 0U) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
 #if defined(TIKU_N6_SRAM_PROBE)
 
 #include "tiku_uart_arch.h"

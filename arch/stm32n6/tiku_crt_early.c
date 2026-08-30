@@ -80,6 +80,7 @@ void tiku_stm32n6_lptim1_isr(void)          __attribute__((weak, alias("stm32n6_
 void tiku_stm32n6_csi_isr(void)             __attribute__((weak, alias("stm32n6_default_handler")));
 void tiku_stm32n6_dcmipp_isr(void)          __attribute__((weak, alias("stm32n6_default_handler")));
 void tiku_stm32n6_gpdma_ch0_isr(void)       __attribute__((weak, alias("stm32n6_default_handler")));
+void tiku_stm32n6_npu_end_of_epoch_isr(void) __attribute__((weak, alias("stm32n6_default_handler")));
 
 /* One EXTI vector per line, so a handler never has to scan for its own line. */
 #define EXTI_WEAK(n) \
@@ -196,6 +197,7 @@ const stm32n6_isr_t tiku_stm32n6_vectors[16 + STM32N6_NUM_EXT_IRQS] = {
     [16 + STM32N6_IRQ_DCMIPP]     = tiku_stm32n6_dcmipp_isr,
     [16 + STM32N6_IRQ_LPTIM1]     = tiku_stm32n6_lptim1_isr,
     [16 + STM32N6_IRQ_GPDMA1_CH0] = tiku_stm32n6_gpdma_ch0_isr,
+    [16 + STM32N6_IRQ_NPU_END_OF_EPOCH] = tiku_stm32n6_npu_end_of_epoch_isr,
 
     [16 + STM32N6_IRQ_EXTI0 +  0] = tiku_stm32n6_exti0_isr,
     [16 + STM32N6_IRQ_EXTI0 +  1] = tiku_stm32n6_exti1_isr,

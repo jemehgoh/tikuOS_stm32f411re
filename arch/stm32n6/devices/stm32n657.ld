@@ -123,7 +123,7 @@ SECTIONS
     } > AXISRAM
 
     /*
-     * SRAM TIER -- the rest of this bank, less a small reserve.
+     * SRAM TIER -- the general-purpose span ends before the NPU carve.
      *
      * Derived rather than compiled in, for the reason the RA8P1 script gives:
      * a constant has to be chosen per build configuration and silently stops
@@ -131,16 +131,33 @@ SECTIONS
      * section also keeps the span out of the crt's zero loop, which the
      * allocator has never needed.
      *
-     * The reserve protects nothing here: the stack lives in the image window
-     * and nothing sits above the tier in this bank.  The figure is arbitrary,
-     * kept equal to the stack-side ports' margin; reclaim it if the capacity
-     * is wanted.
+     * The NPU extent is deliberately separate from the general-purpose tiers:
+     * Neural-ART/runtime buffers have a device-specific lifetime and alignment
+     * contract, so they must not consume or fragment memory used by the OS.
+     * Its size is supplied by TIKU_TIER_NPU_SIZE at build time and forwarded
+     * as __tier_npu_size by the Makefile.
      */
+    __tiku_npu_tier_size       = DEFINED(__tier_npu_size)
+                                  ? __tier_npu_size : 0;
+    ASSERT((__tiku_npu_tier_size > 0) &&
+           (__tiku_npu_tier_size <= LENGTH(AXISRAM)) &&
+           ((__tiku_npu_tier_size % 32) == 0),
+           "TIKU_TIER_NPU_SIZE must be a positive multiple of 32 within AXISRAM")
     __tiku_tier_span_start      = __axisram_top;
-    __tiku_tier_span_limit      = ORIGIN(AXISRAM) + LENGTH(AXISRAM);
-    __tiku_tier_reserve_default = 32K;
+    __tiku_npu_tier_start       = ORIGIN(AXISRAM) + LENGTH(AXISRAM) -
+                                  __tiku_npu_tier_size;
+    __tiku_npu_tier_end         = ORIGIN(AXISRAM) + LENGTH(AXISRAM);
+    __tiku_tier_span_limit      = __tiku_npu_tier_start;
+    __tiku_tier_reserve_default = 0;
     __tiku_tier_floor_default   = 0x40000;
     INCLUDE arch/common/tiku_sram_layout.ld
+
+    __tier_npu_start = __tiku_npu_tier_start;
+    __tier_npu_end   = __tiku_npu_tier_end;
+    ASSERT(__tier_sram_end <= __tier_npu_start,
+           "general SRAM tier overlaps the reserved NPU extent")
+    ASSERT((__tier_npu_end - __tier_npu_start) == __tiku_npu_tier_size,
+           "reserved NPU extent does not match TIKU_TIER_NPU_SIZE")
 
     _end = __uninit_end;
     PROVIDE(end = _end);

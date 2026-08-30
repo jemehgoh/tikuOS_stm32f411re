@@ -19,6 +19,7 @@
 #include <stdint.h>
 
 #define TIKU_REG32(a)               (*(volatile uint32_t *)(uintptr_t)(a))
+#define TIKU_REG8(a)                (*(volatile uint8_t *)(uintptr_t)(a))
 
 /* Reset and clock control. */
 #define STM32N6_RCC_BASE            0x46028000UL
@@ -149,6 +150,7 @@
 #define STM32N6_LPTIM_CR_CNTSTRT    (1UL << 2)
 
 #define STM32N6_IRQ_LPTIM1          136U
+#define STM32N6_IRQ_NPU_END_OF_EPOCH 53U
 
 /* HPDMA: sixteen channels, 0x80 apart. Driven through the SECURE alias (bit
  * 28 set): the image lives at 0x341xxxxx, the secure alias of AXISRAM, so the
@@ -157,6 +159,40 @@
  * is only accepted when it arrives as a secure access. */
 #define STM32N6_RCC_AHB5ENR         (STM32N6_RCC_BASE + 0x260U)
 #define STM32N6_RCC_AHB5ENR_HPDMA1  (1UL << 0)
+#define STM32N6_RCC_AHB5ENR_NPU     (1UL << 31)
+
+/* Neural-ART is exposed through the secure peripheral alias used by the
+ * rest of this port.  The epoch controller is a register window inside NPU;
+ * this scaffolding only maps and reads it, leaving execution disabled. */
+#define STM32N6_NPU_BASE            0x580E0000UL
+#define STM32N6_ATON_CLKCTRL_CTRL     (STM32N6_NPU_BASE + 0x00U)
+#define STM32N6_ATON_CLKCTRL_AGATES0  (STM32N6_NPU_BASE + 0x08U)
+#define STM32N6_ATON_CLKCTRL_AGATES1  (STM32N6_NPU_BASE + 0x0CU)
+#define STM32N6_ATON_CLKCTRL_BGATES   (STM32N6_NPU_BASE + 0x10U)
+#define STM32N6_ATON_CLKCTRL_CTRL_EN  (1UL << 0)
+#define STM32N6_ATON_CLKCTRL_CTRL_CLR (1UL << 1)
+#define STM32N6_NPU_INTCTRL_BASE    (STM32N6_NPU_BASE + 0x1000UL)
+#define STM32N6_NPU_INTCTRL_CTRL    (STM32N6_NPU_INTCTRL_BASE + 0x00U)
+#define STM32N6_NPU_INTCTRL_INTREG  (STM32N6_NPU_INTCTRL_BASE + 0x08U)
+#define STM32N6_NPU_INTCTRL_INTCLR  (STM32N6_NPU_INTCTRL_BASE + 0x10U)
+#define STM32N6_NPU_INTCTRL_INTORMSK0 (STM32N6_NPU_INTCTRL_BASE + 0x14U)
+#define STM32N6_NPU_INTCTRL_INTANDMSK0 (STM32N6_NPU_INTCTRL_BASE + 0x24U)
+#define STM32N6_NPU_INTCTRL_CTRL_EN (1UL << 0)
+#define STM32N6_NPU_INTCTRL_CTRL_CLR (1UL << 1)
+#define STM32N6_NPU_INTCTRL_EPOCH0_INT (1UL << 28)
+#define STM32N6_EPOCHCTRL_BASE      (STM32N6_NPU_BASE + 0x1E000UL)
+#define STM32N6_EPOCHCTRL_CTRL      (STM32N6_EPOCHCTRL_BASE + 0x00U)
+#define STM32N6_EPOCHCTRL_VERSION   (STM32N6_EPOCHCTRL_BASE + 0x04U)
+#define STM32N6_EPOCHCTRL_ADDR      (STM32N6_EPOCHCTRL_BASE + 0x08U)
+#define STM32N6_EPOCHCTRL_IRQ      (STM32N6_EPOCHCTRL_BASE + 0x0CU)
+#define STM32N6_EPOCHCTRL_BC       (STM32N6_EPOCHCTRL_BASE + 0x20U)
+#define STM32N6_EPOCHCTRL_CTRL_EN  (1UL << 0)
+#define STM32N6_EPOCHCTRL_CTRL_CLR (1UL << 1)
+#define STM32N6_EPOCHCTRL_CTRL_SM  (1UL << 3)
+#define STM32N6_EPOCHCTRL_CTRL_CONFCLR (1UL << 30)
+#define STM32N6_EPOCHCTRL_CTRL_RUNNING (1UL << 31)
+#define STM32N6_EPOCHCTRL_IRQ_DONE (1UL << 0)
+#define STM32N6_EPOCHCTRL_IRQ_STEP (1UL << 16)
 
 #define STM32N6_GPDMA_BASE          0x58020000UL
 #define STM32N6_GPDMA_SECCFGR       (STM32N6_GPDMA_BASE + 0x00U)

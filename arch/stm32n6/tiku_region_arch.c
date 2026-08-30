@@ -22,6 +22,8 @@ extern uint32_t _end;       /* end of the image, including durable cells */
 extern uint32_t __stack;    /* top of the window; the stack grows down from here */
 extern uint32_t __axisram_start;    /* bank base, above the image window */
 extern uint32_t __tier_sram_end;    /* top of the linker-carved tier span  */
+extern uint32_t __tier_npu_start;   /* start of the reserved NPU extent */
+extern uint32_t __tier_npu_end;     /* end of the reserved NPU extent */
 
 /* Headroom left for the stack between the free region and __stack. The whole
  * image lives in the same window as the heap on this part, so a region that
@@ -29,7 +31,7 @@ extern uint32_t __tier_sram_end;    /* top of the linker-carved tier span  */
 #define STM32N6_STACK_RESERVE   (16UL * 1024UL)
 
 /** @brief Built on first call; zero count means not yet populated. */
-static tiku_mem_region_t stm32n6_region_table[3];
+static tiku_mem_region_t stm32n6_region_table[4];
 static tiku_mem_arch_size_t stm32n6_region_count;
 
 /**
@@ -72,6 +74,19 @@ const struct tiku_mem_region *tiku_region_arch_get_table(
             stm32n6_region_table[idx].base = (const uint8_t *)arena_start;
             stm32n6_region_table[idx].size =
                 (tiku_mem_arch_size_t)(arena_end - arena_start);
+            stm32n6_region_table[idx].type = TIKU_MEM_REGION_SRAM;
+            idx++;
+        }
+
+        /* Keep the NPU carve visible as its own physical region.  The tier
+         * allocator also registers it explicitly, but this entry makes the
+         * address boundary inspectable by generic region diagnostics. */
+        uintptr_t npu_start = (uintptr_t)&__tier_npu_start;
+        uintptr_t npu_end   = (uintptr_t)&__tier_npu_end;
+        if (npu_end > npu_start) {
+            stm32n6_region_table[idx].base = (const uint8_t *)npu_start;
+            stm32n6_region_table[idx].size =
+                (tiku_mem_arch_size_t)(npu_end - npu_start);
             stm32n6_region_table[idx].type = TIKU_MEM_REGION_SRAM;
             idx++;
         }

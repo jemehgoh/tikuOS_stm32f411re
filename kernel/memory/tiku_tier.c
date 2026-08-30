@@ -202,6 +202,28 @@ tiku_mem_err_t tiku_tier_attach_psram(void *base, tiku_mem_arch_size_t size)
     return TIKU_MEM_OK;
 }
 
+/*---------------------------------------------------------------------------*/
+/* NPU TIER -- reserved extent, attached by the STM32N6 bring-up             */
+/*---------------------------------------------------------------------------*/
+
+tiku_mem_err_t tiku_tier_attach_npu(void *base, tiku_mem_arch_size_t size)
+{
+    if (base == NULL || size == 0u) {
+        return TIKU_MEM_ERR_INVALID;
+    }
+    if (tier_state[TIKU_MEM_NPU].initialized) {
+        return TIKU_MEM_ERR_INVALID;    /* already registered */
+    }
+    tier_state[TIKU_MEM_NPU].buf         = (uint8_t *)base;
+    tier_state[TIKU_MEM_NPU].capacity    = size;
+    tier_state[TIKU_MEM_NPU].offset      = 0;
+    tier_state[TIKU_MEM_NPU].peak        = 0;
+    tier_state[TIKU_MEM_NPU].alloc_count = 0;
+    tier_state[TIKU_MEM_NPU].fail_count  = 0;
+    tier_state[TIKU_MEM_NPU].initialized = 1;
+    return TIKU_MEM_OK;
+}
+
 tiku_mem_err_t tiku_tier_detach_psram(int force)
 {
     if (!tier_state[TIKU_MEM_PSRAM].initialized) {
@@ -237,6 +259,13 @@ tiku_mem_err_t tiku_tier_detach_psram(int force)
 
 static void tier_wire_all(void)
 {
+    /* NPU is a boot-time registration, not a static array.  Preserve its
+     * linker-owned extent across an explicit tier reset, while rewinding the
+     * bump pointer just like every other tier. */
+    uint8_t *npu_buf = tier_state[TIKU_MEM_NPU].buf;
+    tiku_mem_arch_size_t npu_capacity = tier_state[TIKU_MEM_NPU].capacity;
+    uint8_t npu_registered = tier_state[TIKU_MEM_NPU].initialized;
+
     /* PSRAM: never wired at boot -- it is a LATE-ATTACH tier owned by the
      * PSRAM lifecycle (tiku_tier_attach_psram).  A tiku_tier_reset() drops
      * any attachment, which is correct: reset means clean slate. */
@@ -244,6 +273,24 @@ static void tier_wire_all(void)
     tier_state[TIKU_MEM_PSRAM].buf         = NULL;
     tier_state[TIKU_MEM_PSRAM].capacity    = 0;
     tier_state[TIKU_MEM_PSRAM].offset      = 0;
+
+    if (npu_registered) {
+        tier_state[TIKU_MEM_NPU].buf         = npu_buf;
+        tier_state[TIKU_MEM_NPU].capacity    = npu_capacity;
+        tier_state[TIKU_MEM_NPU].offset      = 0;
+        tier_state[TIKU_MEM_NPU].peak        = 0;
+        tier_state[TIKU_MEM_NPU].alloc_count = 0;
+        tier_state[TIKU_MEM_NPU].fail_count  = 0;
+        tier_state[TIKU_MEM_NPU].initialized = 1;
+    } else {
+        tier_state[TIKU_MEM_NPU].buf         = NULL;
+        tier_state[TIKU_MEM_NPU].capacity    = 0;
+        tier_state[TIKU_MEM_NPU].offset      = 0;
+        tier_state[TIKU_MEM_NPU].peak        = 0;
+        tier_state[TIKU_MEM_NPU].alloc_count = 0;
+        tier_state[TIKU_MEM_NPU].fail_count  = 0;
+        tier_state[TIKU_MEM_NPU].initialized = 0;
+    }
 
     tier_state[TIKU_MEM_SRAM].buf         = TIER_SRAM_BUF;
     tier_state[TIKU_MEM_SRAM].capacity    = TIER_SRAM_CAP;
@@ -619,7 +666,7 @@ tiku_mem_err_t tiku_tier_get(const uint8_t *ptr,
     /* Check the tier allocator's own backing pools first.
      * This works on both host and target — the backing pools may
      * not be in the platform's region table on host. The loop covers
-     * every concrete tier (SRAM, NVM, HIFRAM) and skips AUTO, which
+     * every concrete tier (SRAM, NVM, HIFRAM, PSRAM and NPU) and skips AUTO, which
      * never has its own backing pool. */
     for (i = 0; i < TIKU_MEM_TIER_COUNT; i++) {
         if (i == TIKU_MEM_AUTO) {
@@ -671,7 +718,7 @@ tiku_mem_err_t tiku_tier_get(const uint8_t *ptr,
  * lifetime peak and the sub-allocation count.  AUTO has no pool and is
  * rejected, as is a concrete tier that was never initialised.
  *
- * @param tier   Memory tier to query (SRAM, NVM, or HIFRAM; not AUTO)
+ * @param tier   Memory tier to query (a concrete tier, not AUTO)
  * @param stats  Output statistics (must be non-NULL)
  * @return TIKU_MEM_OK on success, TIKU_MEM_ERR_INVALID if stats is
  *         NULL, tier is AUTO/out of range, or the tier is uninitialized
@@ -694,13 +741,15 @@ tiku_mem_err_t tiku_tier_stats(tiku_mem_tier_t tier,
     if (tier != TIKU_MEM_SRAM &&
         tier != TIKU_MEM_NVM &&
         tier != TIKU_MEM_HIFRAM &&
-        tier != TIKU_MEM_PSRAM) {
+        tier != TIKU_MEM_PSRAM &&
+        tier != TIKU_MEM_NPU) {
         return TIKU_MEM_ERR_INVALID;
     }
 
     ts = &tier_state[tier];
     if (!ts->initialized) {
-        /* HIFRAM on a non-HIFRAM build, PSRAM before `power psram up`, or an
+        /* HIFRAM on a non-HIFRAM build, PSRAM before `power psram up`, NPU
+         * before STM32N6 bring-up, or an
          * as-yet-uninited tier — all report "not available" the same way. */
         return TIKU_MEM_ERR_INVALID;
     }

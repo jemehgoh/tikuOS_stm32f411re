@@ -177,17 +177,21 @@ typedef enum {
     TIKU_MEM_NVM    = 1, /**< Persistent, slower writes — for cold/stable data */
     TIKU_MEM_AUTO   = 2, /**< OS selects: prefers SRAM, falls back to NVM/HIFRAM */
     TIKU_MEM_HIFRAM = 3, /**< Upper FRAM bank (FR5994/FR6989, MEMORY_MODEL=large) */
-    TIKU_MEM_PSRAM  = 4  /**< External PSRAM aperture, late-attached: it exists only while the device is
+    TIKU_MEM_PSRAM  = 4, /**< External PSRAM aperture, late-attached: it exists only while the device is
                               attached and mapped.  Volatile, and never chosen by
                               AUTO -- a tier whose backing can vanish must be
                               asked for by name. */
+    TIKU_MEM_NPU    = 5  /**< Dedicated volatile extent reserved for NPU-owned
+                              buffers.  Explicit-only: model/runtime memory
+                              must not compete with general-purpose SRAM. */
 } tiku_mem_tier_t;
 
-/* Internal: the highest concrete tier value, for tier_state[] sizing.
+/* Internal: one past the highest concrete tier value, for tier_state[] sizing.
  * AUTO sits at index 2 but never indexes the array -- it resolves to a
  * concrete tier first. The 32 B of wasted slot-2 state is the price of
- * keeping AUTO=2 stable across releases. */
-#define TIKU_MEM_TIER_COUNT  5
+ * keeping AUTO=2 stable across releases. NPU is explicit-only and is never
+ * selected by AUTO. */
+#define TIKU_MEM_TIER_COUNT  6
 
 /*---------------------------------------------------------------------------*/
 /* STATISTICS                                                                */
@@ -1151,6 +1155,15 @@ uint32_t tiku_mpu_get_last_fault_addr(void);
 #define TIKU_TIER_SRAM_SIZE  128
 #endif
 
+/**
+ * Size of the dedicated NPU tier in bytes.  STM32N6 overrides this from the
+ * Makefile and passes the same value to the linker; keeping a named default
+ * here lets allocator-facing code compile for host/unit-test builds too.
+ */
+#ifndef TIKU_TIER_NPU_SIZE
+#define TIKU_TIER_NPU_SIZE   (512U * 1024U)
+#endif
+
 /*
  * THE 32 KB NVM-TIER CONTRACT
  *
@@ -1216,6 +1229,15 @@ tiku_mem_err_t tiku_tier_init(void);
  * this at bring-up.  Refused while the tier is already attached.
  */
 tiku_mem_err_t tiku_tier_attach_psram(void *base, tiku_mem_arch_size_t size);
+
+/**
+ * @brief Register the reserved NPU extent as an explicit allocator tier.
+ *
+ * This is a one-time registration.  The extent is linker-owned and must not
+ * be attached twice, because doing so would reset its bump pointer while a
+ * later NPU stage may already hold pointers into it.
+ */
+tiku_mem_err_t tiku_tier_attach_npu(void *base, tiku_mem_arch_size_t size);
 
 /**
  * @brief Detach the PSRAM tier (power-down path).

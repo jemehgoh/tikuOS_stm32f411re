@@ -51,6 +51,14 @@ void tiku_stm32n6_sram_init(void);
  */
 uint32_t tiku_stm32n6_sram_enabled_mask(void);
 
+/**
+ * @brief Read back the NPU SRAM banks' power state.
+ *
+ * Returns non-zero only when AXISRAM3..6 are clocked and their RAMCFG
+ * shutdown bits are clear.
+ */
+int tiku_stm32n6_sram_npu_powered(void);
+
 #if defined(TIKU_N6_SRAM_PROBE)
 /**
  * @brief Walk every bank writing and re-reading a unique word per 64 KB.

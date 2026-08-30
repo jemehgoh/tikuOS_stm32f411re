@@ -1236,6 +1236,10 @@ CFLAGS += -ffunction-sections -fdata-sections
 TIKU_TIER_SRAM_MIN ?= 262144
 CFLAGS += -DTIKU_TIER_SRAM_MIN=$(TIKU_TIER_SRAM_MIN)
 CFLAGS += -DTIKU_TIER_SRAM_DERIVED=1
+# Reserved Neural-ART workspace.  This is a named build-time knob because the
+# NPU extent is intentionally excluded from the general-purpose SRAM tier.
+TIKU_TIER_NPU_SIZE ?= 524288
+CFLAGS += -DTIKU_TIER_NPU_SIZE=$(TIKU_TIER_NPU_SIZE)
 
 else ifeq ($(TIKU_PLATFORM),ra8p1)
 
@@ -1457,6 +1461,8 @@ else ifeq ($(TIKU_PLATFORM),stm32n6)
 LDFLAGS  = -mcpu=cortex-m55 -mthumb -mfpu=auto -mfloat-abi=hard
 LDFLAGS += --specs=nano.specs --specs=nosys.specs -nostartfiles
 LDFLAGS += -Tarch/stm32n6/devices/stm32n657.ld
+# Keep the linker carve in lock-step with the allocator-facing config above.
+LDFLAGS += -Wl,--defsym=__tier_npu_size=$(TIKU_TIER_NPU_SIZE)
 LDFLAGS += -Wl,--gc-sections
 LDFLAGS += -Wl,-u,tiku_autostart_processes
 # The vector table is the image's first bytes and nothing references it, so
@@ -1975,6 +1981,10 @@ SRCS += arch/stm32n6/tiku_dcmipp_arch.c
 SRCS += arch/stm32n6/tiku_pwm_arch.c
 SRCS += arch/stm32n6/tiku_xspi_arch.c
 SRCS += arch/stm32n6/tiku_sram_arch.c
+SRCS += arch/stm32n6/tiku_npu_arch.c
+ifeq ($(TIKU_SHELL_ENABLE),1)
+SRCS += kernel/shell/commands/tiku_shell_cmd_npu_epoch.c
+endif
 SRCS += arch/stm32n6/tiku_cache_arch.c
 SRCS += arch/stm32n6/tiku_fault_arch.c
 SRCS += arch/stm32n6/tiku_nvm_region_stm32n6.c
