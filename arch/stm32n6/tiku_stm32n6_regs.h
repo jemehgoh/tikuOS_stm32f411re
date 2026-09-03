@@ -160,11 +160,36 @@
 #define STM32N6_RCC_AHB5ENR         (STM32N6_RCC_BASE + 0x260U)
 #define STM32N6_RCC_AHB5ENR_HPDMA1  (1UL << 0)
 #define STM32N6_RCC_AHB5ENR_NPU     (1UL << 31)
+#define STM32N6_NPU_BASE            0x580E0000UL
+
+/* Secure aliases used by the NPU startup sequence. */
+#define STM32N6_NPU_RCC_BASE           0x56028000UL
+#define STM32N6_NPU_RCC_AHB5ENR       (STM32N6_NPU_RCC_BASE + 0x260U)
+#define STM32N6_RCC_AHB5RSTR           (STM32N6_NPU_RCC_BASE + 0x220U)
+#define STM32N6_RCC_AHB5RSTR_NPU       (1UL << 31)
+#define STM32N6_RCC_AHB5ENR_CACHEAXI   (1UL << 30)
+#define STM32N6_RCC_AHB5RSTR_CACHEAXI  (1UL << 30)
+#define STM32N6_RCC_AHB5LPENR          (STM32N6_NPU_RCC_BASE + 0x2A0U)
+#define STM32N6_RCC_AHB5LPENR_CACHEAXI (1UL << 30)
+#define STM32N6_CACHEAXI_BASE          (STM32N6_NPU_BASE - 0x400UL)
+#define STM32N6_CACHEAXI_CR1           (STM32N6_CACHEAXI_BASE + 0x00U)
+#define STM32N6_CACHEAXI_CR1_EN        (1UL << 0)
+
+/* Secure RIFSC: RISC register 3, NPU bit 10; RIMC master 1. */
+#define STM32N6_RIFSC_BASE             0x54024000UL
+#define STM32N6_RIFSC_RISC_SECCFGR3   (STM32N6_RIFSC_BASE + 0x01CU)
+#define STM32N6_RIFSC_RISC_PRIVCFGR3  (STM32N6_RIFSC_BASE + 0x03CU)
+#define STM32N6_RIFSC_RIMC_ATTR1      (STM32N6_RIFSC_BASE + 0xC14U)
+#define STM32N6_RIFSC_NPU_BIT         (1UL << 10)
+#define STM32N6_RIFSC_RIMC_ATTR_MCID  (7UL << 4)
+#define STM32N6_RIFSC_RIMC_ATTR_SEC   (1UL << 8)
+#define STM32N6_RIFSC_RIMC_ATTR_PRIV  (1UL << 9)
+#define STM32N6_RIFSC_RIMC_NPU_CID1   (1UL << 4)
 
 /* Neural-ART is exposed through the secure peripheral alias used by the
  * rest of this port.  The epoch controller is a register window inside NPU;
- * this scaffolding only maps and reads it, leaving execution disabled. */
-#define STM32N6_NPU_BASE            0x580E0000UL
+ * the fixed-model backend programs its address and starts it through this
+ * window. */
 #define STM32N6_ATON_CLKCTRL_CTRL     (STM32N6_NPU_BASE + 0x00U)
 #define STM32N6_ATON_CLKCTRL_AGATES0  (STM32N6_NPU_BASE + 0x08U)
 #define STM32N6_ATON_CLKCTRL_AGATES1  (STM32N6_NPU_BASE + 0x0CU)
@@ -188,6 +213,7 @@
 #define STM32N6_EPOCHCTRL_BC       (STM32N6_EPOCHCTRL_BASE + 0x20U)
 #define STM32N6_EPOCHCTRL_CTRL_EN  (1UL << 0)
 #define STM32N6_EPOCHCTRL_CTRL_CLR (1UL << 1)
+#define STM32N6_EPOCHCTRL_CTRL_AUTOCLR (1UL << 2)
 #define STM32N6_EPOCHCTRL_CTRL_SM  (1UL << 3)
 #define STM32N6_EPOCHCTRL_CTRL_CONFCLR (1UL << 30)
 #define STM32N6_EPOCHCTRL_CTRL_RUNNING (1UL << 31)

@@ -2,7 +2,9 @@
  * Tiku Operating System v0.06
  * Simple. Ubiquitous. Intelligence, Everywhere.
  *
- * tiku_npu_arch.h - STM32N6 Neural-ART bring-up scaffolding.
+ * Author: Jeremy Goh
+ *
+ * tiku_npu_arch.h - STM32N6 Neural-ART fixed embedded-model backend.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -43,9 +45,9 @@ typedef struct {
 /**
  * @brief Enable the STM32N6 NPU domain and register its reserved tier.
  *
- * This does not enable NPU execution, access VFS, or load a model. It does
- * install the isolated epoch-completion IRQ path. A second call returns
- * TIKU_NPU_INIT_ALREADY.
+ * This enables the NPU domain and installs the isolated epoch-completion IRQ
+ * path. Models are submitted through interfaces/npu/tiku_npu.h. A second
+ * call returns TIKU_NPU_INIT_ALREADY.
  */
 int tiku_npu_init(void);
 

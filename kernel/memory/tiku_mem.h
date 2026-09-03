@@ -1240,6 +1240,15 @@ tiku_mem_err_t tiku_tier_attach_psram(void *base, tiku_mem_arch_size_t size);
 tiku_mem_err_t tiku_tier_attach_npu(void *base, tiku_mem_arch_size_t size);
 
 /**
+ * @brief Rewind the dedicated NPU tier after its model has been unloaded.
+ *
+ * The NPU model loader is the sole owner of this volatile tier.  This is
+ * intentionally narrower than tiku_tier_reset(): unloading a model must not
+ * orphan allocations in the general-purpose memory tiers.
+ */
+tiku_mem_err_t tiku_tier_npu_reset(void);
+
+/**
  * @brief Detach the PSRAM tier (power-down path).
  *
  * Refused while sub-allocations are outstanding unless @p force: a bump

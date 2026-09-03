@@ -1238,7 +1238,7 @@ CFLAGS += -DTIKU_TIER_SRAM_MIN=$(TIKU_TIER_SRAM_MIN)
 CFLAGS += -DTIKU_TIER_SRAM_DERIVED=1
 # Reserved Neural-ART workspace.  This is a named build-time knob because the
 # NPU extent is intentionally excluded from the general-purpose SRAM tier.
-TIKU_TIER_NPU_SIZE ?= 524288
+TIKU_TIER_NPU_SIZE ?= 1835008
 CFLAGS += -DTIKU_TIER_NPU_SIZE=$(TIKU_TIER_NPU_SIZE)
 
 else ifeq ($(TIKU_PLATFORM),ra8p1)
@@ -1982,6 +1982,14 @@ SRCS += arch/stm32n6/tiku_pwm_arch.c
 SRCS += arch/stm32n6/tiku_xspi_arch.c
 SRCS += arch/stm32n6/tiku_sram_arch.c
 SRCS += arch/stm32n6/tiku_npu_arch.c
+ifeq ($(TIKU_NPU_EMBEDDED_TEST_ENABLE),1)
+SRCS += tests/tiku_npu_embedded_acceptance.c
+CFLAGS += -DTIKU_NPU_EMBEDDED_TEST_ENABLE=1
+endif
+ifeq ($(TIKU_NPU_VFS_TEST_ENABLE),1)
+SRCS += tests/tiku_npu_vfs_acceptance.c
+CFLAGS += -DTIKU_NPU_VFS_TEST_ENABLE=1
+endif
 ifeq ($(TIKU_SHELL_ENABLE),1)
 SRCS += kernel/shell/commands/tiku_shell_cmd_npu_epoch.c
 endif

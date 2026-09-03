@@ -519,6 +519,7 @@ tiku_event_payload_kind_t tiku_event_payload_kind(tiku_event_t ev)
     case TIKU_EVENT_VFS:    return TIKU_EVENT_PAYLOAD_NODE;
     case TIKU_EVENT_TIMER:  return TIKU_EVENT_PAYLOAD_TIMER;
     case TIKU_EVENT_GPIO:   return TIKU_EVENT_PAYLOAD_U32;
+    case TIKU_EVENT_NPU_DONE: return TIKU_EVENT_PAYLOAD_NPU;
     case TIKU_EVENT_INIT:   return TIKU_EVENT_PAYLOAD_PTR;
     default:
         /* USER-range events carry an app pointer; the system control events
@@ -575,6 +576,14 @@ uint32_t tiku_event_u32(tiku_event_t ev, tiku_event_data_t data)
 void *tiku_event_ptr(tiku_event_t ev, tiku_event_data_t data)
 {
     return (tiku_event_payload_kind(ev) == TIKU_EVENT_PAYLOAD_PTR) ? data : NULL;
+}
+
+const struct tiku_npu_model *tiku_event_npu_model(tiku_event_t ev,
+                                                  tiku_event_data_t data)
+{
+    return (tiku_event_payload_kind(ev) == TIKU_EVENT_PAYLOAD_NPU)
+               ? (const struct tiku_npu_model *)data
+               : NULL;
 }
 
 uint8_t tiku_process_post_proc(struct tiku_process *dest, tiku_event_t ev,

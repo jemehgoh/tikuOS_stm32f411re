@@ -65,6 +65,9 @@
                                            carries the const tiku_vfs_node_t*
                                            (see tiku_vfs_watch()) */
 
+/** @brief Completion event posted by a fixed, build-embedded NPU model. */
+#define TIKU_EVENT_NPU_DONE     0x8B
+
 /** @brief Return code for successful process operations */
 #define TIKU_PROCESS_ERR_OK     0
 
@@ -92,6 +95,7 @@ typedef void *tiku_event_data_t;
  */
 struct tiku_vfs_node;
 struct tiku_timer;
+struct tiku_npu_model;
 
 /** @brief Payload type an event id carries. */
 typedef enum {
@@ -100,7 +104,8 @@ typedef enum {
     TIKU_EVENT_PAYLOAD_NODE,      /**< const tiku_vfs_node_t* (VFS)           */
     TIKU_EVENT_PAYLOAD_TIMER,     /**< struct tiku_timer*     (TIMER)         */
     TIKU_EVENT_PAYLOAD_U32,       /**< packed small integer   (GPIO)          */
-    TIKU_EVENT_PAYLOAD_PTR        /**< opaque app pointer     (INIT, USER)    */
+    TIKU_EVENT_PAYLOAD_PTR,       /**< opaque app pointer     (INIT, USER)    */
+    TIKU_EVENT_PAYLOAD_NPU        /**< const struct tiku_npu_model* (NPU)    */
 } tiku_event_payload_kind_t;
 
 /** @brief The contract: what payload does event @p ev carry? */
@@ -179,6 +184,10 @@ uint32_t                    tiku_event_u32  (tiku_event_t ev, tiku_event_data_t 
  *         payload
  */
 void                       *tiku_event_ptr  (tiku_event_t ev, tiku_event_data_t data);
+
+/** @brief Extract the model carried by TIKU_EVENT_NPU_DONE. */
+const struct tiku_npu_model *tiku_event_npu_model(tiku_event_t ev,
+                                                  tiku_event_data_t data);
 
 /*
  * Typed post helpers: pack the payload in ONE place (the inverse of the

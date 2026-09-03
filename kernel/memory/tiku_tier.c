@@ -224,6 +224,21 @@ tiku_mem_err_t tiku_tier_attach_npu(void *base, tiku_mem_arch_size_t size)
     return TIKU_MEM_OK;
 }
 
+tiku_mem_err_t tiku_tier_npu_reset(void)
+{
+    TIKU_MEM_KERNEL_ONLY(TIKU_MEM_ERR_INVALID);
+
+    if (!tier_state[TIKU_MEM_NPU].initialized) {
+        return TIKU_MEM_ERR_INVALID;
+    }
+
+    tier_state[TIKU_MEM_NPU].offset = 0;
+    tier_state[TIKU_MEM_NPU].peak = 0;
+    tier_state[TIKU_MEM_NPU].alloc_count = 0;
+    tier_state[TIKU_MEM_NPU].fail_count = 0;
+    return TIKU_MEM_OK;
+}
+
 tiku_mem_err_t tiku_tier_detach_psram(int force)
 {
     if (!tier_state[TIKU_MEM_PSRAM].initialized) {
