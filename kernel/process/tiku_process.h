@@ -65,8 +65,10 @@
                                            carries the const tiku_vfs_node_t*
                                            (see tiku_vfs_watch()) */
 
-/** @brief Completion event posted by a fixed, build-embedded NPU model. */
+/** @brief Completion event posted by an installed NPU model. */
 #define TIKU_EVENT_NPU_DONE     0x8B
+/** @brief Internal LL-ATON worker wakeup; never broadcast to applications. */
+#define TIKU_EVENT_NPU_WAKE     0x8C
 
 /** @brief Return code for successful process operations */
 #define TIKU_PROCESS_ERR_OK     0

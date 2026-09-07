@@ -519,7 +519,8 @@ tiku_event_payload_kind_t tiku_event_payload_kind(tiku_event_t ev)
     case TIKU_EVENT_VFS:    return TIKU_EVENT_PAYLOAD_NODE;
     case TIKU_EVENT_TIMER:  return TIKU_EVENT_PAYLOAD_TIMER;
     case TIKU_EVENT_GPIO:   return TIKU_EVENT_PAYLOAD_U32;
-    case TIKU_EVENT_NPU_DONE: return TIKU_EVENT_PAYLOAD_NPU;
+    case TIKU_EVENT_NPU_DONE:
+    case TIKU_EVENT_NPU_WAKE: return TIKU_EVENT_PAYLOAD_NPU;
     case TIKU_EVENT_INIT:   return TIKU_EVENT_PAYLOAD_PTR;
     default:
         /* USER-range events carry an app pointer; the system control events

@@ -25,6 +25,8 @@
 #include <stdio.h>
 #include <string.h>   /* memcpy/memset for the dynamic-directory helpers */
 
+#include "tiku.h"
+
 /*---------------------------------------------------------------------------*/
 /* PRIVATE STATE                                                             */
 /*---------------------------------------------------------------------------*/
@@ -121,6 +123,7 @@ const tiku_vfs_node_t *tiku_vfs_resolve(const char *path)
 
         /* Current node must be a directory to descend */
         if (node->type != TIKU_VFS_DIR || node->children == NULL) {
+            TIKU_PRINTF("VFS resolve failed - not a directory: path=%s node=%p\n", path, (void *)node);
             return NULL;
         }
 
@@ -135,6 +138,7 @@ const tiku_vfs_node_t *tiku_vfs_resolve(const char *path)
         }
 
         if (!found) {
+            TIKU_PRINTF("VFS resolve failed - child not found: path=%s node=%p\n", path, (void *)node);
             return NULL;
         }
     }
@@ -213,7 +217,9 @@ static int vfs_dyn_write(const char *path, const char *data, size_t len)
     const char *name = NULL;
     const tiku_vfs_node_t *par = vfs_parent_of(path, &name);
     int rc;
+    TIKU_PRINTF("VFS write dynamic: path=%s parent=%p name=%s\n", path, (void *)par, name);
     if (par == NULL || par->dyn == NULL || par->dyn->write == NULL) {
+        TIKU_PRINTF("VFS write failed - dynamic parent not found: path=%s\n", path);
         return -1;
     }
     rc = par->dyn->write(name, data, len);
@@ -657,18 +663,23 @@ int tiku_vfs_write(const char *path, const char *data, size_t len)
     int rc;
 
     node = tiku_vfs_resolve(path);
+    TIKU_PRINTF("VFS write resolved: path=%s node=%p\n", path, (void *)node);
     if (node == NULL) {
         /* Dynamic child (create-on-write): mutating the file store needs FS. */
         if (!vfs_cap_permitted(TIKU_VFS_CAP_FS)) {
+            TIKU_PRINTF("VFS write failed - node not found: path=%s node=%p\n", path, (void *)node);
             return TIKU_VFS_EPERM;
         }
         rc = vfs_dyn_write(path, data, len);
+        TIKU_PRINTF("VFS write dynamic: path=%s rc=%d\n", path, rc);
         return (rc < 0) ? TIKU_VFS_ENOENT : rc;  /* no static node, no dynamic store here */
     }
     if (node->type != TIKU_VFS_FILE || node->write == NULL) {
+        TIKU_PRINTF("VFS write failed - node not writable: path=%s node=%p\n", path, (void *)node);
         return TIKU_VFS_EACCES;                  /* exists, but not writable */
     }
     if (!vfs_cap_permitted(node->req_cap)) {
+        TIKU_PRINTF("VFS write failed - caller lacks capability: path=%s node=%p\n", path, (void *)node);
         return TIKU_VFS_EPERM;                    /* mediated: caller lacks capability */
     }
 

@@ -7,8 +7,8 @@
  *
  * tiku_npu.h - the neural accelerator contract.
  *
- * Legacy targets use a named store model. STM32N6 uses a fixed, linked
- * Neural-ART model container and an event-driven submit path.
+ * Legacy targets use a named store model. STM32N6 uses ST's LL-ATON
+ * relocatable network_rel.bin contract and an event-driven submit path.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -39,44 +39,18 @@
 #define TIKU_NPU_ERR_HEADER     -8  /**< truncated or malformed container  */
 #define TIKU_NPU_ERR_CAPACITY   -9  /**< container exceeds this model slot */
 #define TIKU_NPU_ERR_IO        -10  /**< VFS/backend failure                */
+#define TIKU_NPU_ERR_RELOCATION -11 /**< invalid or out-of-range relocation */
+#define TIKU_NPU_ERR_RUNTIME    -12 /**< LL-ATON rejected or failed a run */
 
 #if defined(PLATFORM_STM32N6)
 
-/** Magic and ABI version for a compiler-produced fixed-address model. */
-#define TIKU_NPU_MODEL_MAGIC       UINT32_C(0x544E3650) /* 'TN6P' */
-#define TIKU_NPU_MODEL_ABI_VERSION UINT16_C(1)
-
-/** Model has absolute IO and epoch-blob addresses; no copy/relocation exists. */
-#define TIKU_NPU_MODEL_F_FIXED     UINT16_C(1u << 0)
-
-/*
- * A VFS model is a description of a future load, not a heap handle.  These
- * limits are part of the image ABI: a model slot is statically declared and
- * its eventual weights, parameters, activations, and ecblob must fit inside
- * the linker-owned NPU extent before a loader is ever allowed to run.
- *
- * The per-kind limits default to the whole slot so the sum check remains the
- * source of truth.  Builds with a tighter Neural-ART memory map can override
- * any of them with -D flags.
- */
+/** LL-ATON relocatable model configuration. */
 #ifndef TIKU_NPU_MODEL_SLOT_BYTES
 # ifdef TIKU_TIER_NPU_SIZE
 #  define TIKU_NPU_MODEL_SLOT_BYTES ((uint32_t)(TIKU_TIER_NPU_SIZE))
 # else
 #  define TIKU_NPU_MODEL_SLOT_BYTES UINT32_C(524288)
 # endif
-#endif
-#ifndef TIKU_NPU_MODEL_MAX_WEIGHTS_BYTES
-#define TIKU_NPU_MODEL_MAX_WEIGHTS_BYTES TIKU_NPU_MODEL_SLOT_BYTES
-#endif
-#ifndef TIKU_NPU_MODEL_MAX_PARAMS_BYTES
-#define TIKU_NPU_MODEL_MAX_PARAMS_BYTES TIKU_NPU_MODEL_SLOT_BYTES
-#endif
-#ifndef TIKU_NPU_MODEL_MAX_ACTIVATION_BYTES
-#define TIKU_NPU_MODEL_MAX_ACTIVATION_BYTES TIKU_NPU_MODEL_SLOT_BYTES
-#endif
-#ifndef TIKU_NPU_MODEL_MAX_ECBLOB_BYTES
-#define TIKU_NPU_MODEL_MAX_ECBLOB_BYTES TIKU_NPU_MODEL_SLOT_BYTES
 #endif
 #ifndef TIKU_NPU_MODEL_MAX_IO
 #define TIKU_NPU_MODEL_MAX_IO 8u
@@ -87,19 +61,6 @@
 #ifndef TIKU_NPU_MODEL_PATH_MAX
 #define TIKU_NPU_MODEL_PATH_MAX 128u
 #endif
-
-/** Magic/version for the little-endian VFS container header. */
-#define TIKU_NPU_MODEL_CONTAINER_MAGIC TIKU_NPU_MODEL_MAGIC
-#define TIKU_NPU_MODEL_CONTAINER_VERSION UINT16_C(2)
-#define TIKU_NPU_MODEL_CONTAINER_F_NONE UINT32_C(0)
-
-/** Fixed wire-header geometry; bind maps the object but only inspects this header. */
-#define TIKU_NPU_MODEL_CONTAINER_BASE_BYTES UINT16_C(56)
-#define TIKU_NPU_MODEL_CONTAINER_TENSOR_BYTES UINT16_C(40)
-#define TIKU_NPU_MODEL_CONTAINER_HEADER_BYTES \
-    ((size_t)TIKU_NPU_MODEL_CONTAINER_BASE_BYTES + \
-     (size_t)(2u * TIKU_NPU_MODEL_MAX_IO) * \
-     (size_t)TIKU_NPU_MODEL_CONTAINER_TENSOR_BYTES)
 
 /** Tensor element type values carried by a container descriptor. */
 typedef enum {
@@ -127,53 +88,15 @@ typedef struct {
     tiku_npu_tensor_t outputs[TIKU_NPU_MODEL_MAX_IO];
 } tiku_npu_model_io_t;
 
-/**
- * @brief Small container around ST Neural-ART generated static tables.
- *
- * The addresses in the IO arrays are the addresses already encoded in the
- * compiler's micro-instructions. Callers must pass those exact buffers;
- * changing them would require ST's ec_reloc path, which this backend does
- * not use.
- */
+/** Private backend state is opaque to callers and contains LL-ATON types. */
 typedef struct tiku_npu_model {
-    uint32_t magic;
-    uint16_t abi_version;
-    uint16_t flags;
-    const uint64_t *epoch_blob;
-    uint32_t epoch_blob_bytes;
-    uint16_t input_count;
-    uint16_t output_count;
-    const uintptr_t *input_addresses;
-    const uintptr_t *output_addresses;
-    const uint32_t *input_sizes;
-    const uint32_t *output_sizes;
-    uint32_t estimated_latency_cycles;
-
-    /* VFS-container binding state.  The arrays are in the descriptor itself,
-     * so bind/io remain static and allocation-free.  They are separate from
-     * the legacy fixed-address fields above, which keep embedded models ABI
-     * compatible with Step 3. */
     uint32_t slot_capacity;
-    uint32_t weights_bytes;
-    uint32_t params_bytes;
-    uint32_t activation_bytes;
-    uint32_t ecblob_bytes;
-    uint32_t weights_offset;
-    uint32_t params_offset;
-    uint32_t activation_offset;
-    uint32_t ecblob_offset;
-    uint32_t container_total_bytes;
-    uint16_t container_input_count;
-    uint16_t container_output_count;
     uint8_t container_bound;
     uint8_t container_loaded;
-    uint8_t container_reserved[2];
+    uint8_t reserved[2];
     char container_path[TIKU_NPU_MODEL_PATH_MAX];
-    uint8_t *extent_base;
-    uint32_t extent_offset;
-    uint32_t extent_bytes;
-    tiku_npu_tensor_t container_inputs[TIKU_NPU_MODEL_MAX_IO];
-    tiku_npu_tensor_t container_outputs[TIKU_NPU_MODEL_MAX_IO];
+    tiku_npu_model_io_t io;
+    void *backend_state;
 } tiku_npu_model_t;
 
 /**
@@ -188,22 +111,25 @@ typedef struct tiku_npu_model {
         .slot_capacity = TIKU_NPU_MODEL_SLOT_BYTES \
     }
 
-/** Bind a VFS-resident container by parsing only its fixed header. */
+/** Bind a combined ST network_rel.bin from the /data/npu namespace. */
 int tiku_npu_model_bind(tiku_npu_model_t *model, const char *vfs_path);
 
-/** Copy the bound container into the reserved NPU extent, without relocation. */
+/** Install the bound model into the reserved NPU executable tier. */
 int tiku_npu_model_load(tiku_npu_model_t *model);
 
 /** Release the model's NPU extent slice and make the slot reusable. */
 int tiku_npu_model_unload(tiku_npu_model_t *model);
 
-/** Copy parsed input/output metadata into caller-provided static storage. */
+/** Return LL-ATON input/output metadata after installation. */
 int tiku_npu_model_io(const tiku_npu_model_t *model,
                       tiku_npu_model_io_t *out);
 
-/** Submit a build-embedded fixed-address model without waiting. */
+/** Start one nonblocking LL-ATON inference. */
 int tiku_npu_run(const tiku_npu_model_t *model,
                  const void *in[], void *out[]);
+
+/** Return the result recorded for the most recent asynchronous run. */
+int tiku_npu_model_last_error(const tiku_npu_model_t *model);
 
 /**
  * Submit and yield the calling protothread until NPU completion.

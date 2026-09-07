@@ -84,6 +84,23 @@ SECTIONS
     __data_load = LOADADDR(.data);
     __datastart = __data_start;
 
+    /* LL-ATON's relocatable-model PIC objects use r9 as the base of the
+     * normal .got section.  Keep the section explicit and export an ordinary
+     * linker symbol: _GLOBAL_OFFSET_TABLE_ has special GOTPC relocation
+     * semantics and is not suitable for the absolute r9 initialization in
+     * the reset path. */
+    .got : ALIGN(4)
+    {
+        __tiku_got_start = .;
+        *(.got)
+    } > SRAM
+
+    .got.plt : ALIGN(4)
+    {
+        *(.got.plt)
+        *(.igot.plt)
+    } > SRAM
+
     .bss (NOLOAD) :
     {
         . = ALIGN(4);

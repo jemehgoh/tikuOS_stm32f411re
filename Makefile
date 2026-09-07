@@ -338,10 +338,9 @@ endif
 endif
 
 ifeq ($(TIKU_NPU_ENABLE),1)
-ifneq ($(TIKU_PLATFORM),ra8p1)
-$(error TIKU_NPU_ENABLE=1 requires a part with the Ethos-U55 (currently \
-MCU=$(MCU)). RA8P1 is the only one in this tree; elsewhere the flag would be \
-silently ignored and the build would claim an accelerator it has not got.)
+ifneq ($(filter ra8p1 stm32n6,$(TIKU_PLATFORM)),$(TIKU_PLATFORM))
+$(error TIKU_NPU_ENABLE=1 requires a supported NPU part (currently \
+MCU=$(MCU)). Supported platforms are RA8P1 Ethos-U55 and STM32N6 Neural-ART.)
 endif
 endif
 
@@ -1981,7 +1980,48 @@ SRCS += arch/stm32n6/tiku_dcmipp_arch.c
 SRCS += arch/stm32n6/tiku_pwm_arch.c
 SRCS += arch/stm32n6/tiku_xspi_arch.c
 SRCS += arch/stm32n6/tiku_sram_arch.c
+ifeq ($(TIKU_NPU_ENABLE),1)
 SRCS += arch/stm32n6/tiku_npu_arch.c
+SRCS += arch/stm32n6/tiku_npu_llaton.c
+# Pinned ST EdgeAI 4.0 relocatable runtime. These files are compiled only
+# when the STM32N6 NPU is explicitly enabled; NPU=0 has no runtime objects or
+# model fixture inputs in the link.
+LL_ATON_ROOT := $(PROJ_DIR)/third_party/st/edgeai/4.0.0/Middlewares/ST/AI/Npu/ll_aton
+LL_ATON_ROOT_REL := third_party/st/edgeai/4.0.0/Middlewares/ST/AI/Npu/ll_aton
+LL_ATON_INC  := $(PROJ_DIR)/third_party/st/edgeai/4.0.0/Middlewares/ST/AI/Inc
+LL_ATON_PLAT := $(PROJ_DIR)/third_party/st/edgeai/4.0.0/platform/STM32N6xx
+SRCS += $(LL_ATON_ROOT_REL)/ll_aton.c
+SRCS += $(LL_ATON_ROOT_REL)/ll_aton_cipher.c
+SRCS += $(LL_ATON_ROOT_REL)/ll_aton_lib.c
+SRCS += $(LL_ATON_ROOT_REL)/ll_aton_lib_sw_operators.c
+SRCS += $(LL_ATON_ROOT_REL)/ll_aton_reloc_network.c
+SRCS += $(LL_ATON_ROOT_REL)/ll_aton_runtime.c
+SRCS += $(LL_ATON_ROOT_REL)/ll_aton_util.c
+CFLAGS += -DLL_ATON_RT_RELOC=1
+CFLAGS += -DLL_ATON_PLATFORM=LL_ATON_PLAT_STM32N6
+CFLAGS += -DLL_ATON_OSAL=LL_ATON_OSAL_USER_IMPL
+CFLAGS += -DLL_ATON_RT_MODE=LL_ATON_RT_ASYNC
+CFLAGS += -DLL_ATON_EB_DBG_INFO=1
+# ST's GCC relocatable-model contract uses r9 as the single PIC base for the
+# GOT.  Keep these options off the OS and startup objects: the generic compile
+# rule below applies CFLAGS to every source.  The vendored runtime is the code
+# that needs the PIC ABI; the adapter and board bring-up remain ordinary TikuOS
+# code and call into it with the startup-initialized r9 base.
+CFLAGS += -ffixed-r9
+TIKU_NPU_PIC_CFLAGS := -fpic -msingle-pic-base -mno-pic-data-is-text-relative
+TIKU_NPU_PIC_SRCS := \
+    $(LL_ATON_ROOT_REL)/ll_aton.c \
+    $(LL_ATON_ROOT_REL)/ll_aton_cipher.c \
+    $(LL_ATON_ROOT_REL)/ll_aton_lib.c \
+    $(LL_ATON_ROOT_REL)/ll_aton_lib_sw_operators.c \
+    $(LL_ATON_ROOT_REL)/ll_aton_reloc_network.c \
+    $(LL_ATON_ROOT_REL)/ll_aton_runtime.c \
+    $(LL_ATON_ROOT_REL)/ll_aton_util.c
+CFLAGS += -DSTM32N6=1
+CFLAGS += -I$(LL_ATON_ROOT) -I$(LL_ATON_INC) -I$(LL_ATON_PLAT)
+CFLAGS += -I$(PROJ_DIR)/arch/stm32n6
+LDLIBS += $(PROJ_DIR)/third_party/st/edgeai/4.0.0/Middlewares/ST/AI/Lib/GCC/ARMCortexM55/NetworkRuntime1201_CM55_GCC_PIC.a
+CFLAGS += -DTIKU_HAS_NPU=1
 ifeq ($(TIKU_NPU_EMBEDDED_TEST_ENABLE),1)
 SRCS += tests/tiku_npu_embedded_acceptance.c
 CFLAGS += -DTIKU_NPU_EMBEDDED_TEST_ENABLE=1
@@ -1989,9 +2029,11 @@ endif
 ifeq ($(TIKU_NPU_VFS_TEST_ENABLE),1)
 SRCS += tests/tiku_npu_vfs_acceptance.c
 CFLAGS += -DTIKU_NPU_VFS_TEST_ENABLE=1
+SRCS += tests/npu/fixtures/stm32n6_identity_corrupt.network_rel.c
 endif
-ifeq ($(TIKU_SHELL_ENABLE),1)
-SRCS += kernel/shell/commands/tiku_shell_cmd_npu_epoch.c
+# The current YOLO network_rel.bin is a 3.2 MiB combined image. It is deployed
+# to the external-NOR-backed /data store before the acceptance tests run; it is
+# intentionally not linked into the 255 KiB STM32N6 boot image.
 endif
 SRCS += arch/stm32n6/tiku_cache_arch.c
 SRCS += arch/stm32n6/tiku_fault_arch.c
@@ -2017,7 +2059,6 @@ SRCS += arch/stm32n6/tiku_adc_arch.c
 SRCS += arch/stm32n6/tiku_i2c_arch.c
 SRCS += arch/stm32n6/tiku_spi_arch.c
 SRCS += arch/stm32n6/tiku_onewire_arch.c
-
 else ifeq ($(TIKU_PLATFORM),ra8p1)
 
 # RA8P1 arch.  Backends land here as they are written; what is absent is
@@ -3361,7 +3402,7 @@ $(TARGET): $(OBJS) $(PLATFORM_STAMP) $(NOSYS_FIXED) $(TIKU_LDSCRIPTS)
 
 $(BUILD_DIR)/%.o: %.c
 	@mkdir -p $(dir $@)
-	$(CC) $(CFLAGS) -MMD -MP -c -o $@ $<
+	$(CC) $(CFLAGS) $(if $(filter $<,$(TIKU_NPU_PIC_SRCS)),$(TIKU_NPU_PIC_CFLAGS),) -MMD -MP -c -o $@ $<
 
 # Assembly-source rule. Used by firmware-blob wrappers that pull in
 # binary data via .incbin (see drivers/wifi/cyw43/firmware.S).

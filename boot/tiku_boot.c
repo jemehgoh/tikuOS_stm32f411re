@@ -21,7 +21,9 @@
 #if defined(PLATFORM_STM32N6)
 #include <arch/stm32n6/tiku_xspi_arch.h>
 #include <arch/stm32n6/tiku_sram_arch.h>
+#if (TIKU_HAS_NPU + 0)
 #include <arch/stm32n6/tiku_npu_arch.h>
+#endif
 #include <arch/stm32n6/tiku_stm32n6_regs.h>
 #endif
 #include <kernel/cpu/tiku_stack.h>   /* stack-paint for /sys/mem/stack_free */
@@ -267,7 +269,7 @@ tiku_boot_init_peripherals(void)
     /* System clock must be up before timers or scheduler */
     tiku_clock_init();
 
-#if defined(PLATFORM_STM32N6)
+#if defined(PLATFORM_STM32N6) && (TIKU_HAS_NPU + 0)
     /* Neural-ART owns a linker-reserved tier.  Bring it up after the SRAM
      * banks and allocator are ready, and fail boot if the clock/power
      * readbacks or extent registration do not validate. */
@@ -277,9 +279,13 @@ tiku_boot_init_peripherals(void)
             npu_status != TIKU_NPU_INIT_ALREADY) {
             return TIKU_BOOT_ERROR;
         }
-        if ((tiku_npu_clock_readback() & STM32N6_RCC_AHB5ENR_NPU) == 0U ||
-            !tiku_npu_power_enabled()) {
-            return TIKU_BOOT_ERROR;
+        {
+            uint32_t clock_readback = tiku_npu_clock_readback();
+            int power_enabled = tiku_npu_power_enabled();
+            if ((clock_readback & STM32N6_RCC_AHB5ENR_NPU) == 0U ||
+                !power_enabled) {
+                return TIKU_BOOT_ERROR;
+            }
         }
     }
 #endif

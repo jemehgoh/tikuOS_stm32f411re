@@ -5,7 +5,7 @@
  *
  * Authors: Ambuj Varshney <ambuj@tiku-os.org>
  *
- * tiku_vfs_tree_npu.c - /sys/npu over interfaces/npu.
+ * tiku_vfs_tree_npu.c - legacy RA8P1 /sys/npu over interfaces/npu.
  *
  * Reads describe the accelerator and the loaded model; writing to run
  * submits one inference over whatever the input buffer already holds.
@@ -18,7 +18,7 @@
 
 #include "tiku_vfs_tree_npu.h"
 
-#if (TIKU_HAS_NPU + 0)
+#if (TIKU_HAS_NPU + 0) && defined(PLATFORM_RA8P1)
 
 #include <interfaces/npu/tiku_npu.h>
 
@@ -106,4 +106,4 @@ _Static_assert(sizeof(tiku_vfs_tree_npu_children) /
                TIKU_VFS_TREE_NPU_NCHILD,
                "/sys/npu child count disagrees with its header");
 
-#endif /* TIKU_HAS_NPU */
+#endif /* TIKU_HAS_NPU && PLATFORM_RA8P1 */

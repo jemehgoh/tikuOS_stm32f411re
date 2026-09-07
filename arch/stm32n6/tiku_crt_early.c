@@ -116,6 +116,20 @@ void tiku_stm32n6_startup(void) {
      * ready to take one. */
     __asm__ volatile ("cpsid i" ::: "memory");
 
+#if (TIKU_HAS_NPU + 0)
+    /* The LL-ATON C objects use the ST relocatable-model PIC ABI, whose GOT
+     * base is held in r9.  Only those vendor objects are compiled with
+     * -msingle-pic-base; the OS itself stays non-PIC.  Establish the process
+     * GOT before boot can call LL_ATON_RT_RuntimeInit(), while keeping this
+     * out of NPU-disabled images where the linker has no GOT requirement. */
+    /* _GLOBAL_OFFSET_TABLE_ has special GOTPC relocation semantics, so use the
+     * ordinary linker symbol exported at the start of .got. */
+    __asm__ volatile (
+        "ldr r9, =__tiku_got_start\n"
+        ".ltorg\n"
+        ::: "r9", "memory");
+#endif
+
     extern const stm32n6_isr_t tiku_stm32n6_vectors[];
     *(volatile uint32_t *)0xE000ED08UL = (uint32_t)(uintptr_t)tiku_stm32n6_vectors;
     __asm__ volatile ("dsb\n\tisb" ::: "memory");

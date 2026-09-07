@@ -80,7 +80,7 @@
  * build that never loads a model should not carry them.  TIKU_HAS_NPU is a -D
  * from the Makefile, so it resolves the same way in every translation unit
  * regardless of include order. */
-#if (TIKU_HAS_NPU + 0)
+#if (TIKU_HAS_NPU + 0) && defined(PLATFORM_RA8P1)
 #define TIKU_SHELL_CMD_NPU     1  /**< npu     - the RA8P1 Ethos-U55 */
 #else
 #define TIKU_SHELL_CMD_NPU     0

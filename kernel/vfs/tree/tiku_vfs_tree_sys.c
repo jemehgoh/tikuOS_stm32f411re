@@ -29,7 +29,7 @@
 #if (TIKU_HAS_COPROC + 0)
 #include "tiku_vfs_tree_coproc.h"
 #endif
-#if (TIKU_HAS_NPU + 0)
+#if (TIKU_HAS_NPU + 0) && defined(PLATFORM_RA8P1)
 #include "tiku_vfs_tree_npu.h"
 #endif
 #if (TIKU_FLPR_ENABLE + 0)
@@ -1347,7 +1347,7 @@ static const tiku_vfs_node_t sys_children[] = {
     { "coproc",   TIKU_VFS_DIR,  NULL, NULL,
       tiku_vfs_tree_coproc_children,   TIKU_VFS_TREE_COPROC_NCHILD },
 #endif
-#if (TIKU_HAS_NPU + 0)
+#if (TIKU_HAS_NPU + 0) && defined(PLATFORM_RA8P1)
     { "npu",      TIKU_VFS_DIR,  NULL, NULL,
       tiku_vfs_tree_npu_children,      TIKU_VFS_TREE_NPU_NCHILD },
 #endif

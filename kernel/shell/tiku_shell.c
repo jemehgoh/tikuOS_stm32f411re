@@ -90,9 +90,6 @@
 #if TIKU_SHELL_CMD_NPU
 #include "commands/tiku_shell_cmd_npu.h"
 #endif
-#if defined(PLATFORM_STM32N6)
-#include "commands/tiku_shell_cmd_npu_epoch.h"
-#endif
 #if TIKU_SHELL_CMD_PANEL
 #include "commands/tiku_shell_cmd_panel.h"
 #endif
@@ -600,9 +597,6 @@ static const tiku_shell_cmd_t tiku_shell_commands[] = {
 #if TIKU_SHELL_CMD_NPU
     {"npu",     "Ethos-U55: release and report", tiku_shell_cmd_npu},
     {"npu-test", "Ethos-U55 vs the M85",        tiku_shell_cmd_npu_test},
-#endif
-#if defined(PLATFORM_STM32N6)
-    {"npu-irq-test", "Epoch-controller completion IRQ self-test", tiku_shell_cmd_npu_epoch},
 #endif
 #if TIKU_SHELL_CMD_TRNG
     {"trng",    "Dump hardware TRNG bytes",    tiku_shell_cmd_trng},
