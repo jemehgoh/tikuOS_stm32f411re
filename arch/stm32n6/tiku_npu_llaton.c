@@ -3,10 +3,10 @@
  *
  * Model locations are intentionally distinct:
  *   - drivers/stm32n6/npu/models/ : optional build-embedded compiler output
- *   - /data/npu/                   : deployed combined network_rel.bin files
+ *   - the N6 bigblob slot         : deployed combined network_rel.bin files
  *   - tests/npu/fixtures/          : malformed/fault-injection fixtures only
  *
- * The source image is always mapped read-only through the /data store. COPY
+ * The source image is always mapped read-only through the bigblob store. COPY
  * installation and all runtime relocation work happen in the linker-owned
  * NPU tier. No TN6P envelope, EC blob address, or manual relocation is used.
  */
@@ -16,12 +16,11 @@
 #include <string.h>
 
 #include <interfaces/npu/tiku_npu.h>
-#include <kernel/fs/tiku_model.h>
 #include <kernel/memory/tiku_mem.h>
 #include <kernel/process/tiku_process.h>
-#include <kernel/vfs/tree/tiku_vfs_tree_data.h>
 
 #include "tiku_device_select.h"
+#include "tiku_n6_model_store.h"
 #include "tiku_npu_llaton.h"
 #include "tiku_stm32n6_regs.h"
 
@@ -158,7 +157,8 @@ static int image_preflight(const uint8_t *image, size_t length)
      * ST installer will rewrite.  Validate the site list before install: a
      * damaged site otherwise becomes an unchecked dereference inside the
      * vendor routine, which has no image-length argument. */
-    if (rel_end < rel_start || rel_start > length || rel_end > length) return 0;
+    if (rel_end < rel_start || rel_start > length || rel_end > length ||
+        rel_start < got_end || ((rel_end - rel_start) & 3u) != 0u) return 0;
     for (desc = (uintptr_t)image + rel_start;
          desc < (uintptr_t)image + rel_end; desc += 4u) {
         uint32_t site = rd32((const uint8_t *)desc);
@@ -170,36 +170,87 @@ static int image_preflight(const uint8_t *image, size_t length)
     }
 
     /* The descriptor array is at data_data + params_start and is terminated
-     * by a zero flags/name record. Bound the same ten entries as ST's loader. */
-    desc = (uintptr_t)image + data_data + params_start;
-    if (params_start > length - data_data || desc < (uintptr_t)image ||
-        (uintptr_t)(desc - (uintptr_t)image) > length - 16u) {
+     * by a zero flags/name record. Bound the same ten entries as ST's loader,
+     * and reject a half-zero record before the vendor helper sees it. */
+    if (params_start > length - data_data) {
         return 0;
     }
+    size_t desc_at = (size_t)data_data + params_start;
+    if (desc_at > length || desc_at > UINTPTR_MAX - (uintptr_t)image) {
+        return 0;
+    }
+    desc = (uintptr_t)image + desc_at;
     for (i = 0u; i < 10u; i++) {
-        size_t at = (size_t)(desc - (uintptr_t)image) + i * 20u;
+        size_t at;
+        if (i > (length - desc_at) / 20u) return 0;
+        at = desc_at + i * 20u;
         if (at > length - 20u) return 0;
-        if (rd32(image + at) == 0u && rd32(image + at + 4u) == 0u) break;
+        uint32_t name = rd32(image + at);
+        uint32_t flags = rd32(image + at + 4u);
+        if (name == 0u && flags == 0u) break;
+        if (name == 0u || flags == 0u || !image_string(image, length, name)) {
+            return 0;
+        }
     }
     return i < 10u;
 }
 
-static int map_source(const char *path, const uint8_t **source, size_t *length)
+static int model_ref_name(const char *path, char name[TIKU_BIGBLOB_NAME_MAX + 1u])
 {
     static const char prefix[] = "/data/npu/";
-    tiku_tfs_t *fs;
-    tiku_model_t mapped;
+    const char *leaf = path;
+    size_t len;
 
-    if (path == NULL || source == NULL || length == NULL ||
-        strncmp(path, prefix, sizeof(prefix) - 1u) != 0) {
+    if (path == NULL || name == NULL) {
         return TIKU_NPU_ERR_NOT_FOUND;
     }
-    fs = tiku_vfs_tree_data_store();
-    if (fs == NULL || tiku_model_open(fs, path + 6u, &mapped) != TIKU_MODEL_OK) {
+    if (strncmp(path, prefix, sizeof(prefix) - 1u) == 0) {
+        leaf = path + sizeof(prefix) - 1u;
+    }
+    if (*leaf == '\0' || strchr(leaf, '/') != NULL ||
+        strchr(leaf, '\\') != NULL) {
         return TIKU_NPU_ERR_NOT_FOUND;
     }
-    *source = mapped.base;
-    *length = mapped.len;
+    len = strlen(leaf);
+    if (len > TIKU_BIGBLOB_NAME_MAX) {
+        return TIKU_NPU_ERR_NOT_FOUND;
+    }
+    memcpy(name, leaf, len + 1u);
+    return TIKU_NPU_OK;
+}
+
+static int map_source(const char *path, const uint8_t **source, size_t *length)
+{
+    char name[TIKU_BIGBLOB_NAME_MAX + 1u];
+    tiku_bigblob_info_t info;
+    uint32_t mapped_len;
+    int rc;
+
+    if (source == NULL || length == NULL) {
+        return TIKU_NPU_ERR_ARGUMENT;
+    }
+    rc = model_ref_name(path, name);
+    if (rc != TIKU_NPU_OK) {
+        return rc;
+    }
+    rc = tiku_n6_model_store_info(&info);
+    if (rc == TIKU_BIGBLOB_ERR_NOENT) {
+        return TIKU_NPU_ERR_NOT_FOUND;
+    }
+    if (rc != TIKU_BIGBLOB_OK) {
+        return TIKU_NPU_ERR_IO;
+    }
+    if (strcmp(name, info.name) != 0) {
+        return TIKU_NPU_ERR_NOT_FOUND;
+    }
+    if (tiku_n6_model_store_verify() != TIKU_BIGBLOB_OK) {
+        return TIKU_NPU_ERR_IO;
+    }
+    *source = (const uint8_t *)tiku_n6_model_store_map(&mapped_len);
+    if (*source == NULL || mapped_len == 0U) {
+        return TIKU_NPU_ERR_IO;
+    }
+    *length = mapped_len;
     return TIKU_NPU_OK;
 }
 
@@ -267,6 +318,8 @@ static int validate_pools(const uint8_t *source, size_t source_len)
 {
     uintptr_t npu_begin = (uintptr_t)&__tier_npu_start;
     uintptr_t npu_end = (uintptr_t)&__tier_npu_end;
+    uintptr_t ram_begin = (uintptr_t)TIKU_DEVICE_RAM_START;
+    uintptr_t ram_end = ram_begin + (uintptr_t)TIKU_DEVICE_RAM_SIZE;
     int i;
 
     for (i = 0; i < 10; i++) {
@@ -275,7 +328,14 @@ static int validate_pools(const uint8_t *source, size_t source_len)
         uint32_t type;
         if (d == NULL) break;
         type = AI_RELOC_MPOOL_GET_TYPE(d->flags);
-        if (!image_string(source, source_len, (uint32_t)(uintptr_t)d->name)) {
+        /* Descriptor fields are 32-bit encoded addresses even though the C
+         * view exposes name as a pointer.  Read the on-media word directly;
+         * casting d->name through uintptr_t is wrong on a 64-bit host and
+         * also confuses the encoded address with the mapped pointer. */
+        if ((uintptr_t)d < (uintptr_t)source ||
+            (uintptr_t)d - (uintptr_t)source > source_len - 20u ||
+            !image_string(source, source_len,
+                          rd32((const uint8_t *)(uintptr_t)d))) {
             return TIKU_NPU_ERR_HEADER;
         }
         if (d->size > UINT32_MAX - 31u ||
@@ -290,16 +350,20 @@ static int validate_pools(const uint8_t *source, size_t source_len)
             uintptr_t dst = (uintptr_t)d->dst;
             size_t span = (size_t)((d->size + 31u) & ~31u);
             int in_npu = dst >= npu_begin && range_ok(dst, span, npu_end);
-            int in_board_nvm =
-                dst >= (uintptr_t)TIKU_DEVICE_FRAM_START &&
-                dst <= (uintptr_t)TIKU_DEVICE_FRAM_END &&
-                span <= (size_t)TIKU_DEVICE_FRAM_END - dst + 1u;
+            int in_runtime_ram = dst >= ram_begin &&
+                                 range_ok(dst, span, ram_end);
 
-            /* RESET is activation memory and must never target the NOR.
-             * COPY may target the board's declared mapped model pool; the
-             * board memory bring-up owns that mapping before NPU init. */
+            /* RESET is activation memory and remains restricted to the
+             * linker-owned NPU tier.  COPY must target writable runtime RAM:
+             * the XSPI memory-mapped NOR contains the model source, but its
+             * address window is not a writable runtime destination for the
+             * memcpy performed by LL-ATON. */
             if ((!in_npu && (type == AI_RELOC_MPOOL_TYPE_RESET)) ||
-                (!in_npu && !in_board_nvm)) return TIKU_NPU_ERR_ARGUMENT;
+                (!in_runtime_ram && type == AI_RELOC_MPOOL_TYPE_COPY)) {
+                return TIKU_NPU_ERR_ARGUMENT;
+            }
+        } else {
+            return TIKU_NPU_ERR_HEADER;
         }
     }
     return i == 10 ? TIKU_NPU_ERR_HEADER : TIKU_NPU_OK;
@@ -386,6 +450,7 @@ int tiku_npu_model_bind(tiku_npu_model_t *model, const char *path)
     model->container_bound = 1u;
     model->container_loaded = 0u;
     model->backend_state = &ll_state;
+    tiku_n6_model_store_set_model_bound(1);
     return TIKU_NPU_OK;
 }
 

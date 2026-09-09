@@ -44,10 +44,14 @@ typedef enum {
     TIKU_BIGBLOB_ERR_SPACE = -3,  /**< the blob does not fit the medium     */
     TIKU_BIGBLOB_ERR_CRC   = -4,  /**< contents do not match the header     */
     TIKU_BIGBLOB_ERR_IO    = -5,  /**< the backend refused a write or erase */
+    TIKU_BIGBLOB_ERR_BUSY  = -6,  /**< the slot is reserved by a reader     */
 } tiku_bigblob_err_t;
 
 /** @brief Longest blob name, excluding the terminator. */
 #define TIKU_BIGBLOB_NAME_MAX  23u
+
+/** @brief Published header magic (ASCII "BLB2" in little-endian storage). */
+#define TIKU_BIGBLOB_MAGIC     UINT32_C(0x424C4232)
 
 /*
  * Sized to the LARGEST erase granularity the medium offers, not to the header,
@@ -62,6 +66,25 @@ typedef enum {
 
 /** @brief Bytes reserved for a slot's header. */
 #define TIKU_BIGBLOB_HDR_BYTES 65536u
+
+/**
+ * @brief On-media header, stored at the beginning of each bigblob slot.
+ *
+ * The remaining bytes up to TIKU_BIGBLOB_HDR_BYTES are reserved and remain
+ * erased.  Writers publish the object by programming magic last.
+ */
+typedef struct {
+    uint32_t magic;
+    uint32_t len;
+    uint32_t crc;
+    uint32_t reserved;
+    char     name[TIKU_BIGBLOB_NAME_MAX + 1u];
+} tiku_bigblob_disk_hdr_t;
+
+_Static_assert(sizeof(tiku_bigblob_disk_hdr_t) == 40u,
+               "bigblob disk header layout changed");
+_Static_assert(sizeof(tiku_bigblob_disk_hdr_t) <= TIKU_BIGBLOB_HDR_BYTES,
+               "bigblob header must fit inside its erase block");
 
 /** @brief What a slot holds, as reported by tiku_bigblob_info(). */
 typedef struct {

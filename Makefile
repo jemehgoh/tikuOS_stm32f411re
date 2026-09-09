@@ -1983,6 +1983,8 @@ SRCS += arch/stm32n6/tiku_sram_arch.c
 ifeq ($(TIKU_NPU_ENABLE),1)
 SRCS += arch/stm32n6/tiku_npu_arch.c
 SRCS += arch/stm32n6/tiku_npu_llaton.c
+SRCS += arch/stm32n6/tiku_n6_model_store.c
+SRCS += kernel/fs/tiku_bigblob.c
 # Pinned ST EdgeAI 4.0 relocatable runtime. These files are compiled only
 # when the STM32N6 NPU is explicitly enabled; NPU=0 has no runtime objects or
 # model fixture inputs in the link.
@@ -2029,10 +2031,9 @@ endif
 ifeq ($(TIKU_NPU_VFS_TEST_ENABLE),1)
 SRCS += tests/tiku_npu_vfs_acceptance.c
 CFLAGS += -DTIKU_NPU_VFS_TEST_ENABLE=1
-SRCS += tests/npu/fixtures/stm32n6_identity_corrupt.network_rel.c
 endif
 # The current YOLO network_rel.bin is a 3.2 MiB combined image. It is deployed
-# to the external-NOR-backed /data store before the acceptance tests run; it is
+# to the reserved external-NOR bigblob slot before the acceptance tests run; it is
 # intentionally not linked into the 255 KiB STM32N6 boot image.
 endif
 SRCS += arch/stm32n6/tiku_cache_arch.c

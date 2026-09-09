@@ -35,16 +35,18 @@
 #define TIKU_NPU_ERR_FAULT      -4  /**< the accelerator rejected the work  */
 #define TIKU_NPU_ERR_BUSY       -5  /**< another fixed model is executing   */
 #define TIKU_NPU_ERR_ARGUMENT   -6  /**< malformed model or tensor list     */
-#define TIKU_NPU_ERR_NOT_FOUND  -7  /**< VFS model path does not exist     */
+#define TIKU_NPU_ERR_NOT_FOUND  -7  /**< model name is not published       */
 #define TIKU_NPU_ERR_HEADER     -8  /**< truncated or malformed container  */
-#define TIKU_NPU_ERR_CAPACITY   -9  /**< container exceeds this model slot */
-#define TIKU_NPU_ERR_IO        -10  /**< VFS/backend failure                */
+#define TIKU_NPU_ERR_CAPACITY   -9  /**< runtime image exceeds NPU tier    */
+#define TIKU_NPU_ERR_IO        -10  /**< storage/backend failure            */
 #define TIKU_NPU_ERR_RELOCATION -11 /**< invalid or out-of-range relocation */
 #define TIKU_NPU_ERR_RUNTIME    -12 /**< LL-ATON rejected or failed a run */
 
 #if defined(PLATFORM_STM32N6)
 
 /** LL-ATON relocatable model configuration. */
+/* Kept under the old public name for source compatibility.  This is the
+ * runtime COPY arena limit, not the external-NOR bigblob capacity. */
 #ifndef TIKU_NPU_MODEL_SLOT_BYTES
 # ifdef TIKU_TIER_NPU_SIZE
 #  define TIKU_NPU_MODEL_SLOT_BYTES ((uint32_t)(TIKU_TIER_NPU_SIZE))
@@ -90,7 +92,7 @@ typedef struct {
 
 /** Private backend state is opaque to callers and contains LL-ATON types. */
 typedef struct tiku_npu_model {
-    uint32_t slot_capacity;
+    uint32_t slot_capacity;               /**< legacy name: NPU COPY capacity */
     uint8_t container_bound;
     uint8_t container_loaded;
     uint8_t reserved[2];
@@ -111,8 +113,13 @@ typedef struct tiku_npu_model {
         .slot_capacity = TIKU_NPU_MODEL_SLOT_BYTES \
     }
 
-/** Bind a combined ST network_rel.bin from the /data/npu namespace. */
-int tiku_npu_model_bind(tiku_npu_model_t *model, const char *vfs_path);
+/**
+ * @brief Bind the published combined ST model.
+ *
+ * STM32N6 accepts the legacy /data/npu/<name> spelling and the bare stored
+ * name; both resolve to the single verified bigblob model slot.
+ */
+int tiku_npu_model_bind(tiku_npu_model_t *model, const char *model_ref);
 
 /** Install the bound model into the reserved NPU executable tier. */
 int tiku_npu_model_load(tiku_npu_model_t *model);

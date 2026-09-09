@@ -41,6 +41,8 @@ typedef struct {
 #define TIKU_XSPI_PAGE_SIZE     256U
 #define TIKU_XSPI_SECTOR_SIZE   4096U
 #define TIKU_XSPI_MFR_MACRONIX  0xC2U
+#define TIKU_XSPI_TYPE_MX25UM   0x86U
+#define TIKU_XSPI_CAPACITY_512M 0x3AU
 
 /* Base of the memory-mapped read window that tiku_xspi_mmap_enable()
  * programs.  Erase and program run indirect, but the NVM region, the durable
@@ -53,7 +55,7 @@ typedef struct {
  *   0x0000000  FSBL1     256 KB  the boot image; the ROM loads this one
  *   0x0040000  FSBL2     256 KB  the ROM's fallback search address
  *   0x0080000  /data       8 MB  the carved NVM region (tier + TFS store)
- *   0x0880000  unclaimed  ~55 MB model and blob space
+ *   0x0880000  model slot  ~55 MB one-model bigblob space
  *   0x3FFB000  scratch     4 KB  what `xflash test` erases
  *   0x3FFC000  mirror     16 KB  the durable .uninit mirror
  *
@@ -72,6 +74,16 @@ typedef struct {
 #define TIKU_XSPI_MIRROR_BYTES  (TIKU_XSPI_SECTOR_SIZE * TIKU_XSPI_MIRROR_SECTORS)
 #define TIKU_XSPI_MIRROR_ADDR   (TIKU_XSPI_SIZE_BYTES - TIKU_XSPI_MIRROR_BYTES)
 #define TIKU_XSPI_SCRATCH_ADDR  (TIKU_XSPI_MIRROR_ADDR - TIKU_XSPI_SECTOR_SIZE)
+#define TIKU_XSPI_MODEL_ADDR    (TIKU_XSPI_REGION_ADDR + TIKU_XSPI_REGION_BYTES)
+#define TIKU_XSPI_MODEL_BYTES   (TIKU_XSPI_SCRATCH_ADDR - TIKU_XSPI_MODEL_ADDR)
+#define TIKU_XSPI_MODEL_OFFSET  TIKU_XSPI_MODEL_ADDR
+
+_Static_assert((TIKU_XSPI_MODEL_ADDR % TIKU_XSPI_SECTOR_SIZE) == 0U,
+               "N6 model slot must be sector aligned");
+_Static_assert((TIKU_XSPI_MODEL_ADDR % 65536UL) == 0U,
+               "N6 model slot must be bigblob-header aligned");
+_Static_assert(TIKU_XSPI_MODEL_BYTES > 65536UL,
+               "N6 model slot must contain a payload");
 
 /**
  * @brief Bring up XSPI2, its I/O manager and the pins, then read the identity.
