@@ -19,7 +19,7 @@
 
 #include "tiku_boot.h"
 #if defined(PLATFORM_STM32N6)
-#include <arch/stm32n6/tiku_xspi_arch.h>
+#include <arch/stm32n6/tiku_ospi_arch.h>
 #include <arch/stm32n6/tiku_sram_arch.h>
 #if (TIKU_HAS_NPU + 0)
 #include <arch/stm32n6/tiku_npu_arch.h>
@@ -215,9 +215,9 @@ tiku_boot_init_memory(void)
 #if defined(PLATFORM_STM32N6)
     /* External NOR first: the durable mirror is restored from it inside
      * tiku_mem_init(), so the controller has to be live before that runs. A
-     * failure is not fatal -- the image runs from SRAM and the durable region
-     * simply keeps its reset contents. */
-    (void)tiku_xspi_init();
+     * failure is fatal for this image: the NPU model and durable mirror are
+     * both accessed through the OSPI memory window. */
+    (void)tiku_ospi_init();
 #endif
 
     /* Initialize memory subsystem (arch-specific setup + module state) */

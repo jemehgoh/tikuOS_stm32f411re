@@ -1,0 +1,176 @@
+/*
+ * Tiku Operating System v0.06
+ * Simple. Ubiquitous. Intelligence, Everywhere.
+ * http://tiku-os.org
+ *
+ * Authors: Jeremy Goh
+ *
+ * tiku_ospi_arch.h - STM32N6 external NOR flash over octa-SPI DTR.
+ *
+ * The interface here is written to take advantage of the Octa-SPI interface
+ * through which the external flash on the Nucleo-N657X0-Q is connected to the
+ * MCU. This allows for faster model loading (for model binaries stored in flash)
+ * for the Neural-ART accelerator on the STM32N6.
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+#ifndef TIKU_STM32N6_OSPI_ARCH_H_
+#define TIKU_STM32N6_OSPI_ARCH_H_
+
+#include <stdint.h>
+
+/** @brief Result of an OSPI operation. */
+typedef enum {
+    TIKU_OSPI_OK = 0,
+    TIKU_OSPI_ERR_ARG,      /**< bad argument or range                     */
+    TIKU_OSPI_ERR_TIMEOUT,  /**< a transfer or a busy wait never finished  */
+    TIKU_OSPI_ERR_ID,       /**< the device answered with a wrong identity */
+    TIKU_OSPI_ERR_PROGRAM,  /**< the device reported erase/program failure */
+    TIKU_OSPI_ERR_STATE,    /**< called before a successful init           */
+} tiku_ospi_err_t;
+
+/** @brief Identity read from the octal-SPI NOR device. */
+typedef struct {
+    uint8_t mfr;        /**< 0xC2 expected (Macronix) */
+    uint8_t type;       /**< memory type              */
+    uint8_t capacity;   /**< capacity code            */
+} tiku_ospi_id_t;
+
+/* MX25UM51245G: 64 MB, 256-byte pages, 4 KB sectors. Addresses are 32-bit
+ * because 64 MB does not fit the legacy 24-bit command set. */
+#define TIKU_OSPI_SIZE_BYTES    0x04000000UL
+#define TIKU_OSPI_PAGE_SIZE     256U
+#define TIKU_OSPI_SECTOR_SIZE   4096U
+#define TIKU_OSPI_MFR_MACRONIX  0xC2U
+#define TIKU_OSPI_TYPE_MX25UM   0x80U
+#define TIKU_OSPI_CAPACITY_512M 0x3AU
+
+/* Base of the memory-mapped read window that tiku_ospi_mmap_enable()
+ * programs. Erase and program run indirectly, but the NVM region, the durable
+ * mirror, and the driver's cache invalidations address the flash through this
+ * base. */
+#define TIKU_OSPI_MMAP_BASE     0x70000000UL
+
+/* Flash layout of the 64 MB device:
+ *
+ *   0x0000000  FSBL1     256 KB  the boot image; the ROM loads this one
+ *   0x0040000  FSBL2     256 KB  the ROM's fallback search address
+ *   0x0080000  /data      8 MB  the carved NVM region (tier + TFS store)
+ *   0x0880000  model slot ~55 MB one-model bigblob space
+ *   0x3FFB000  scratch     4 KB  what `xflash test` erases
+ *   0x3FFC000  mirror     16 KB  the durable .uninit mirror
+ *
+ * The region is 8 MB rather than the whole device because TFS addresses at
+ * most TIKU_TFS_MAX_SLOTS slots and formatting writes a gate word per
+ * directory entry: 8 MB uses that ceiling exactly. Growing it is this one
+ * constant plus the mirror of it in tiku_nvm_region.h.
+ *
+ * The mirror is four sectors against a durable region under nine: the headroom
+ * is deliberate, and the linker script asserts the region still fits, because
+ * a mirror one byte too small loses the tail of durable state in silence. */
+#define TIKU_OSPI_BOOT_SLOT_BYTES 0x40000UL
+#define TIKU_OSPI_REGION_ADDR     0x80000UL
+#define TIKU_OSPI_REGION_BYTES    (8UL * 1024UL * 1024UL)
+#define TIKU_OSPI_MIRROR_SECTORS  4U
+#define TIKU_OSPI_MIRROR_BYTES    (TIKU_OSPI_SECTOR_SIZE * \
+                                   TIKU_OSPI_MIRROR_SECTORS)
+#define TIKU_OSPI_MIRROR_ADDR     (TIKU_OSPI_SIZE_BYTES - \
+                                   TIKU_OSPI_MIRROR_BYTES)
+#define TIKU_OSPI_SCRATCH_ADDR    (TIKU_OSPI_MIRROR_ADDR - \
+                                   TIKU_OSPI_SECTOR_SIZE)
+#define TIKU_OSPI_MODEL_ADDR      (TIKU_OSPI_REGION_ADDR + \
+                                   TIKU_OSPI_REGION_BYTES)
+#define TIKU_OSPI_MODEL_BYTES     (TIKU_OSPI_SCRATCH_ADDR - \
+                                   TIKU_OSPI_MODEL_ADDR)
+#define TIKU_OSPI_MODEL_OFFSET    TIKU_OSPI_MODEL_ADDR
+
+_Static_assert((TIKU_OSPI_MODEL_ADDR % TIKU_OSPI_SECTOR_SIZE) == 0U,
+               "N6 model slot must be sector aligned");
+_Static_assert((TIKU_OSPI_MODEL_ADDR % 65536UL) == 0U,
+               "N6 model slot must be bigblob-header aligned");
+_Static_assert(TIKU_OSPI_MODEL_BYTES > 65536UL,
+               "N6 model slot must contain a payload");
+
+/**
+ * @brief Bring up XSPI2 in octa-SPI DTR mode and read the device identity.
+ *
+ * @return TIKU_OSPI_OK, or an error leaving the driver unusable
+ */
+tiku_ospi_err_t tiku_ospi_init(void);
+
+/**
+ * @brief Read the JEDEC identity over the configured OSPI interface.
+ *
+ * @param out  Receives the identity; must not be NULL
+ * @return TIKU_OSPI_OK, or an error
+ */
+tiku_ospi_err_t tiku_ospi_read_id(tiku_ospi_id_t *out);
+
+/**
+ * @brief Read from the octal-SPI NOR flash.
+ *
+ * @param addr  Byte offset into the device
+ * @param buf   Destination
+ * @param len   Byte count
+ * @note Odd addresses and lengths are aligned internally for OPI DTR.
+ * @return TIKU_OSPI_OK, or an error
+ */
+tiku_ospi_err_t tiku_ospi_read(uint32_t addr, void *buf, uint32_t len);
+
+/**
+ * @brief Erase the 4 KB sector containing @p addr.
+ *
+ * @param addr  Any byte in the sector
+ * @return TIKU_OSPI_OK, or an error
+ * @note Erase is the wear-limited operation; a sector tolerates a finite count.
+ */
+tiku_ospi_err_t tiku_ospi_erase_sector(uint32_t addr);
+
+/**
+ * @brief Program bytes, splitting the run across page boundaries.
+ *
+ * @param addr  Byte offset into the device
+ * @param buf   Source
+ * @param len   Byte count
+ * @note Odd address and byte-count edges are preserved with aligned
+ *       read-modify-program operations; the target must still be erased first.
+ * @return TIKU_OSPI_OK, or an error
+ * @note Programming only clears bits; the target must be erased first.
+ */
+tiku_ospi_err_t tiku_ospi_program(uint32_t addr, const void *buf,
+                                  uint32_t len);
+
+/**
+ * @brief Map the flash into the address space for OPI DTR pointer reads.
+ *
+ * The mapped window starts at TIKU_OSPI_MMAP_BASE. Indirect commands take the
+ * window down before issuing a transfer, and enabling an already-live window
+ * is idempotent.
+ *
+ * @return TIKU_OSPI_OK, or an error
+ */
+tiku_ospi_err_t tiku_ospi_mmap_enable(void);
+
+/**
+ * @brief Abort and disable the OPI DTR memory-mapped window.
+ *
+ * @return TIKU_OSPI_OK, or an error
+ */
+tiku_ospi_err_t tiku_ospi_mmap_disable(void);
+
+/**
+ * @brief Report the clock the flash is being driven at.
+ *
+ * @return Interface clock in Hz, or 0 before a successful init
+ */
+unsigned long tiku_ospi_clock_hz(void);
+
+/**
+ * @brief Report whether init has succeeded this boot.
+ *
+ * @return 1 when the driver is usable
+ */
+int tiku_ospi_ready(void);
+
+#endif /* TIKU_STM32N6_OSPI_ARCH_H_ */

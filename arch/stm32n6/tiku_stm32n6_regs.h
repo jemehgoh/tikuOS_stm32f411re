@@ -840,6 +840,7 @@
  * drive anything. This board supplies 1.8 V, which is what ST's own board
  * code selects -- the range bit is only dangerous on a 3.3 V rail. */
 #define STM32N6_PWR_SVMCR3          (STM32N6_PWR_BASE + 0x03CU)
+#define STM32N6_PWR_SVMCR3_VDDIO3VMEN (1UL << 1)
 #define STM32N6_PWR_SVMCR3_VDDIO3SV (1UL << 9)
 #define STM32N6_PWR_SVMCR3_VDDIO3RDY (1UL << 17)
 #define STM32N6_PWR_SVMCR3_VDDIO3VRSEL (1UL << 26)
@@ -863,6 +864,9 @@
 #define STM32N6_XSPI_CCR            (STM32N6_XSPI2_BASE + 0x100U)
 #define STM32N6_XSPI_TCR            (STM32N6_XSPI2_BASE + 0x108U)
 #define STM32N6_XSPI_IR             (STM32N6_XSPI2_BASE + 0x110U)
+#define STM32N6_XSPI_WCCR           (STM32N6_XSPI2_BASE + 0x180U)
+#define STM32N6_XSPI_WTCR           (STM32N6_XSPI2_BASE + 0x188U)
+#define STM32N6_XSPI_WIR            (STM32N6_XSPI2_BASE + 0x190U)
 
 #define STM32N6_XSPI_CR_EN          (1UL << 0)
 #define STM32N6_XSPI_CR_ABORT       (1UL << 1)
@@ -876,22 +880,65 @@
 
 #define STM32N6_XSPI_DCR1_CKMODE    (1UL << 0)
 #define STM32N6_XSPI_DCR1_CSHT_POS  8U
+#define STM32N6_XSPI_DCR1_CSHT_MSK  (0x3FUL << STM32N6_XSPI_DCR1_CSHT_POS)
 #define STM32N6_XSPI_DCR1_DEVSIZE_POS 16U
-#define STM32N6_XSPI_DCR1_MTYP_MACRONIX (1UL << 24)
+#define STM32N6_XSPI_DCR1_DEVSIZE_MSK (0x1FUL << STM32N6_XSPI_DCR1_DEVSIZE_POS)
+#define STM32N6_XSPI_DCR1_DEVSIZE_64MB (25UL << STM32N6_XSPI_DCR1_DEVSIZE_POS)
+#define STM32N6_XSPI_DCR1_MTYP_POS   24U
+#define STM32N6_XSPI_DCR1_MTYP_MSK   (0x7UL << STM32N6_XSPI_DCR1_MTYP_POS)
+#define STM32N6_XSPI_DCR1_MTYP_MICRON (0UL << STM32N6_XSPI_DCR1_MTYP_POS)
+#define STM32N6_XSPI_DCR1_MTYP_MACRONIX (1UL << STM32N6_XSPI_DCR1_MTYP_POS)
+
+/* DCR2.PRESCALER encodes divide-by-(value + 1). */
+#define STM32N6_XSPI_DCR2_PRESCALER_POS 0U
+#define STM32N6_XSPI_DCR2_PRESCALER_MSK (0xFFUL << STM32N6_XSPI_DCR2_PRESCALER_POS)
+#define STM32N6_XSPI_DCR2_PRESCALER(value) \
+    (((uint32_t)(value) << STM32N6_XSPI_DCR2_PRESCALER_POS) & \
+     STM32N6_XSPI_DCR2_PRESCALER_MSK)
 
 #define STM32N6_XSPI_SR_TEF         (1UL << 0)
 #define STM32N6_XSPI_SR_TCF         (1UL << 1)
 #define STM32N6_XSPI_SR_FTF         (1UL << 2)
+#define STM32N6_XSPI_SR_TOF         (1UL << 4)
 #define STM32N6_XSPI_SR_BUSY        (1UL << 5)
 #define STM32N6_XSPI_FCR_ALL        (0x1BUL)
 
-/* One line for instruction, address and data: the part powers up in plain SPI
- * and answers there without any mode switch. */
-#define STM32N6_XSPI_CCR_IMODE_1L   (1UL << 0)
-#define STM32N6_XSPI_CCR_ADMODE_1L  (1UL << 8)
-#define STM32N6_XSPI_CCR_ADSIZE_32  (3UL << 12)
-#define STM32N6_XSPI_CCR_DMODE_1L   (1UL << 24)
+/* CCR phase fields. The eight-line values are used for octal-SPI DTR
+ * transfers; the one-line values are retained for the flash's initial SPI
+ * discovery and command path. */
+#define STM32N6_XSPI_CCR_IMODE_POS  0U
+#define STM32N6_XSPI_CCR_IMODE_MSK  (0x7UL << STM32N6_XSPI_CCR_IMODE_POS)
+#define STM32N6_XSPI_CCR_IMODE_1L   (1UL << STM32N6_XSPI_CCR_IMODE_POS)
+#define STM32N6_XSPI_CCR_IMODE_8L   (4UL << STM32N6_XSPI_CCR_IMODE_POS)
+#define STM32N6_XSPI_CCR_IDTR       (1UL << 3)
+#define STM32N6_XSPI_CCR_ISIZE_POS  4U
+#define STM32N6_XSPI_CCR_ISIZE_MSK  (0x3UL << STM32N6_XSPI_CCR_ISIZE_POS)
+#define STM32N6_XSPI_CCR_ISIZE_16   (1UL << STM32N6_XSPI_CCR_ISIZE_POS)
+
+#define STM32N6_XSPI_CCR_ADMODE_POS 8U
+#define STM32N6_XSPI_CCR_ADMODE_MSK (0x7UL << STM32N6_XSPI_CCR_ADMODE_POS)
+#define STM32N6_XSPI_CCR_ADMODE_1L  (1UL << STM32N6_XSPI_CCR_ADMODE_POS)
+#define STM32N6_XSPI_CCR_ADMODE_8L  (4UL << STM32N6_XSPI_CCR_ADMODE_POS)
+#define STM32N6_XSPI_CCR_ADDTR      (1UL << 11)
+#define STM32N6_XSPI_CCR_ADSIZE_POS 12U
+#define STM32N6_XSPI_CCR_ADSIZE_MSK (0x3UL << STM32N6_XSPI_CCR_ADSIZE_POS)
+#define STM32N6_XSPI_CCR_ADSIZE_32  (3UL << STM32N6_XSPI_CCR_ADSIZE_POS)
+
+#define STM32N6_XSPI_CCR_DMODE_POS  24U
+#define STM32N6_XSPI_CCR_DMODE_MSK  (0x7UL << STM32N6_XSPI_CCR_DMODE_POS)
+#define STM32N6_XSPI_CCR_DMODE_1L   (1UL << STM32N6_XSPI_CCR_DMODE_POS)
+#define STM32N6_XSPI_CCR_DMODE_8L   (4UL << STM32N6_XSPI_CCR_DMODE_POS)
+#define STM32N6_XSPI_CCR_DDTR       (1UL << 27)
+#define STM32N6_XSPI_CCR_DQSE       (1UL << 29)
+
+/* TCR dummy-cycle field. */
+#define STM32N6_XSPI_TCR_DCYC_POS  0U
+#define STM32N6_XSPI_TCR_DCYC_MSK  (0x1FUL << STM32N6_XSPI_TCR_DCYC_POS)
+
+/* DHQC is a valid register bit, but STM32N6 HAL marks the quarter-cycle
+ * delay option as deprecated and does not use it on STM32N6xx devices. */
 #define STM32N6_XSPI_TCR_DHQC       (1UL << 28)
+#define STM32N6_XSPI_TCR_SSHIFT     (1UL << 30)
 
 /* True random number generator, on its own AHB3 clock gate. */
 #define STM32N6_RCC_AHB3ENR         (STM32N6_RCC_BASE + 0x258U)

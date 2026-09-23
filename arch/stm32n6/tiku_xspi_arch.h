@@ -41,7 +41,7 @@ typedef struct {
 #define TIKU_XSPI_PAGE_SIZE     256U
 #define TIKU_XSPI_SECTOR_SIZE   4096U
 #define TIKU_XSPI_MFR_MACRONIX  0xC2U
-#define TIKU_XSPI_TYPE_MX25UM   0x86U
+#define TIKU_XSPI_TYPE_MX25UM   0x80U
 #define TIKU_XSPI_CAPACITY_512M 0x3AU
 
 /* Base of the memory-mapped read window that tiku_xspi_mmap_enable()

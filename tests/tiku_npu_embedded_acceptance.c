@@ -98,8 +98,10 @@ PT_THREAD(tiku_process_thread_npu_embedded_owner(
     (void)data;
     TIKU_PROCESS_BEGIN();
 
+    // rc = tiku_npu_model_bind(&tiku_npu_fixture_model,
+    //                          TIKU_NPU_FIXTURE_MODEL_PATH);
     rc = tiku_npu_model_bind(&tiku_npu_fixture_model,
-                             TIKU_NPU_FIXTURE_MODEL_PATH);
+                            (const uint8_t *)(uintptr_t)0x70880000UL);
     npu_embedded_check(rc == TIKU_NPU_OK,
                        "deployed network_rel.bin bind failed");
     if (rc != TIKU_NPU_OK) goto npu_embedded_report;

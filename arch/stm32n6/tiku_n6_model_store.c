@@ -1,7 +1,7 @@
 /*
  * Tiku Operating System v0.06
  *
- * STM32N6 model storage: one verified tiku_bigblob in external XSPI NOR.
+ * STM32N6 model storage: one verified tiku_bigblob in external OSPI NOR.
  * Reads use the memory-mapped window; provisioning uses indirect commands.
  *
  * SPDX-License-Identifier: Apache-2.0
@@ -14,7 +14,7 @@
 #include <kernel/fs/tiku_bigblob.h>
 
 #include "tiku_n6_model_store.h"
-#include "tiku_xspi_arch.h"
+#include "tiku_ospi_arch.h"
 
 #define MODEL_SLOT_OFF  0U
 
@@ -31,7 +31,7 @@ static int model_range_ok(size_t off, size_t len)
 
 static int model_physical_range_ok(size_t off, size_t len)
 {
-    const size_t base = (size_t)TIKU_XSPI_MODEL_ADDR;
+    const size_t base = (size_t)TIKU_OSPI_MODEL_ADDR;
 
     return model_range_ok(off, len) &&
            base <= (size_t)UINT32_MAX &&
@@ -46,13 +46,13 @@ static int model_write(tiku_nvm_backend_t *be, size_t off,
         !model_physical_range_ok(off, len)) {
         return -1;
     }
-    if (tiku_xspi_mmap_disable() != TIKU_XSPI_OK ||
-        tiku_xspi_program((uint32_t)(TIKU_XSPI_MODEL_ADDR + off), src,
-                          (uint32_t)len) != TIKU_XSPI_OK) {
-        (void)tiku_xspi_mmap_enable();
+    if (tiku_ospi_mmap_disable() != TIKU_OSPI_OK ||
+        tiku_ospi_program((uint32_t)(TIKU_OSPI_MODEL_ADDR + off), src,
+                          (uint32_t)len) != TIKU_OSPI_OK) {
+        (void)tiku_ospi_mmap_enable();
         return -1;
     }
-    return tiku_xspi_mmap_enable() == TIKU_XSPI_OK ? 0 : -1;
+    return tiku_ospi_mmap_enable() == TIKU_OSPI_OK ? 0 : -1;
 }
 
 static int model_erase(tiku_nvm_backend_t *be, size_t off, size_t len)
@@ -62,36 +62,36 @@ static int model_erase(tiku_nvm_backend_t *be, size_t off, size_t len)
 
     if (be == NULL || len == 0U || !model_physical_range_ok(off, len) ||
         off > SIZE_MAX - len ||
-        off + len > SIZE_MAX - ((size_t)TIKU_XSPI_SECTOR_SIZE - 1U)) {
+        off + len > SIZE_MAX - ((size_t)TIKU_OSPI_SECTOR_SIZE - 1U)) {
         return -1;
     }
-    first = off & ~((size_t)TIKU_XSPI_SECTOR_SIZE - 1U);
-    last = (off + len + TIKU_XSPI_SECTOR_SIZE - 1U) &
-           ~((size_t)TIKU_XSPI_SECTOR_SIZE - 1U);
-    if (last > be->size || tiku_xspi_mmap_disable() != TIKU_XSPI_OK) {
-        (void)tiku_xspi_mmap_enable();
+    first = off & ~((size_t)TIKU_OSPI_SECTOR_SIZE - 1U);
+    last = (off + len + TIKU_OSPI_SECTOR_SIZE - 1U) &
+           ~((size_t)TIKU_OSPI_SECTOR_SIZE - 1U);
+    if (last > be->size || tiku_ospi_mmap_disable() != TIKU_OSPI_OK) {
+        (void)tiku_ospi_mmap_enable();
         return -1;
     }
     while (first < last) {
-        if (tiku_xspi_erase_sector((uint32_t)(TIKU_XSPI_MODEL_ADDR + first)) !=
-            TIKU_XSPI_OK) {
-            (void)tiku_xspi_mmap_enable();
+        if (tiku_ospi_erase_sector((uint32_t)(TIKU_OSPI_MODEL_ADDR + first)) !=
+            TIKU_OSPI_OK) {
+            (void)tiku_ospi_mmap_enable();
             return -1;
         }
-        first += TIKU_XSPI_SECTOR_SIZE;
+        first += TIKU_OSPI_SECTOR_SIZE;
     }
-    return tiku_xspi_mmap_enable() == TIKU_XSPI_OK ? 0 : -1;
+    return tiku_ospi_mmap_enable() == TIKU_OSPI_OK ? 0 : -1;
 }
 
 static tiku_nvm_backend_t *model_backend(void)
 {
-    if (!tiku_xspi_ready() ||
-        tiku_xspi_mmap_enable() != TIKU_XSPI_OK) {
+    if (!tiku_ospi_ready() ||
+        tiku_ospi_mmap_enable() != TIKU_OSPI_OK) {
         return NULL;
     }
-    model_be.base = (uint8_t *)(uintptr_t)(TIKU_XSPI_MMAP_BASE +
-                                           TIKU_XSPI_MODEL_ADDR);
-    model_be.size = (size_t)TIKU_XSPI_MODEL_BYTES;
+    model_be.base = (uint8_t *)(uintptr_t)(TIKU_OSPI_MMAP_BASE +
+                                           TIKU_OSPI_MODEL_ADDR);
+    model_be.size = (size_t)TIKU_OSPI_MODEL_BYTES;
     model_be.write = model_write;
     model_be.erase = model_erase;
     model_be.ctx = NULL;

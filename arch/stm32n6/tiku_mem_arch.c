@@ -17,7 +17,7 @@
 #include <string.h>
 
 #include "tiku_mem_arch.h"
-#include "tiku_xspi_arch.h"
+#include "tiku_ospi_arch.h"
 #include <kernel/memory/tiku_nvm_mirror.h>
 
 /* The durable region is the .uninit span the linker script carves; the mirror
@@ -26,11 +26,11 @@
 extern uint32_t __uninit_start;
 extern uint32_t __uninit_end;
 
-#define MIRROR_IMAGE_MAX  (TIKU_XSPI_MIRROR_BYTES - TIKU_NVM_MIRROR_HDR_BYTES)
+#define MIRROR_IMAGE_MAX  (TIKU_OSPI_MIRROR_BYTES - TIKU_NVM_MIRROR_HDR_BYTES)
 
 /* The mirror is read through the memory-mapped window, so the CRC runs over
  * flash in place and a rejected image never touches the live region. */
-#define MIRROR_PTR  ((const uint8_t *)(TIKU_XSPI_MMAP_BASE + TIKU_XSPI_MIRROR_ADDR))
+#define MIRROR_PTR  ((const uint8_t *)(TIKU_OSPI_MMAP_BASE + TIKU_OSPI_MIRROR_ADDR))
 
 /** @brief What the boot-time restore found. */
 static uint8_t mem_restore_status = TIKU_NVM_RESTORE_VIRGIN;
@@ -47,12 +47,12 @@ static size_t mem_uninit_size(void) {
 void tiku_mem_arch_init(void) {
     /* The flash driver comes up before this on the boot path; without it there
      * is nothing to restore from and the region keeps its reset contents. */
-    if (!tiku_xspi_ready()) {
+    if (!tiku_ospi_ready()) {
         mem_restore_status = TIKU_NVM_RESTORE_VIRGIN;
         return;
     }
 
-    if (tiku_xspi_mmap_enable() != TIKU_XSPI_OK) {
+    if (tiku_ospi_mmap_enable() != TIKU_OSPI_OK) {
         mem_restore_status = TIKU_NVM_RESTORE_VIRGIN;
         return;
     }
@@ -122,7 +122,7 @@ void tiku_mem_arch_nvm_write(uint8_t *dst, const uint8_t *src,
 }
 
 void tiku_mem_arch_nvm_flush(void) {
-    if (!tiku_xspi_ready()) {
+    if (!tiku_ospi_ready()) {
         return;
     }
 
@@ -131,7 +131,7 @@ void tiku_mem_arch_nvm_flush(void) {
 
     /* Skip a mirror that already matches: an erase costs one cycle of a finite
      * per-sector budget and tens of milliseconds, for no change. */
-    if (tiku_xspi_mmap_enable() == TIKU_XSPI_OK) {
+    if (tiku_ospi_mmap_enable() == TIKU_OSPI_OK) {
         const uint32_t *hdr = (const uint32_t *)(const void *)MIRROR_PTR;
         if (hdr[TIKU_NVM_MIRROR_W_MAGIC] == TIKU_NVM_MIRROR_MAGIC_V2 &&
             hdr[TIKU_NVM_MIRROR_W_LEN]   == (uint32_t)len &&
@@ -150,22 +150,22 @@ void tiku_mem_arch_nvm_flush(void) {
     hdr_out[TIKU_NVM_MIRROR_W_LEN]   = (uint32_t)len;
     hdr_out[TIKU_NVM_MIRROR_W_RSVD]  = 0xFFFFFFFFU;
 
-    for (unsigned i = 0U; i < TIKU_XSPI_MIRROR_SECTORS; i++) {
-        if (tiku_xspi_erase_sector(TIKU_XSPI_MIRROR_ADDR +
-                                   (i * TIKU_XSPI_SECTOR_SIZE)) != TIKU_XSPI_OK) {
+    for (unsigned i = 0U; i < TIKU_OSPI_MIRROR_SECTORS; i++) {
+        if (tiku_ospi_erase_sector(TIKU_OSPI_MIRROR_ADDR +
+                                   (i * TIKU_OSPI_SECTOR_SIZE)) != TIKU_OSPI_OK) {
             return;
         }
     }
-    if (tiku_xspi_program(TIKU_XSPI_MIRROR_ADDR + TIKU_NVM_MIRROR_HDR_BYTES,
-                          &__uninit_start, (uint32_t)len) != TIKU_XSPI_OK) {
+    if (tiku_ospi_program(TIKU_OSPI_MIRROR_ADDR + TIKU_NVM_MIRROR_HDR_BYTES,
+                          &__uninit_start, (uint32_t)len) != TIKU_OSPI_OK) {
         return;
     }
-    if (tiku_xspi_program(TIKU_XSPI_MIRROR_ADDR, hdr_out,
-                          sizeof(hdr_out)) != TIKU_XSPI_OK) {
+    if (tiku_ospi_program(TIKU_OSPI_MIRROR_ADDR, hdr_out,
+                          sizeof(hdr_out)) != TIKU_OSPI_OK) {
         return;
     }
     mem_program_count++;
-    (void)tiku_xspi_mmap_enable();      /* leave reads cheap again */
+    (void)tiku_ospi_mmap_enable();      /* leave reads cheap again */
 }
 
 int tiku_mem_arch_nvm_restore_status(void) {

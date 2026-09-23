@@ -5,7 +5,7 @@
  *
  * Authors: Ambuj Varshney <ambuj@tiku-os.org>
  *
- * tiku_shell_cmd_xflash.c - "xflash" command: external NOR over XSPI.
+ * tiku_shell_cmd_xflash.c - "xflash" command: external NOR over OSPI DTR.
  *
  * The test subcommand erases one sector, so it works on a scratch sector at
  * the top of the device rather than anywhere a boot image would live.
@@ -22,21 +22,21 @@
 #include <string.h>
 
 #if defined(PLATFORM_STM32N6)
-#include <arch/stm32n6/tiku_xspi_arch.h>
+#include <arch/stm32n6/tiku_ospi_arch.h>
 
 /* Sits below the durable mirror, so an erase test cannot destroy state that
  * is meant to survive; both are far from a boot image at offset 0. */
-#define XFLASH_SCRATCH  TIKU_XSPI_SCRATCH_ADDR
+#define XFLASH_SCRATCH  TIKU_OSPI_SCRATCH_ADDR
 
-/** @brief Human-readable form of an XSPI result. */
-static const char *xflash_err(tiku_xspi_err_t e)
+/** @brief Human-readable form of an OSPI result. */
+static const char *xflash_err(tiku_ospi_err_t e)
 {
     switch (e) {
-    case TIKU_XSPI_OK:           return "ok";
-    case TIKU_XSPI_ERR_ARG:      return "bad argument";
-    case TIKU_XSPI_ERR_TIMEOUT:  return "timeout";
-    case TIKU_XSPI_ERR_ID:       return "wrong identity";
-    case TIKU_XSPI_ERR_PROGRAM:  return "program failed";
+    case TIKU_OSPI_OK:           return "ok";
+    case TIKU_OSPI_ERR_ARG:      return "bad argument";
+    case TIKU_OSPI_ERR_TIMEOUT:  return "timeout";
+    case TIKU_OSPI_ERR_ID:       return "wrong identity";
+    case TIKU_OSPI_ERR_PROGRAM:  return "program failed";
     default:                     return "not initialised";
     }
 }
@@ -44,20 +44,20 @@ static const char *xflash_err(tiku_xspi_err_t e)
 /** @brief Print the device identity and geometry. */
 static void xflash_id(void)
 {
-    tiku_xspi_id_t id;
-    tiku_xspi_err_t rc = tiku_xspi_read_id(&id);
+    tiku_ospi_id_t id;
+    tiku_ospi_err_t rc = tiku_ospi_read_id(&id);
 
-    if (rc != TIKU_XSPI_OK) {
+    if (rc != TIKU_OSPI_OK) {
         SHELL_PRINTF("xflash: id failed (%s)\n", xflash_err(rc));
         return;
     }
     SHELL_PRINTF("  JEDEC   %02x %02x %02x%s\n", id.mfr, id.type, id.capacity,
-                 (id.mfr == TIKU_XSPI_MFR_MACRONIX) ? "  (Macronix)" : "");
+                 (id.mfr == TIKU_OSPI_MFR_MACRONIX) ? "  (Macronix)" : "");
     SHELL_PRINTF("  size    %lu MB, %u B pages, %u B sectors\n",
-                 (unsigned long)(TIKU_XSPI_SIZE_BYTES / (1024UL * 1024UL)),
-                 (unsigned)TIKU_XSPI_PAGE_SIZE, (unsigned)TIKU_XSPI_SECTOR_SIZE);
-    SHELL_PRINTF("  clock   %lu Hz, indirect single-lane SPI\n",
-                 tiku_xspi_clock_hz());
+                 (unsigned long)(TIKU_OSPI_SIZE_BYTES / (1024UL * 1024UL)),
+                 (unsigned)TIKU_OSPI_PAGE_SIZE, (unsigned)TIKU_OSPI_SECTOR_SIZE);
+    SHELL_PRINTF("  clock   %lu Hz, octal-SPI DTR\n",
+                 tiku_ospi_clock_hz());
 }
 
 /**
@@ -71,7 +71,7 @@ static void xflash_test(void)
     static uint8_t buf[64];
     uint8_t pattern[64];
     unsigned i;
-    tiku_xspi_err_t rc;
+    tiku_ospi_err_t rc;
 
     for (i = 0u; i < sizeof(pattern); i++) {
         pattern[i] = (uint8_t)(i * 3u + 1u);
@@ -79,14 +79,14 @@ static void xflash_test(void)
 
     SHELL_PRINTF("xflash: erasing sector at %lx ...\n",
                  (unsigned long)XFLASH_SCRATCH);
-    rc = tiku_xspi_erase_sector(XFLASH_SCRATCH);
-    if (rc != TIKU_XSPI_OK) {
+    rc = tiku_ospi_erase_sector(XFLASH_SCRATCH);
+    if (rc != TIKU_OSPI_OK) {
         SHELL_PRINTF("  erase failed (%s)\n", xflash_err(rc));
         return;
     }
 
-    rc = tiku_xspi_read(XFLASH_SCRATCH, buf, sizeof(buf));
-    if (rc != TIKU_XSPI_OK) {
+    rc = tiku_ospi_read(XFLASH_SCRATCH, buf, sizeof(buf));
+    if (rc != TIKU_OSPI_OK) {
         SHELL_PRINTF("  read-after-erase failed (%s)\n", xflash_err(rc));
         return;
     }
@@ -98,15 +98,15 @@ static void xflash_test(void)
     }
     SHELL_PRINTF("  erased: all ff\n");
 
-    rc = tiku_xspi_program(XFLASH_SCRATCH, pattern, sizeof(pattern));
-    if (rc != TIKU_XSPI_OK) {
+    rc = tiku_ospi_program(XFLASH_SCRATCH, pattern, sizeof(pattern));
+    if (rc != TIKU_OSPI_OK) {
         SHELL_PRINTF("  program failed (%s)\n", xflash_err(rc));
         return;
     }
 
     memset(buf, 0, sizeof(buf));
-    rc = tiku_xspi_read(XFLASH_SCRATCH, buf, sizeof(buf));
-    if (rc != TIKU_XSPI_OK) {
+    rc = tiku_ospi_read(XFLASH_SCRATCH, buf, sizeof(buf));
+    if (rc != TIKU_OSPI_OK) {
         SHELL_PRINTF("  read-back failed (%s)\n", xflash_err(rc));
         return;
     }
@@ -125,9 +125,9 @@ static void xflash_test(void)
 static void xflash_dump(uint32_t addr)
 {
     uint8_t buf[16];
-    tiku_xspi_err_t rc = tiku_xspi_read(addr, buf, sizeof(buf));
+    tiku_ospi_err_t rc = tiku_ospi_read(addr, buf, sizeof(buf));
 
-    if (rc != TIKU_XSPI_OK) {
+    if (rc != TIKU_OSPI_OK) {
         SHELL_PRINTF("xflash: read failed (%s)\n", xflash_err(rc));
         return;
     }
@@ -178,7 +178,7 @@ static void xflash_write(uint32_t addr, uint32_t len)
     uint8_t *buf = (uint8_t *)(((uintptr_t)&_end + 31u) & ~(uintptr_t)31u);
     uintptr_t top = (uintptr_t)&__stack - XFLASH_STACK_RESERVE;
 
-    if (len == 0u || addr + len > TIKU_XSPI_SIZE_BYTES) {
+    if (len == 0u || addr + len > TIKU_OSPI_SIZE_BYTES) {
         SHELL_PRINTF("xflash: bad range\n");
         return;
     }
@@ -207,17 +207,17 @@ static void xflash_write(uint32_t addr, uint32_t len)
     }
     SHELL_PRINTF("\nxflash: received, checksum %08lx; erasing %lu sectors\n",
                  (unsigned long)sum,
-                 (unsigned long)((len + TIKU_XSPI_SECTOR_SIZE - 1u)
-                                 / TIKU_XSPI_SECTOR_SIZE));
+                 (unsigned long)((len + TIKU_OSPI_SECTOR_SIZE - 1u)
+                                 / TIKU_OSPI_SECTOR_SIZE));
 
-    for (uint32_t off = 0u; off < len; off += TIKU_XSPI_SECTOR_SIZE) {
-        if (tiku_xspi_erase_sector(addr + off) != TIKU_XSPI_OK) {
+    for (uint32_t off = 0u; off < len; off += TIKU_OSPI_SECTOR_SIZE) {
+        if (tiku_ospi_erase_sector(addr + off) != TIKU_OSPI_OK) {
             SHELL_PRINTF("xflash: erase failed at %lx\n",
                          (unsigned long)(addr + off));
             return;
         }
     }
-    if (tiku_xspi_program(addr, buf, len) != TIKU_XSPI_OK) {
+    if (tiku_ospi_program(addr, buf, len) != TIKU_OSPI_OK) {
         SHELL_PRINTF("xflash: program failed\n");
         return;
     }
@@ -227,7 +227,7 @@ static void xflash_write(uint32_t addr, uint32_t len)
     for (uint32_t off = 0u; off < len; off += 256u) {
         uint8_t tmp[256];
         uint32_t n = (len - off < 256u) ? (len - off) : 256u;
-        if (tiku_xspi_read(addr + off, tmp, n) != TIKU_XSPI_OK) {
+        if (tiku_ospi_read(addr + off, tmp, n) != TIKU_OSPI_OK) {
             SHELL_PRINTF("xflash: verify read failed\n");
             return;
         }
@@ -242,8 +242,8 @@ static void xflash_write(uint32_t addr, uint32_t len)
 
 void tiku_shell_cmd_xflash(uint8_t argc, const char *argv[])
 {
-    if (!tiku_xspi_ready()) {
-        SHELL_PRINTF("xflash: XSPI not initialised\n");
+    if (!tiku_ospi_ready()) {
+        SHELL_PRINTF("xflash: OSPI not initialised\n");
         return;
     }
     if (argc < 2 || strcmp(argv[1], "id") == 0) {
@@ -304,7 +304,7 @@ void tiku_shell_cmd_xflash(uint8_t argc, const char *argv[])
 {
     (void)argc;
     (void)argv;
-    SHELL_PRINTF("xflash: no XSPI flash on this platform\n");
+    SHELL_PRINTF("xflash: no OSPI flash on this platform\n");
 }
 
 #endif /* PLATFORM_STM32N6 */
