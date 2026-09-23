@@ -158,6 +158,8 @@
  * filters them to read-as-zero / write-ignored -- and the SECCFGR write itself
  * is only accepted when it arrives as a secure access. */
 #define STM32N6_RCC_AHB5ENR         (STM32N6_RCC_BASE + 0x260U)
+#define STM32N6_RCC_AHB5RSTSR       (STM32N6_RCC_BASE + 0xA20U)
+#define STM32N6_RCC_AHB5RSTCR       (STM32N6_RCC_BASE + 0x1220U)
 #define STM32N6_RCC_AHB5ENR_HPDMA1  (1UL << 0)
 #define STM32N6_RCC_AHB5ENR_NPU     (1UL << 31)
 
@@ -828,6 +830,10 @@
 #define STM32N6_RCC_AHB4ENR_GPION   (1UL << 13)
 #define STM32N6_RCC_AHB5ENR_XSPI2   (1UL << 12)
 #define STM32N6_RCC_AHB5ENR_XSPIM   (1UL << 13)
+#define STM32N6_RCC_AHB5RSTSR_XSPI2 (1UL << 12)
+#define STM32N6_RCC_AHB5RSTSR_XSPIM (1UL << 13)
+#define STM32N6_RCC_AHB5RSTCR_XSPI2 (1UL << 12)
+#define STM32N6_RCC_AHB5RSTCR_XSPIM (1UL << 13)
 #define STM32N6_RCC_CCIPR6          (STM32N6_RCC_BASE + 0x158U)
 #define STM32N6_CCIPR6_XSPI2SEL_MSK (3UL << 4)
 #define STM32N6_CCIPR6_XSPI2SEL_IC3 (2UL << 4)      /* IC3, per ST's config */

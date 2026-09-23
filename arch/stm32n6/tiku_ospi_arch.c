@@ -229,7 +229,6 @@ static tiku_ospi_err_t ospi_command(const ospi_command_t *command) {
     }
     if (!ospi_wait(STM32N6_XSPI_SR, STM32N6_XSPI_SR_BUSY, 0, OSPI_SPINS)) {
         return TIKU_OSPI_ERR_TIMEOUT;
-        // return TIKU_OSPI_OK;
     }
     ospi_finish();
 
@@ -689,6 +688,19 @@ static void ospi_configure_clock(void) {
     TIKU_REG32(STM32N6_RCC_CCIPR6) = ccipr;
 }
 
+static void ospi_reset_peripherals(void) {
+    /* Reset both the XSPI2 controller and the XSPIM routing block. This is
+     * required for a clean handoff after warm/debug resets; clearing XSPI2_CR
+     * alone does not restore the peripheral's reset state. */
+    TIKU_REG32(STM32N6_RCC_AHB5RSTSR) =
+        STM32N6_RCC_AHB5RSTSR_XSPI2 | STM32N6_RCC_AHB5RSTSR_XSPIM;
+    (void)TIKU_REG32(STM32N6_RCC_AHB5RSTSR);
+
+    TIKU_REG32(STM32N6_RCC_AHB5RSTCR) =
+        STM32N6_RCC_AHB5RSTCR_XSPI2 | STM32N6_RCC_AHB5RSTCR_XSPIM;
+    (void)TIKU_REG32(STM32N6_RCC_AHB5RSTCR);
+}
+
 static tiku_ospi_err_t ospi_enable_pads(void) {
     /* Enable clock signals to XSPI2 (connected to flash on the Nucleo)
        and to GPION (pins for XSPI2 lines) */
@@ -696,6 +708,8 @@ static tiku_ospi_err_t ospi_enable_pads(void) {
                                        STM32N6_RCC_AHB5ENR_XSPIM;
     TIKU_REG32(STM32N6_RCC_AHB4ENR) |= STM32N6_RCC_AHB4ENR_GPION;
     (void)TIKU_REG32(STM32N6_RCC_AHB5ENR);
+
+    ospi_reset_peripherals();
 
     /* Enable VDDIO - power regulator for XSPI2 */
     TIKU_REG32(STM32N6_PWR_SVMCR3) |= STM32N6_PWR_SVMCR3_VDDIO3VMEN;
@@ -755,21 +769,7 @@ tiku_ospi_err_t tiku_ospi_init(void) {
 
     uint8_t id[3] = { 0U, 0U, 0U };
     rc = ospi_read_spi_id(id);
-    if (rc != TIKU_OSPI_OK || !ospi_id_matches(id)) {
-        /* No dedicated flash reset pin is exposed on the board. Try the OPI
-         * reset command once in case the device retained DOPI across reset,
-         * then restore the controller and retry the SPI probe. */
-        (void)ospi_opi_dtr_reset();
-        ospi_configure_controller();
-        (void)ospi_spi_reset();
-        id[0] = 0U;
-        id[1] = 0U;
-        id[2] = 0U;
-        rc = ospi_read_spi_id(id);
-        if (rc != TIKU_OSPI_OK) {
-            return rc;
-        }
-    }
+    
     if (!ospi_id_matches(id)) {
         return TIKU_OSPI_ERR_ID;
     }

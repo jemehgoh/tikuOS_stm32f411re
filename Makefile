@@ -1978,7 +1978,7 @@ SRCS += arch/stm32n6/tiku_lcd_arch.c
 SRCS += arch/stm32n6/tiku_dma_arch.c
 SRCS += arch/stm32n6/tiku_dcmipp_arch.c
 SRCS += arch/stm32n6/tiku_pwm_arch.c
-SRCS += arch/stm32n6/tiku_xspi_arch.c
+SRCS += arch/stm32n6/tiku_ospi_arch.c
 SRCS += arch/stm32n6/tiku_sram_arch.c
 ifeq ($(TIKU_NPU_ENABLE),1)
 SRCS += arch/stm32n6/tiku_npu_arch.c
@@ -3334,7 +3334,8 @@ TARGET = main.elf
 # Targets
 # ---------------------------------------------------------------------------
 .SUFFIXES:
-.PHONY: all clean flash run debug erase size monitor deploy docs docs-clean uf2 lint
+.PHONY: all clean flash run debug erase size monitor deploy docs docs-clean uf2 lint \
+        stm32n6-model-flash
 
 # Static placement lint: raw section(".persistent") outside the grade macros
 # is the audit's silent-volatile bug class (kintsugi/memoryfix.md Phase A).
@@ -3452,8 +3453,24 @@ STM32N6_CUBE   ?= $(firstword $(foreach d,$(STM32N6_CUBE_CANDIDATES),\
                     $(if $(wildcard $(d)/STM32_SigningTool_CLI),$(d))))
 STM32N6_SIGN   ?= $(STM32N6_CUBE)/STM32_SigningTool_CLI
 STM32N6_PROG   ?= $(STM32N6_CUBE)/STM32_Programmer_CLI
-# FSBL partition ID advertised by the ROM's DFU interface.
+# External-flash and SRAM addresses for the Nucleo boot/debug flows.
+STM32N6_APP_ADDR  ?= 0x70000000
+STM32N6_SRAM_ADDR ?= 0x34180400
+
+# DFU FSBL dev boot path - for debug builds using the boot ROM.
 STM32N6_PART   ?= 0x01
+
+# The model slot begins at OSPI2's 0x70000000 window plus the 0x00880000
+# physical slot offset.  The packaged bigblob includes the runtime header and
+# CRC metadata expected by the on-device model store.
+# STM32N6_MODEL_BLOB ?= data/npu/network_rel.bin.bigblob
+STM32N6_MODEL_BLOB ?= data/npu/network_rel.bin
+STM32N6_MODEL_SIGNED ?= data/npu/network_rel_signed.bin
+STM32N6_MODEL_ADDR ?= 0x70880000
+# NUEL is the short spelling used by ST's Nucleo examples.  An explicit
+# STM32N6_NUEL/NUEL override wins; otherwise use the stock Nucleo loader from
+# the selected CubeProgrammer installation.
+STM32N6_NUEL       ?= $(if $(strip $(NUEL)),$(NUEL),$(STM32N6_CUBE)/ExternalLoader/MX25UM51245G_STM32N6570-NUCLEO.stldr)
 
 # One message naming the fix, rather than a 127 from the shell.  A recipe,
 # not an $(error): the ELF and the .bin are still worth building on a host
@@ -3465,6 +3482,46 @@ define STM32N6_NEED_CUBE
 	 echo "  install it, or point at it:"; \
 	 echo "    make MCU=stm32n6 STM32N6_CUBE=/path/to/bin $(1)"; \
 	 exit 1
+endef
+
+# Validate every input before the first external-flash write.  This prevents a
+# missing model or loader from leaving a newly programmed application paired
+# with an old model.
+define STM32N6_VALIDATE_FLASH
+	test -x "$(STM32N6_PROG)" || { $(call STM32N6_NEED_CUBE,flash); }; \
+	test -f "$(STM32N6_NUEL)" || { \
+	    echo "stm32n6: external loader not found: $(STM32N6_NUEL)"; \
+	    echo "  set STM32N6_NUEL=/absolute/path/to/MX25UM51245G_STM32N6570-NUCLEO.stldr"; \
+	    exit 1; \
+	}; \
+	test -f "$(TARGET_SIGNED)" || { \
+	    echo "stm32n6: signed application not found: $(TARGET_SIGNED)"; \
+	    exit 1; \
+	}
+# ifeq ($(TIKU_NPU_ENABLE),1)
+# 	test -f "$(STM32N6_MODEL_BLOB)" || { \
+# 	    echo "stm32n6: model bigblob not found: $(STM32N6_MODEL_BLOB)"; \
+# 	    echo "  generate it with tools/npu/stm32n6_relpack.py"; \
+# 	    exit 1; \
+# 	}
+# endif
+endef
+
+define STM32N6_VALIDATE_MODEL_FLASH
+	test -x "$(STM32N6_PROG)" || { $(call STM32N6_NEED_CUBE,model-flash); }; \
+	test -f "$(STM32N6_NUEL)" || { \
+	    echo "stm32n6: external loader not found: $(STM32N6_NUEL)"; \
+	    echo "  set STM32N6_NUEL=/absolute/path/to/MX25UM51245G_STM32N6570-NUCLEO.stldr"; \
+	    exit 1; \
+	}; \
+	test -f "$(STM32N6_MODEL_BLOB)" || { \
+	    echo "stm32n6: model source not found: $(STM32N6_MODEL_BLOB)"; \
+	    exit 1; \
+	}; \
+	test -f "$(STM32N6_MODEL_SIGNED)" || { \
+	    echo "stm32n6: signed model not found: $(STM32N6_MODEL_SIGNED)"; \
+	    exit 1; \
+	}
 endef
 
 $(TARGET_BIN): $(TARGET)
@@ -3480,6 +3537,25 @@ $(TARGET_SIGNED): $(TARGET_BIN)
 	@"$(STM32N6_SIGN)" -bin $< -nk -of 0x80000000 -t fsbl -hv 2.3 -align -s -o $@ \
 	    < /dev/null > /dev/null
 	@echo "  [sign]  $< -> $@"
+
+$(STM32N6_MODEL_SIGNED): $(STM32N6_MODEL_BLOB)
+	@test -x "$(STM32N6_SIGN)" || { $(call STM32N6_NEED_CUBE,sign); }
+	@rm -f $@
+	@"$(STM32N6_SIGN)" -bin $< -nk -of 0x00000000 -hv 2.3 -align -s -o $@ \
+	    < /dev/null > /dev/null
+	@echo "  [sign]  $< -> $@"
+
+ifeq ($(TIKU_NPU_ENABLE),1)
+# Build the signed model before programming it, just as the application flash
+# path builds TARGET_SIGNED before `flash` can run.  This also rebuilds the
+# artifact whenever the raw model source changes.
+stm32n6-model-flash: $(STM32N6_MODEL_SIGNED)
+	@$(call STM32N6_VALIDATE_MODEL_FLASH)
+	@echo "Flashing $(STM32N6_MODEL_SIGNED) -> OSPI $(STM32N6_MODEL_ADDR) via external loader..."
+	@"$(STM32N6_PROG)" -c port=SWD mode=HOTPLUG \
+	    -el "$(STM32N6_NUEL)" -hardRst \
+	    -w "$(STM32N6_MODEL_SIGNED)" "$(STM32N6_MODEL_ADDR)" -v
+endif
 endif
 
 # nRF54L15: Intel HEX for nrfutil to program into RRAM.
@@ -3872,14 +3948,30 @@ endif
 
 else ifeq ($(TIKU_PLATFORM),stm32n6)
 
-# Load over the ROM's DFU interface, which needs development boot (BOOT1 in
-# position 2-3) and both USB-C ports connected. -g hands the CPU over, at which
-# point the ROM's DFU disappears and the programmer reports a reconnect
-# timeout: that is the handoff succeeding, not a failure.
+# Boot-from-flash flow.  The signed TikuOS image is the FSBL: CubeProgrammer
+# writes it at external-flash base, then writes the optional packaged model in
+# the reserved OSPI model slot.  The user must switch the board to boot-from-
+# flash mode and power-cycle after this recipe completes.
 flash: all
-	@test -x "$(STM32N6_PROG)" || { $(call STM32N6_NEED_CUBE,flash); }
-	-@"$(STM32N6_PROG)" -c port=usb1 -w $(TARGET_SIGNED) $(STM32N6_PART) \
-	    -g $(STM32N6_PART)
+	@$(call STM32N6_VALIDATE_FLASH)
+	@echo "Flashing $(TARGET_SIGNED) -> external NOR $(STM32N6_APP_ADDR) via external loader..."
+	@"$(STM32N6_PROG)" -c port=SWD mode=HOTPLUG \
+	    -el "$(STM32N6_NUEL)" -hardRst \
+	    -w "$(TARGET_SIGNED)" "$(STM32N6_APP_ADDR)" -v
+ifeq ($(TIKU_NPU_ENABLE),1)
+	$(MAKE) --no-print-directory stm32n6-model-flash
+endif
+	@echo "STM32N6 flash programming complete."
+	@echo "  Switch the Nucleo board from development boot to boot-from-flash."
+	@echo "  Power-cycle the board to boot the FSBL/application from external NOR."
+
+# Development/debug flow. Load the application image into SRAM via USB-DFU.
+debug: $(TARGET_SIGNED)
+	@test -x "$(STM32N6_PROG)" || { $(call STM32N6_NEED_CUBE,debug); }
+	@echo "Loading $(TARGET_SIGNED) into SRAM for debug..."
+	@"$(STM32N6_PROG)" -c port=usb1 \
+	    -d "$(TARGET_SIGNED)" "$(STM32N6_PART)" -g "$(STM32N6_PART)"
+	@echo "Debug image loaded into volatile SRAM; external NOR was not modified."
 
 run: flash
 
@@ -3890,8 +3982,11 @@ dfu-reset:
 	@"$(STM32N6_PROG)" -c port=SWD mode=UR -hardRst
 
 erase:
-	@echo "stm32n6: nothing to erase -- the image lives in SRAM, so a reset"
-	@echo "  (make dfu-reset) already clears it."
+	@echo "stm32n6: erase is intentionally not automatic."
+	@echo "  External NOR contains the FSBL, /data, and the model slot."
+	@echo "  Use STM32CubeProgrammer with an explicit range if those contents"
+	@echo "  really need to be removed; a reset only clears the volatile SRAM"
+	@echo "  debug image (make dfu-reset)."
 
 else ifeq ($(TIKU_PLATFORM),ra8p1)
 

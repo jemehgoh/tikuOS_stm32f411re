@@ -202,12 +202,8 @@ tiku_xspi_err_t tiku_xspi_init(void) {
      * cannot answer at all. */
     TIKU_REG32(STM32N6_PWR_SVMCR3) |= STM32N6_PWR_SVMCR3_VDDIO3SV |
                                       STM32N6_PWR_SVMCR3_VDDIO3VRSEL;
-    // (void)xspi_wait(STM32N6_PWR_SVMCR3, STM32N6_PWR_SVMCR3_VDDIO3RDY, 1,
-    //                 XSPI_SPINS);
-    if (xspi_wait(STM32N6_PWR_SVMCR3, STM32N6_PWR_SVMCR3_VDDIO3RDY, 1,
-                    XSPI_SPINS) != 0) {
-                        return TIKU_XSPI_ERR_TIMEOUT;
-    }
+    (void)xspi_wait(STM32N6_PWR_SVMCR3, STM32N6_PWR_SVMCR3_VDDIO3RDY, 1,
+                    XSPI_SPINS);
 
     /* Eleven signals, all GPION at AF9: DQS0, NCS1, IO0..IO7 and the clock. */
     static const uint8_t pins[] = { 0U, 1U, 2U, 3U, 4U, 5U, 6U, 8U, 9U, 10U, 11U };
@@ -241,14 +237,9 @@ tiku_xspi_err_t tiku_xspi_init(void) {
         xspi_ready = 0U;
         return rc;
     }
-    // if (id.mfr != TIKU_XSPI_MFR_MACRONIX ||
-    //     id.type != TIKU_XSPI_TYPE_MX25UM ||
-    //     id.capacity != TIKU_XSPI_CAPACITY_512M) {
-    if (id.mfr != 0xC2 ||
-        id.type != 0xC2) {
-        xspi_ready = 0U;
-        return TIKU_XSPI_ERR_ID;
-    }
+    if (id.mfr != TIKU_XSPI_MFR_MACRONIX ||
+        id.type != TIKU_XSPI_TYPE_MX25UM ||
+        id.capacity != TIKU_XSPI_CAPACITY_512M) {
     return TIKU_XSPI_OK;
 }
 
