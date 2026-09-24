@@ -16,13 +16,11 @@
 #include <stdarg.h>
 #include <stddef.h>
 
+#include <arch/stm32n6/tiku_device_select.h>
+
 #include "tiku_uart_arch.h"
 #include "tiku_gpio_arch.h"
 #include "tiku_stm32n6_regs.h"
-
-#ifndef TIKU_BOARD_UART_BAUD
-#define TIKU_BOARD_UART_BAUD    115200UL
-#endif
 
 #define UART_BASE               STM32N6_USART1_BASE
 
@@ -52,10 +50,11 @@ void tiku_uart_init(void) {
         }
     }
 
-    tiku_stm32n6_gpio_init_alt(STM32N6_GPIO_PORT_E, STM32N6_USART1_TX_PIN,
-                               STM32N6_USART1_AF);
-    tiku_stm32n6_gpio_init_alt(STM32N6_GPIO_PORT_E, STM32N6_USART1_RX_PIN,
-                               STM32N6_USART1_AF);
+    TIKU_BOARD_UART_PINS_INIT();
+    tiku_stm32n6_gpio_init_alt(TIKU_BOARD_UART_PORT, TIKU_BOARD_UART_TX_PIN,
+                               TIKU_BOARD_UART_AF);
+    tiku_stm32n6_gpio_init_alt(TIKU_BOARD_UART_PORT, TIKU_BOARD_UART_RX_PIN,
+                               TIKU_BOARD_UART_AF);
 
     /* Kernel clock select must be set while the peripheral is disabled. */
     uint32_t ccipr = TIKU_REG32(STM32N6_RCC_CCIPR13);

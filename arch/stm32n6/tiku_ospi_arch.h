@@ -42,9 +42,12 @@ typedef struct {
 #define TIKU_OSPI_SIZE_BYTES    0x04000000UL
 #define TIKU_OSPI_PAGE_SIZE     256U
 #define TIKU_OSPI_SECTOR_SIZE   4096U
+// #define TIKU_OSPI_MFR_MACRONIX  0xC2U
+// #define TIKU_OSPI_TYPE_MX25UM   0x80U
+// #define TIKU_OSPI_CAPACITY_512M 0x3AU
 #define TIKU_OSPI_MFR_MACRONIX  0xC2U
-#define TIKU_OSPI_TYPE_MX25UM   0x80U
-#define TIKU_OSPI_CAPACITY_512M 0x3AU
+#define TIKU_OSPI_TYPE_MX25UM   0x81U
+#define TIKU_OSPI_CAPACITY_512M 0x3BU
 
 /* Base of the memory-mapped read window that tiku_ospi_mmap_enable()
  * programs. Erase and program run indirectly, but the NVM region, the durable

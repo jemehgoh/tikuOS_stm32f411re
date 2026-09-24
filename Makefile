@@ -134,7 +134,7 @@ DEFAULT_BOARD_ra8p1         := ek_ra8p1
 KNOWN_BOARDS := fr2433_launchpad fr5969_launchpad fr5994_launchpad \
                 fr6989_launchpad pico2 pico2w apollo4l_evb apollo4p_evb \
                 apollo510_evb apollo510b_evb nrf54l15_dk nrf54lm20_dk \
-                nucleo_n657x0q ek_ra8p1 tiku_bare
+                nucleo_n657x0q stm32n6570_dk ek_ra8p1 tiku_bare
 
 BOARD_DEFINE_fr2433_launchpad  := TIKU_BOARD_FR2433_LAUNCHPAD
 BOARD_DEFINE_fr5969_launchpad  := TIKU_BOARD_FR5969_LAUNCHPAD
@@ -152,6 +152,7 @@ BOARD_DEFINE_tiku_bare         := TIKU_BOARD_TIKU_BARE
 BOARD_DEFINE_nrf54l15_dk       := TIKU_BOARD_NRF54L15_DK
 BOARD_DEFINE_nrf54lm20_dk      := TIKU_BOARD_NRF54LM20_DK
 BOARD_DEFINE_nucleo_n657x0q    := TIKU_BOARD_NUCLEO_N657X0Q
+BOARD_DEFINE_stm32n6570_dk     := TIKU_BOARD_STM32N6570_DK
 BOARD_DEFINE_ek_ra8p1          := TIKU_BOARD_EK_RA8P1
 
 BOARD_PLATFORM_fr2433_launchpad  := msp430
@@ -168,6 +169,7 @@ BOARD_PLATFORM_tiku_bare         := ambiq
 BOARD_PLATFORM_nrf54l15_dk       := nordic
 BOARD_PLATFORM_nrf54lm20_dk      := nordic
 BOARD_PLATFORM_nucleo_n657x0q    := stm32n6
+BOARD_PLATFORM_stm32n6570_dk     := stm32n6
 BOARD_PLATFORM_ek_ra8p1          := ra8p1
 
 # ---------------------------------------------------------------------------
@@ -217,6 +219,7 @@ BOARD_CAPS_fr6989_launchpad    := LCD
 BOARD_CAPS_nrf54l15_dk         :=
 BOARD_CAPS_nrf54lm20_dk        :=
 BOARD_CAPS_nucleo_n657x0q      :=
+BOARD_CAPS_stm32n6570_dk       :=
 # EK-RA8P1: an Ethernet PHY, a 64 Mbit OSPI NOR, a microSD slot, a camera
 # header and a 5-inch display connector are all fitted -- but a cap declares
 # what a DRIVER may be gated on, and none of those has a driver yet.  Empty is
@@ -2060,6 +2063,11 @@ SRCS += arch/stm32n6/tiku_adc_arch.c
 SRCS += arch/stm32n6/tiku_i2c_arch.c
 SRCS += arch/stm32n6/tiku_spi_arch.c
 SRCS += arch/stm32n6/tiku_onewire_arch.c
+ifeq ($(BOARD),$(BOARD_DEFINE_stm32n6570_dk))
+# Compiler flag to handle different flash configuration for N6570-DK in xflash
+CFLAGS += -DTIKU_HAS_MX66
+endif
+
 else ifeq ($(TIKU_PLATFORM),ra8p1)
 
 # RA8P1 arch.  Backends land here as they are written; what is absent is

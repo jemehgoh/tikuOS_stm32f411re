@@ -66,6 +66,4 @@
 
 #define TIKU_DEVICE_HAS_MPU         1
 
-#define TIKU_BOARD_UART_BAUD        115200U
-
 #endif /* TIKU_DEVICE_STM32N6_H_ */

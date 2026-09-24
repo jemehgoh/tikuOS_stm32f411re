@@ -27,33 +27,44 @@
 #define TIKU_BOARD_LED_COUNT        3
 #define TIKU_BOARD_LED_PORT         STM32N6_GPIO_PORT_G
 
+#define TIKU_BOARD_LED1_PORT        STM32N6_GPIO_PORT_G
 #define TIKU_BOARD_LED1_PIN         8U
-#define TIKU_BOARD_LED1_INIT()      tiku_stm32n6_gpio_init_output(TIKU_BOARD_LED_PORT, TIKU_BOARD_LED1_PIN)
-#define TIKU_BOARD_LED1_ON()        tiku_stm32n6_gpio_set(TIKU_BOARD_LED_PORT, TIKU_BOARD_LED1_PIN, 1)
-#define TIKU_BOARD_LED1_OFF()       tiku_stm32n6_gpio_set(TIKU_BOARD_LED_PORT, TIKU_BOARD_LED1_PIN, 0)
-#define TIKU_BOARD_LED1_TOGGLE()    tiku_stm32n6_gpio_toggle(TIKU_BOARD_LED_PORT, TIKU_BOARD_LED1_PIN)
+#define TIKU_BOARD_LED1_INIT()      tiku_stm32n6_gpio_init_output(TIKU_BOARD_LED1_PORT, TIKU_BOARD_LED1_PIN)
+#define TIKU_BOARD_LED1_ON()        tiku_stm32n6_gpio_set(TIKU_BOARD_LED1_PORT, TIKU_BOARD_LED1_PIN, 1)
+#define TIKU_BOARD_LED1_OFF()       tiku_stm32n6_gpio_set(TIKU_BOARD_LED1_PORT, TIKU_BOARD_LED1_PIN, 0)
+#define TIKU_BOARD_LED1_TOGGLE()    tiku_stm32n6_gpio_toggle(TIKU_BOARD_LED1_PORT, TIKU_BOARD_LED1_PIN)
 
+#define TIKU_BOARD_LED2_PORT        STM32N6_GPIO_PORT_G
 #define TIKU_BOARD_LED2_PIN         10U
-#define TIKU_BOARD_LED2_INIT()      tiku_stm32n6_gpio_init_output(TIKU_BOARD_LED_PORT, TIKU_BOARD_LED2_PIN)
-#define TIKU_BOARD_LED2_ON()        tiku_stm32n6_gpio_set(TIKU_BOARD_LED_PORT, TIKU_BOARD_LED2_PIN, 1)
-#define TIKU_BOARD_LED2_OFF()       tiku_stm32n6_gpio_set(TIKU_BOARD_LED_PORT, TIKU_BOARD_LED2_PIN, 0)
-#define TIKU_BOARD_LED2_TOGGLE()    tiku_stm32n6_gpio_toggle(TIKU_BOARD_LED_PORT, TIKU_BOARD_LED2_PIN)
+#define TIKU_BOARD_LED2_INIT()      tiku_stm32n6_gpio_init_output(TIKU_BOARD_LED2_PORT, TIKU_BOARD_LED2_PIN)
+#define TIKU_BOARD_LED2_ON()        tiku_stm32n6_gpio_set(TIKU_BOARD_LED2_PORT, TIKU_BOARD_LED2_PIN, 1)
+#define TIKU_BOARD_LED2_OFF()       tiku_stm32n6_gpio_set(TIKU_BOARD_LED2_PORT, TIKU_BOARD_LED2_PIN, 0)
+#define TIKU_BOARD_LED2_TOGGLE()    tiku_stm32n6_gpio_toggle(TIKU_BOARD_LED2_PORT, TIKU_BOARD_LED2_PIN)
 
+#define TIKU_BOARD_LED3_PORT        STM32N6_GPIO_PORT_G
 #define TIKU_BOARD_LED3_PIN         0U
-#define TIKU_BOARD_LED3_INIT()      tiku_stm32n6_gpio_init_output(TIKU_BOARD_LED_PORT, TIKU_BOARD_LED3_PIN)
-#define TIKU_BOARD_LED3_ON()        tiku_stm32n6_gpio_set(TIKU_BOARD_LED_PORT, TIKU_BOARD_LED3_PIN, 1)
-#define TIKU_BOARD_LED3_OFF()       tiku_stm32n6_gpio_set(TIKU_BOARD_LED_PORT, TIKU_BOARD_LED3_PIN, 0)
-#define TIKU_BOARD_LED3_TOGGLE()    tiku_stm32n6_gpio_toggle(TIKU_BOARD_LED_PORT, TIKU_BOARD_LED3_PIN)
+#define TIKU_BOARD_LED3_INIT()      tiku_stm32n6_gpio_init_output(TIKU_BOARD_LED3_PORT, TIKU_BOARD_LED3_PIN)
+#define TIKU_BOARD_LED3_ON()        tiku_stm32n6_gpio_set(TIKU_BOARD_LED3_PORT, TIKU_BOARD_LED3_PIN, 1)
+#define TIKU_BOARD_LED3_OFF()       tiku_stm32n6_gpio_set(TIKU_BOARD_LED3_PORT, TIKU_BOARD_LED3_PIN, 0)
+#define TIKU_BOARD_LED3_TOGGLE()    tiku_stm32n6_gpio_toggle(TIKU_BOARD_LED3_PORT, TIKU_BOARD_LED3_PIN)
 
-/* USART1 reaches the host as the ST-LINK virtual COM port. The UART driver
- * configures both pins itself, so the board hook has nothing to add. */
+/* USART1 reaches the host as the ST-LINK virtual COM port. */
 #define TIKU_BOARD_UART_PORT        STM32N6_GPIO_PORT_E
-#define TIKU_BOARD_UART_TX_PIN      STM32N6_USART1_TX_PIN
-#define TIKU_BOARD_UART_RX_PIN      STM32N6_USART1_RX_PIN
+#define TIKU_BOARD_UART_TX_PIN      5U
+#define TIKU_BOARD_UART_RX_PIN      6U
+#define TIKU_BOARD_UART_AF          7U
+#ifndef TIKU_BOARD_UART_BAUD
+#define TIKU_BOARD_UART_BAUD        115200U
+#endif
 #define TIKU_BOARD_UART_PINS_INIT() do { } while (0)
 
+/* The Nucleo's external SMPS control is PB12. */
+#define TIKU_BOARD_SMPS_PORT        STM32N6_GPIO_PORT_B
+#define TIKU_BOARD_SMPS_PIN         12U
+#define TIKU_BOARD_SMPS_ON_LEVEL    1U
+
 /* The USER button is PC13, active high with an external pull-down. */
-#define TIKU_BOARD_BTN1_PORT        2U      /* GPIOC */
+#define TIKU_BOARD_BTN1_PORT        STM32N6_GPIO_PORT_C
 #define TIKU_BOARD_BTN1_PIN         13U
 #define TIKU_BOARD_BTN1_INIT()      (void)tiku_gpio_arch_set_input(TIKU_BOARD_BTN1_PORT, TIKU_BOARD_BTN1_PIN)
 #define TIKU_BOARD_BTN1_PRESSED()   (tiku_gpio_arch_read(TIKU_BOARD_BTN1_PORT, TIKU_BOARD_BTN1_PIN) == 1)

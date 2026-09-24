@@ -5,10 +5,10 @@
  *
  * Authors: Ambuj Varshney <ambuj@tiku-os.org>
  *
- * tiku_uart_arch.h - STM32N6 console on USART1, the ST-LINK virtual COM port.
+ * tiku_uart_arch.h - STM32N6 console on the board-selected USART1 VCP route.
  *
- * TX is PE5 and RX is PE6, both alternate function 7. Transmit is polled, so
- * output is safe from any context including a fault handler.
+ * The board header supplies the routed pins and baud rate. Transmit is polled,
+ * so output is safe from any context including a fault handler.
  *
  * SPDX-License-Identifier: Apache-2.0
  */

@@ -62,10 +62,19 @@
 #define OSPI_STATUS_WEL           0x02U
 
 /* ST's MX25UM51245G command timings. */
-#define OSPI_STR_READ_DUMMY_CYCLES 6U
-#define OSPI_STR_REG_DUMMY_CYCLES  4U
-#define OSPI_DTR_READ_DUMMY_CYCLES 6U
-#define OSPI_DTR_REG_DUMMY_CYCLES 4U
+#ifdef TIKU_HAS_MX66
+/* Dummy cycle setup - different requirements for different flash types
+   on the Nucleo and on the DK */
+    #define OSPI_STR_READ_DUMMY_CYCLES 10U
+    #define OSPI_STR_REG_DUMMY_CYCLES  4U
+    #define OSPI_DTR_READ_DUMMY_CYCLES 10U
+    #define OSPI_DTR_REG_DUMMY_CYCLES 4U
+#else
+    #define OSPI_STR_READ_DUMMY_CYCLES 6U
+    #define OSPI_STR_REG_DUMMY_CYCLES  4U
+    #define OSPI_DTR_READ_DUMMY_CYCLES 6U
+    #define OSPI_DTR_REG_DUMMY_CYCLES 4U
+#endif
 #define OSPI_WRITE_DUMMY_CYCLES    0U
 
 _Static_assert(OSPI_CMD_SPI_READ_ID == 0x9FU, "SPI JEDEC ID command");
@@ -87,14 +96,25 @@ _Static_assert(OSPI_CMD_OPI_WRITE_CR2 == 0x728DU,
                "OPI DTR CR2 write command");
 _Static_assert(OSPI_CR2_DOPI == 0x02U, "MX25UM51245G DOPI bit");
 _Static_assert(OSPI_KERNEL_CLOCK_HZ == 50000000UL, "OSPI kernel clock");
-_Static_assert(OSPI_DTR_READ_DUMMY_CYCLES == 6U,
-               "DTR array-read dummy cycles");
-_Static_assert(OSPI_DTR_REG_DUMMY_CYCLES == 4U,
-               "DTR register-read dummy cycles");
-_Static_assert(OSPI_STR_READ_DUMMY_CYCLES == 6U,
-               "STR array-read dummy cycles");
-_Static_assert(OSPI_STR_REG_DUMMY_CYCLES == 4U,
-               "STR register-read dummy cycles");
+#ifdef TIKU_HAS_MX66
+    _Static_assert(OSPI_DTR_READ_DUMMY_CYCLES == 10U,
+                "DTR array-read dummy cycles");
+    _Static_assert(OSPI_DTR_REG_DUMMY_CYCLES == 4U,
+                "DTR register-read dummy cycles");
+    _Static_assert(OSPI_STR_READ_DUMMY_CYCLES == 10U,
+                "STR array-read dummy cycles");
+    _Static_assert(OSPI_STR_REG_DUMMY_CYCLES == 4U,
+                "STR register-read dummy cycles");
+#else
+    _Static_assert(OSPI_DTR_READ_DUMMY_CYCLES == 6U,
+                "DTR array-read dummy cycles");
+    _Static_assert(OSPI_DTR_REG_DUMMY_CYCLES == 4U,
+                "DTR register-read dummy cycles");
+    _Static_assert(OSPI_STR_READ_DUMMY_CYCLES == 6U,
+                "STR array-read dummy cycles");
+    _Static_assert(OSPI_STR_REG_DUMMY_CYCLES == 4U,
+                "STR register-read dummy cycles");
+#endif
 _Static_assert(OSPI_WRITE_DUMMY_CYCLES == 0U,
                "write-command dummy cycles");
 _Static_assert(STM32N6_XSPI_CCR_IMODE_8L == (4UL << 0),
