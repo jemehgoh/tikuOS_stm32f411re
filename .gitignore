@@ -106,3 +106,4 @@ experiments/
 hygiene/
 .main-elf-mcu
 arch/stm32n6/tiku_n6_model_manifest.h
+data/npu/network_rel.bin.manifest.json
