@@ -18,12 +18,9 @@
 #include <kernel/memory/tiku_mem.h>
 #include <interfaces/npu/tiku_npu.h>
 #include "tiku_npu_arch.h"
+#include "tiku_npu_llaton.h"
 #include "tiku_sram_arch.h"
 #include "tiku_stm32n6_regs.h"
-
-/* Model lifecycle and the ST interrupt callback live in the LL-ATON adapter. */
-extern void tiku_npu_llaton_irq_bridge(void);
-extern int tiku_npu_llaton_runtime_init(void);
 
 extern uint8_t __axisram_start;
 extern uint8_t __tier_sram_start;
@@ -67,6 +64,33 @@ static void npu_cacheaxi_enable(void)
         ~STM32N6_RCC_AHB5RSTR_CACHEAXI;
     __asm__ volatile ("dsb\n\tisb" ::: "memory");
     TIKU_REG32(TIKU_STM32N6_CACHEAXI_NS_CR1) |= STM32N6_CACHEAXI_CR1_EN;
+    __asm__ volatile ("dsb\n\tisb" ::: "memory");
+}
+
+static void npu_cacheaxi_disable(void)
+{
+    TIKU_REG32(TIKU_STM32N6_CACHEAXI_NS_CR1) &=
+        ~STM32N6_CACHEAXI_CR1_EN;
+    TIKU_REG32(TIKU_STM32N6_NPU_RCC_NS_AHB5RSTR) |=
+        STM32N6_RCC_AHB5RSTR_CACHEAXI;
+    TIKU_REG32(TIKU_STM32N6_NPU_RCC_NS_AHB5ENR) &=
+        ~STM32N6_RCC_AHB5ENR_CACHEAXI;
+    __asm__ volatile ("dsb\n\tisb" ::: "memory");
+}
+
+static void npu_reset_assert(void)
+{
+    TIKU_REG32(TIKU_STM32N6_NPU_RCC_NS_AHB5RSTR) |=
+        STM32N6_RCC_AHB5RSTR_NPU;
+    __asm__ volatile ("dsb\n\tisb" ::: "memory");
+}
+
+static void npu_board_disable(void)
+{
+    npu_reset_assert();
+    npu_cacheaxi_disable();
+    TIKU_REG32(TIKU_STM32N6_NPU_RCC_NS_AHB5ENR) &=
+        ~STM32N6_RCC_AHB5ENR_NPU;
     __asm__ volatile ("dsb\n\tisb" ::: "memory");
 }
 
@@ -146,6 +170,7 @@ int tiku_npu_init(void)
     __asm__ volatile ("dsb\n\tisb" ::: "memory");
     clock_readback = tiku_npu_clock_readback();
     if ((clock_readback & STM32N6_RCC_AHB5ENR_NPU) == 0U) {
+        npu_board_disable();
         return TIKU_NPU_INIT_ERR_CLOCK;
     }
 
@@ -157,15 +182,41 @@ int tiku_npu_init(void)
         (void *)(uintptr_t)&__tier_npu_start,
         (tiku_mem_arch_size_t)TIKU_TIER_NPU_SIZE);
     if (attach_result != TIKU_MEM_OK) {
+        (void)tiku_tier_detach_npu();
+        npu_board_disable();
         return TIKU_NPU_INIT_ERR_ALLOC;
     }
 
-    /* LL_ATON_RT_RuntimeInit() now owns ATON clocks and ATON interrupts. */
+    /* LL_ATON_RT_RuntimeInit() owns ATON clocks, OSAL, and ATON interrupts. */
     if (tiku_npu_llaton_runtime_init() != TIKU_NPU_OK) {
         (void)tiku_tier_npu_reset();
+        (void)tiku_tier_detach_npu();
+        npu_board_disable();
         return TIKU_NPU_INIT_ERR_CONFIG;
     }
 
     npu_initialized = 1U;
     return TIKU_NPU_INIT_OK;
+}
+
+int tiku_npu_shutdown(void)
+{
+    int rc;
+
+    if (!npu_initialized) {
+        return tiku_npu_llaton_runtime_deinit();
+    }
+
+    rc = tiku_npu_llaton_runtime_deinit();
+    if (rc != TIKU_NPU_OK) {
+        return rc;
+    }
+    if (tiku_tier_npu_reset() != TIKU_MEM_OK ||
+        tiku_tier_detach_npu() != TIKU_MEM_OK) {
+        return TIKU_NPU_ERR_STATE;
+    }
+
+    npu_board_disable();
+    npu_initialized = 0U;
+    return TIKU_NPU_OK;
 }

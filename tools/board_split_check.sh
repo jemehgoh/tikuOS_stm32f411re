@@ -57,6 +57,8 @@ apollo510-nor            | MCU=apollo510 TIKU_SHELL_ENABLE=1 TIKU_DRV_NOR_ENABLE
 apollo510b-shell         | MCU=apollo510b TIKU_SHELL_ENABLE=1
 apollo510b-full          | MCU=apollo510b TIKU_SHELL_ENABLE=1 TIKU_DRV_EMMC_ENABLE=1 TIKU_DRV_PSRAM_ENABLE=1 TIKU_DRV_USB_ENABLE=1 TIKU_DRV_BLE_EM9305_ENABLE=1
 tiku-bare                | MCU=apollo510 BOARD=tiku_bare TIKU_SHELL_ENABLE=1
+stm32n6-nucleo-shell     | MCU=stm32n6 BOARD=nucleo_n657x0q TIKU_SHELL_ENABLE=1
+stm32n6-dk-shell         | MCU=stm32n6 BOARD=stm32n6570_dk TIKU_SHELL_ENABLE=1
 "
 
 hash_row() {   # $1 = make args; echoes "sha  ok|FAIL"

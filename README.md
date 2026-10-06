@@ -73,7 +73,31 @@ make flash MCU=ra8p1 TIKU_SHELL_ENABLE=1       # boots at 240 MHz; `freq 1000`
 
 # --- ST Nucleo-N657X0-Q (arm-none-eabi-gcc + STM32CubeProgrammer) -----------
 make flash MCU=stm32n6 TIKU_SHELL_ENABLE=1
+# SRAM-only debug load; preserves the model already in external NOR
+make debug MCU=stm32n6 TIKU_SHELL_ENABLE=1
+
+# --- ST STM32N6570-DK -------------------------------------------------------
+make MCU=stm32n6 BOARD=stm32n6570_dk
+make MCU=stm32n6 BOARD=stm32n6570_dk MINIMAL=1
+make debug MCU=stm32n6 BOARD=stm32n6570_dk
 ```
+
+For STM32N6 boot-from-flash programming, `make flash MCU=stm32n6` builds and
+signs the application, programs it as the FSBL at external-flash address
+`0x70000000`, and—when `TIKU_NPU_ENABLE=1`—programs
+the raw `data/npu/network_rel.bin` at `0x70880000` using the Nucleo external
+loader. Set `STM32N6_NUEL` (or `NUEL`) if the loader is not installed beside
+CubeProgrammer. After programming, switch the board from development boot to
+boot-from-flash and power-cycle it.
+
+For `BOARD=stm32n6570_dk`, use the DK-specific external loader and boot-switch
+configuration from the DK documentation; the Nucleo loader and Nucleo boot
+instructions must not be reused for the DK.
+
+`make debug MCU=stm32n6` loads the unsigned `main.bin` into SRAM at
+`0x34180400` over SWD. It does not use the external loader or write the model,
+so flash the model once with `make flash` before using this workflow. The SRAM
+application is lost on power-off.
 
 The kernel, shell, VFS, BASIC, and networking are architecture-neutral — the
 same source tree targets all six families, from a 16-bit MSP430 at 8 KB of RAM

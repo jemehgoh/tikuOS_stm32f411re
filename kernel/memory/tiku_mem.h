@@ -1233,9 +1233,8 @@ tiku_mem_err_t tiku_tier_attach_psram(void *base, tiku_mem_arch_size_t size);
 /**
  * @brief Register the reserved NPU extent as an explicit allocator tier.
  *
- * This is a one-time registration.  The extent is linker-owned and must not
- * be attached twice, because doing so would reset its bump pointer while a
- * later NPU stage may already hold pointers into it.
+ * The extent is linker-owned and may be attached after boot and detached only
+ * after every NPU allocation has been released.
  */
 tiku_mem_err_t tiku_tier_attach_npu(void *base, tiku_mem_arch_size_t size);
 
@@ -1247,6 +1246,14 @@ tiku_mem_err_t tiku_tier_attach_npu(void *base, tiku_mem_arch_size_t size);
  * orphan allocations in the general-purpose memory tiers.
  */
 tiku_mem_err_t tiku_tier_npu_reset(void);
+
+/**
+ * @brief Detach the dedicated NPU extent after runtime shutdown.
+ *
+ * Refuses while the NPU tier still contains allocations.  A later application
+ * may attach the same linker-owned extent again.
+ */
+tiku_mem_err_t tiku_tier_detach_npu(void);
 
 /**
  * @brief Detach the PSRAM tier (power-down path).

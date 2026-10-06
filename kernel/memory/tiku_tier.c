@@ -203,7 +203,7 @@ tiku_mem_err_t tiku_tier_attach_psram(void *base, tiku_mem_arch_size_t size)
 }
 
 /*---------------------------------------------------------------------------*/
-/* NPU TIER -- reserved extent, attached by the STM32N6 bring-up             */
+/* NPU TIER -- late-attached extent owned by the STM32N6 NPU application       */
 /*---------------------------------------------------------------------------*/
 
 tiku_mem_err_t tiku_tier_attach_npu(void *base, tiku_mem_arch_size_t size)
@@ -236,6 +236,25 @@ tiku_mem_err_t tiku_tier_npu_reset(void)
     tier_state[TIKU_MEM_NPU].peak = 0;
     tier_state[TIKU_MEM_NPU].alloc_count = 0;
     tier_state[TIKU_MEM_NPU].fail_count = 0;
+    return TIKU_MEM_OK;
+}
+
+tiku_mem_err_t tiku_tier_detach_npu(void)
+{
+    if (!tier_state[TIKU_MEM_NPU].initialized) {
+        return TIKU_MEM_OK;
+    }
+    if (tier_state[TIKU_MEM_NPU].offset != 0u) {
+        return TIKU_MEM_ERR_INVALID;
+    }
+
+    tier_state[TIKU_MEM_NPU].initialized = 0u;
+    tier_state[TIKU_MEM_NPU].buf = NULL;
+    tier_state[TIKU_MEM_NPU].capacity = 0u;
+    tier_state[TIKU_MEM_NPU].offset = 0u;
+    tier_state[TIKU_MEM_NPU].peak = 0u;
+    tier_state[TIKU_MEM_NPU].alloc_count = 0u;
+    tier_state[TIKU_MEM_NPU].fail_count = 0u;
     return TIKU_MEM_OK;
 }
 
@@ -274,7 +293,7 @@ tiku_mem_err_t tiku_tier_detach_psram(int force)
 
 static void tier_wire_all(void)
 {
-    /* NPU is a boot-time registration, not a static array.  Preserve its
+    /* NPU is a late registration, not a static array.  Preserve its
      * linker-owned extent across an explicit tier reset, while rewinding the
      * bump pointer just like every other tier. */
     uint8_t *npu_buf = tier_state[TIKU_MEM_NPU].buf;

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Install an ST EdgeAI 4.x combined network_rel.bin for TikuOS."""
+"""Validate and publish an ST EdgeAI 4.x raw network_rel.bin for TikuOS."""
 from __future__ import annotations
 
 import argparse
@@ -10,14 +10,11 @@ import struct
 MAGIC = 0x4E49424E
 HEADER_BYTES = 104
 RUNTIME_VERSION = "STEdgeAI 4.0.0 / NetworkRuntime1201"
-BIGBLOB_MAGIC = 0x424C4232
-BIGBLOB_HEADER_BYTES = 65536
-BIGBLOB_NAME_MAX = 23
-XSPI_MODEL_OFFSET = 0x00880000
-XSPI_SCRATCH_OFFSET = 0x03FFB000
-BIGBLOB_SLOT_BYTES = XSPI_SCRATCH_OFFSET - XSPI_MODEL_OFFSET
-XSPI_MMAP_BASE = 0x70000000
-XSPI_SIZE_BYTES = 0x04000000
+OSPI_MODEL_OFFSET = 0x00880000
+OSPI_SCRATCH_OFFSET = 0x03FFB000
+OSPI_MODEL_BYTES = OSPI_SCRATCH_OFFSET - OSPI_MODEL_OFFSET
+OSPI_MMAP_BASE = 0x70000000
+OSPI_SIZE_BYTES = 0x04000000
 RUNTIME_RAM_BASE = 0x34000000
 RUNTIME_RAM_BYTES = 0x003C0000
 
@@ -38,52 +35,8 @@ def crc32(data: bytes) -> int:
     return crc ^ 0xFFFFFFFF
 
 
-def bigblob_image(payload: bytes, name: str) -> tuple[bytes, int]:
-    try:
-        encoded_name = name.encode("ascii")
-    except UnicodeEncodeError as exc:
-        raise ValueError("model name must contain ASCII characters only") from exc
-    if (not encoded_name or len(encoded_name) > BIGBLOB_NAME_MAX or
-            b"\0" in encoded_name or b"/" in encoded_name or
-            b"\\" in encoded_name):
-        raise ValueError("model name is not a valid single fixed-width component")
-    if len(payload) == 0 or len(payload) > BIGBLOB_SLOT_BYTES - BIGBLOB_HEADER_BYTES:
-        raise ValueError("network_rel.bin does not fit the N6 bigblob slot")
-    name_bytes = encoded_name + b"\0"
-    name_bytes += b"\0" * (BIGBLOB_NAME_MAX + 1 - len(name_bytes))
-    image = bytearray(b"\xff" * BIGBLOB_HEADER_BYTES)
-    struct.pack_into("<IIII24s", image, 0, BIGBLOB_MAGIC, len(payload),
-                     crc32(payload), 0, name_bytes)
-    image.extend(payload)
-    return bytes(image), crc32(payload)
-
-
-def validate_bigblob_image(image: bytes) -> dict[str, int | str]:
-    """Validate the complete image emitted for the production slot."""
-    if len(image) <= BIGBLOB_HEADER_BYTES:
-        raise ValueError("bigblob image is shorter than its header area")
-    magic, length, stored_crc, reserved, raw_name = struct.unpack_from(
-        "<IIII24s", image, 0)
-    if magic != BIGBLOB_MAGIC:
-        raise ValueError("bigblob image is not published with BLB2 magic")
-    if reserved != 0:
-        raise ValueError("bigblob header reserved word is not zero")
-    nul = raw_name.find(b"\0")
-    if nul <= 0 or any(raw_name[nul + 1:]):
-        raise ValueError("bigblob model name is not a valid fixed-width string")
-    if len(image) != BIGBLOB_HEADER_BYTES + length:
-        raise ValueError("bigblob image length does not match its header")
-    if any(byte != 0xFF for byte in image[40:BIGBLOB_HEADER_BYTES]):
-        raise ValueError("bigblob header padding must remain erased")
-    actual_crc = crc32(image[BIGBLOB_HEADER_BYTES:])
-    if actual_crc != stored_crc:
-        raise ValueError("bigblob payload CRC does not match its header")
-    return {"bytes": length, "crc": stored_crc,
-            "name": raw_name[:nul].decode("ascii")}
-
-
 def validate_pool_targets(image: bytes) -> None:
-    """Reject absolute COPY pools aimed at the read-only XSPI window."""
+    """Reject absolute COPY pools aimed at the read-only OSPI window."""
     mask = 0x0FFFFFFF
     words = struct.unpack_from("<26I", image, 0)
     data_data = words[4] & mask
@@ -115,8 +68,8 @@ def validate_pool_targets(image: bytes) -> None:
                               RUNTIME_RAM_BASE + RUNTIME_RAM_BYTES and
                               span <= RUNTIME_RAM_BASE + RUNTIME_RAM_BYTES - dst)
             if not in_runtime_ram:
-                location = ("read-only XSPI" if
-                            XSPI_MMAP_BASE <= dst < XSPI_MMAP_BASE + XSPI_SIZE_BYTES
+                location = ("read-only OSPI" if
+                            OSPI_MMAP_BASE <= dst < OSPI_MMAP_BASE + OSPI_SIZE_BYTES
                             else "unsupported/non-writable memory")
                 raise ValueError(
                     f"COPY pool {index} targets {location} address 0x{dst:08x}; "
@@ -129,6 +82,8 @@ def validate_pool_targets(image: bytes) -> None:
 def validate(image: bytes) -> dict[str, int]:
     if len(image) < HEADER_BYTES:
         raise ValueError("network_rel.bin is shorter than the ST reloc header")
+    if len(image) > OSPI_MODEL_BYTES:
+        raise ValueError("network_rel.bin does not fit the raw N6 model slot")
     words = struct.unpack_from("<26I", image, 0)
     if words[0] != MAGIC:
         raise ValueError("input is not an ST network_rel.bin (AI_RELOC_MAGIC)")
@@ -158,7 +113,8 @@ def validate(image: bytes) -> dict[str, int]:
     if not flags & (1 << 22):
         raise ValueError("network_rel.bin is not an asynchronous LL-ATON model")
     validate_pool_targets(image)
-    return {"bytes": len(image), "flags": flags, "params_offset": params_offset}
+    return {"bytes": len(image), "crc32": crc32(image), "flags": flags,
+            "params_offset": params_offset}
 
 
 def c_array(image: bytes, symbol: str) -> str:
@@ -170,55 +126,70 @@ def c_array(image: bytes, symbol: str) -> str:
             f"const uint32_t {symbol}_len = {len(image)}u;\n")
 
 
+def manifest_header(metadata: dict[str, int], name: str) -> str:
+    """Render the small firmware manifest consumed by the model manager."""
+    return ("/* Generated by stm32n6_relpack.py; do not edit manually. */\n"
+            "/* The values describe the raw ST image at slot offset zero. */\n"
+            "#ifndef TIKU_STM32N6_MODEL_MANIFEST_H_\n"
+            "#define TIKU_STM32N6_MODEL_MANIFEST_H_\n\n"
+            "#include <stdint.h>\n\n"
+            f"#define TIKU_NPU_MODEL_NAME \"{name}\"\n"
+            f"#define TIKU_NPU_MODEL_FILE_BYTES {metadata['bytes']}U\n"
+            f"#define TIKU_NPU_MODEL_FILE_CRC32 UINT32_C({metadata['crc32']})\n"
+            f"#define TIKU_NPU_MODEL_FLAGS UINT32_C({metadata['flags']})\n"
+            f"#define TIKU_NPU_MODEL_PARAMS_OFFSET {metadata['params_offset']}U\n"
+            "#define TIKU_NPU_MODEL_FILE_PARAMS_PTR 0U\n\n"
+            "#endif /* TIKU_STM32N6_MODEL_MANIFEST_H_ */\n")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("input", type=pathlib.Path)
     parser.add_argument("--output-root", type=pathlib.Path, default=pathlib.Path("data/npu"))
     parser.add_argument("--name")
-    parser.add_argument("--bigblob-image", type=pathlib.Path,
-                        help="write a complete header+payload bigblob image")
+    parser.add_argument("--raw-image", type=pathlib.Path,
+                        help="write the unchanged raw image to this path")
     parser.add_argument("--slot-offset", type=lambda value: int(value, 0),
-                        default=XSPI_MODEL_OFFSET,
-                        help="physical XSPI slot offset for the manifest")
+                        default=OSPI_MODEL_OFFSET,
+                        help="physical OSPI slot offset for the manifest")
     parser.add_argument("--c-array", type=pathlib.Path)
+    parser.add_argument("--manifest-header", type=pathlib.Path,
+                        default=pathlib.Path("arch/stm32n6/tiku_n6_model_manifest.h"),
+                        help="write the generated firmware manifest header")
     parser.add_argument("--symbol", default="tiku_npu_network_rel")
     args = parser.parse_args()
     image = args.input.read_bytes()
     metadata = validate(image)
     name = args.name or args.input.name
     if (pathlib.PurePosixPath(name).name != name or "/" in name or
-            "\\" in name or not name.endswith(".bin")):
+            "\\" in name or '"' in name or "\0" in name or
+            not name.endswith(".bin")):
         raise SystemExit("--name must be a single .bin filename")
-    if args.slot_offset != XSPI_MODEL_OFFSET:
+    if args.slot_offset != OSPI_MODEL_OFFSET:
         raise SystemExit(
             f"--slot-offset must be the production N6 model slot "
-            f"0x{XSPI_MODEL_OFFSET:08x}")
+            f"0x{OSPI_MODEL_OFFSET:08x}")
     args.output_root.mkdir(parents=True, exist_ok=True)
-    blob, blob_crc = bigblob_image(image, name)
-    validate_bigblob_image(blob)
-    blob_destination = args.bigblob_image or (args.output_root /
-                                              (name + ".bigblob"))
-    blob_destination.parent.mkdir(parents=True, exist_ok=True)
-    blob_destination.write_bytes(blob)
+    raw_destination = args.raw_image or (args.output_root / name)
+    raw_destination.parent.mkdir(parents=True, exist_ok=True)
+    raw_destination.write_bytes(image)
     manifest = dict(metadata, runtime=RUNTIME_VERSION, model=name,
                     namespace="/data/npu/", mode="COPY", split=False,
-                    storage="bigblob", bigblob_magic=BIGBLOB_MAGIC,
-                    bigblob_header_bytes=BIGBLOB_HEADER_BYTES,
-                    bigblob_crc=blob_crc, bigblob_image=str(blob_destination),
+                    storage="raw-slot", file_params_ptr=None,
                     slot_offset=args.slot_offset,
-                    payload_offset=args.slot_offset + BIGBLOB_HEADER_BYTES,
-                    payload_bytes=len(image),
-                    header_body_offset=args.slot_offset + 4,
-                    header_body_bytes=36,
-                    publish_magic_offset=args.slot_offset,
-                    publish_magic_bytes=4,
-                    publish_magic_last=True)
+                    mapped_address=OSPI_MMAP_BASE + args.slot_offset,
+                    raw_offset=0, payload_offset=0,
+                    slot_bytes=OSPI_MODEL_BYTES,
+                    raw_image=str(raw_destination))
     (args.output_root / (name + ".manifest.json")).write_text(
         json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+    args.manifest_header.parent.mkdir(parents=True, exist_ok=True)
+    args.manifest_header.write_text(manifest_header(metadata, name),
+                                    encoding="utf-8")
     if args.c_array:
         args.c_array.parent.mkdir(parents=True, exist_ok=True)
         args.c_array.write_text(c_array(image, args.symbol), encoding="utf-8")
-    print(f"{args.input} -> bigblob {blob_destination}")
+    print(f"{args.input} -> raw image {raw_destination}")
     return 0
 
 

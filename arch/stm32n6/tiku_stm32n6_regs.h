@@ -51,8 +51,13 @@
 
 /* GPIO ports are 0x400 apart from port A; E is 4 and G is 6. */
 #define STM32N6_GPIO_BASE(port)     (0x46020000UL + ((uint32_t)(port) * 0x400UL))
+#define STM32N6_GPIO_PORT_B         1U
+#define STM32N6_GPIO_PORT_C         2U
 #define STM32N6_GPIO_PORT_E         4U
+#define STM32N6_GPIO_PORT_F         5U
 #define STM32N6_GPIO_PORT_G         6U
+#define STM32N6_GPIO_PORT_N         13U
+#define STM32N6_GPIO_PORT_O         14U
 
 #define STM32N6_GPIO_MODER(p)       (STM32N6_GPIO_BASE(p) + 0x00U)
 #define STM32N6_GPIO_OTYPER(p)      (STM32N6_GPIO_BASE(p) + 0x04U)
@@ -68,7 +73,8 @@
 #define STM32N6_GPIO_MODE_OUTPUT    1UL
 #define STM32N6_GPIO_MODE_ALT       2UL
 
-/* USART1 is the ST-LINK virtual COM port: TX PE5, RX PE6, both AF7. */
+/* USART1 peripheral registers. Board headers provide the routed pins and
+ * alternate-function number. */
 #define STM32N6_USART1_BASE         0x42001000UL
 #define STM32N6_USART_CR1(b)        ((b) + 0x00U)
 #define STM32N6_USART_CR2(b)        ((b) + 0x04U)
@@ -89,10 +95,6 @@
 #define STM32N6_USART_ISR_TXE       (1UL << 7)
 #define STM32N6_USART_ISR_ORE       (1UL << 3)
 #define STM32N6_USART_ICR_ORECF     (1UL << 3)
-
-#define STM32N6_USART1_TX_PIN       5U
-#define STM32N6_USART1_RX_PIN       6U
-#define STM32N6_USART1_AF           7U
 
 /* Cortex-M NVIC. One ISER/ICER word per 32 IRQs. */
 #define STM32N6_NVIC_ISER(n)        (0xE000E100UL + ((n) * 4U))
@@ -838,7 +840,6 @@
 #define STM32N6_CCIPR6_XSPI2SEL_MSK (3UL << 4)
 #define STM32N6_CCIPR6_XSPI2SEL_IC3 (2UL << 4)      /* IC3, per ST's config */
 
-#define STM32N6_GPIO_PORT_N         13U
 #define STM32N6_XSPI2_AF            9U
 
 /* The XSPI2 pads live in the VDDIO3 supply domain, which comes up unpowered:
@@ -1071,10 +1072,12 @@
 #define STM32N6_PWR_VOSCR_VOS       (1UL << 0)
 #define STM32N6_PWR_VOSCR_VOSRDY    (1UL << 1)
 
-/* The Nucleo drives its external SMPS from PB12: high selects the 0.89 V
- * overdrive rail that the core needs above the nominal range. Board revisions
- * before C01 leave that net unpopulated. */
-#define STM32N6_GPIO_PORT_B         1U
-#define STM32N6_SMPS_OVD_PIN        12U
+/* CPACR and NSACR: For enabling the EPU to work with the Neural-ART API */
+#define STM32N6_CPACR               0xE000ED88
+#define STM32N6_CPACR_CP10_POS      20U
+#define STM32N6_CPACR_CP10_MSK      (3UL << STM32N6_CPACR_CP10_POS)
+#define STM32N6_NSACR               0xE000ED8C
+#define STM32N6_NSACR_CP1011_POS    10U
+#define STM32N6_NSACR_CP1011_MSK    (3UL << STM32N6_NSACR_CP1011_POS)
 
 #endif /* TIKU_STM32N6_REGS_H_ */

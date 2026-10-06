@@ -1987,7 +1987,6 @@ ifeq ($(TIKU_NPU_ENABLE),1)
 SRCS += arch/stm32n6/tiku_npu_arch.c
 SRCS += arch/stm32n6/tiku_npu_llaton.c
 SRCS += arch/stm32n6/tiku_n6_model_store.c
-SRCS += kernel/fs/tiku_bigblob.c
 # Pinned ST EdgeAI 4.0 relocatable runtime. These files are compiled only
 # when the STM32N6 NPU is explicitly enabled; NPU=0 has no runtime objects or
 # model fixture inputs in the link.
@@ -3468,12 +3467,10 @@ STM32N6_SRAM_ADDR ?= 0x34180400
 # DFU FSBL dev boot path - for debug builds using the boot ROM.
 STM32N6_PART   ?= 0x01
 
-# The model slot begins at OSPI2's 0x70000000 window plus the 0x00880000
-# physical slot offset.  The packaged bigblob includes the runtime header and
-# CRC metadata expected by the on-device model store.
-# STM32N6_MODEL_BLOB ?= data/npu/network_rel.bin.bigblob
-STM32N6_MODEL_BLOB ?= data/npu/network_rel.bin
-STM32N6_MODEL_SIGNED ?= data/npu/network_rel_signed.bin
+# The raw model slot begins at OSPI2's 0x70000000 window plus the 0x00880000
+# physical slot offset.  The file is the unchanged ST relocatable image; its
+# length and CRC are carried by the generated model manifest.
+STM32N6_MODEL_RAW ?= data/npu/network_rel.bin
 STM32N6_MODEL_ADDR ?= 0x70880000
 # NUEL is the short spelling used by ST's Nucleo examples.  An explicit
 # STM32N6_NUEL/NUEL override wins; otherwise use the stock Nucleo loader from
@@ -3506,13 +3503,6 @@ define STM32N6_VALIDATE_FLASH
 	    echo "stm32n6: signed application not found: $(TARGET_SIGNED)"; \
 	    exit 1; \
 	}
-# ifeq ($(TIKU_NPU_ENABLE),1)
-# 	test -f "$(STM32N6_MODEL_BLOB)" || { \
-# 	    echo "stm32n6: model bigblob not found: $(STM32N6_MODEL_BLOB)"; \
-# 	    echo "  generate it with tools/npu/stm32n6_relpack.py"; \
-# 	    exit 1; \
-# 	}
-# endif
 endef
 
 define STM32N6_VALIDATE_MODEL_FLASH
@@ -3522,12 +3512,8 @@ define STM32N6_VALIDATE_MODEL_FLASH
 	    echo "  set STM32N6_NUEL=/absolute/path/to/MX25UM51245G_STM32N6570-NUCLEO.stldr"; \
 	    exit 1; \
 	}; \
-	test -f "$(STM32N6_MODEL_BLOB)" || { \
-	    echo "stm32n6: model source not found: $(STM32N6_MODEL_BLOB)"; \
-	    exit 1; \
-	}; \
-	test -f "$(STM32N6_MODEL_SIGNED)" || { \
-	    echo "stm32n6: signed model not found: $(STM32N6_MODEL_SIGNED)"; \
+	test -f "$(STM32N6_MODEL_RAW)" || { \
+	    echo "stm32n6: raw model not found: $(STM32N6_MODEL_RAW)"; \
 	    exit 1; \
 	}
 endef
@@ -3546,23 +3532,14 @@ $(TARGET_SIGNED): $(TARGET_BIN)
 	    < /dev/null > /dev/null
 	@echo "  [sign]  $< -> $@"
 
-$(STM32N6_MODEL_SIGNED): $(STM32N6_MODEL_BLOB)
-	@test -x "$(STM32N6_SIGN)" || { $(call STM32N6_NEED_CUBE,sign); }
-	@rm -f $@
-	@"$(STM32N6_SIGN)" -bin $< -nk -of 0x00000000 -hv 2.3 -align -s -o $@ \
-	    < /dev/null > /dev/null
-	@echo "  [sign]  $< -> $@"
-
 ifeq ($(TIKU_NPU_ENABLE),1)
-# Build the signed model before programming it, just as the application flash
-# path builds TARGET_SIGNED before `flash` can run.  This also rebuilds the
-# artifact whenever the raw model source changes.
-stm32n6-model-flash: $(STM32N6_MODEL_SIGNED)
+# Program the unchanged ST image directly into the mapped raw model slot.
+stm32n6-model-flash: $(STM32N6_MODEL_RAW)
 	@$(call STM32N6_VALIDATE_MODEL_FLASH)
-	@echo "Flashing $(STM32N6_MODEL_SIGNED) -> OSPI $(STM32N6_MODEL_ADDR) via external loader..."
+	@echo "Flashing $(STM32N6_MODEL_RAW) -> OSPI $(STM32N6_MODEL_ADDR) via external loader..."
 	@"$(STM32N6_PROG)" -c port=SWD mode=HOTPLUG \
 	    -el "$(STM32N6_NUEL)" -hardRst \
-	    -w "$(STM32N6_MODEL_SIGNED)" "$(STM32N6_MODEL_ADDR)" -v
+	    -w "$(STM32N6_MODEL_RAW)" "$(STM32N6_MODEL_ADDR)" -v
 endif
 endif
 

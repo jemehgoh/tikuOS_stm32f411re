@@ -60,7 +60,7 @@ typedef struct {
  *   0x0000000  FSBL1     256 KB  the boot image; the ROM loads this one
  *   0x0040000  FSBL2     256 KB  the ROM's fallback search address
  *   0x0080000  /data      8 MB  the carved NVM region (tier + TFS store)
- *   0x0880000  model slot ~55 MB one-model bigblob space
+ *   0x0880000  model slot ~55 MB one raw combined network_rel.bin image
  *   0x3FFB000  scratch     4 KB  what `xflash test` erases
  *   0x3FFC000  mirror     16 KB  the durable .uninit mirror
  *
@@ -90,10 +90,10 @@ typedef struct {
 
 _Static_assert((TIKU_OSPI_MODEL_ADDR % TIKU_OSPI_SECTOR_SIZE) == 0U,
                "N6 model slot must be sector aligned");
-_Static_assert((TIKU_OSPI_MODEL_ADDR % 65536UL) == 0U,
-               "N6 model slot must be bigblob-header aligned");
-_Static_assert(TIKU_OSPI_MODEL_BYTES > 65536UL,
-               "N6 model slot must contain a payload");
+_Static_assert((TIKU_OSPI_MODEL_BYTES % TIKU_OSPI_SECTOR_SIZE) == 0U,
+               "N6 model slot capacity must be sector aligned");
+_Static_assert(TIKU_OSPI_MODEL_BYTES >= TIKU_OSPI_SECTOR_SIZE,
+               "N6 model slot must contain at least one sector");
 
 /**
  * @brief Bring up XSPI2 in octa-SPI DTR mode and read the device identity.

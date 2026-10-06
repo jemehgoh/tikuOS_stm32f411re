@@ -15,6 +15,8 @@
 
 #include <stddef.h>
 
+#include <arch/stm32n6/tiku_device_select.h>
+
 #include "tiku_cpu_freq_boot_arch.h"
 #include "tiku_gpio_arch.h"
 #include "tiku_timer_arch.h"
@@ -240,15 +242,16 @@ static void clk_set_ic(unsigned ic, unsigned div) {
 /**
  * @brief Move the core supply between the nominal and overdrive rails.
  *
- * The board's SMPS is driven from PB12 and the regulator range from PWR, and
- * both must settle before the core may run above the nominal range.
+ * The board's SMPS control and the regulator range from PWR must both settle
+ * before the core may run above the nominal range.
  *
  * @param high  Non-zero to select overdrive
  */
 static void clk_set_voltage(int high) {
-    tiku_stm32n6_gpio_init_output(STM32N6_GPIO_PORT_B, STM32N6_SMPS_OVD_PIN);
-    tiku_stm32n6_gpio_set(STM32N6_GPIO_PORT_B, STM32N6_SMPS_OVD_PIN,
-                          high ? 1U : 0U);
+    tiku_stm32n6_gpio_init_output(TIKU_BOARD_SMPS_PORT, TIKU_BOARD_SMPS_PIN);
+    tiku_stm32n6_gpio_set(TIKU_BOARD_SMPS_PORT, TIKU_BOARD_SMPS_PIN,
+                          high ? TIKU_BOARD_SMPS_ON_LEVEL
+                               : (TIKU_BOARD_SMPS_ON_LEVEL ? 0U : 1U));
 
     if (high) {
         TIKU_REG32(STM32N6_PWR_VOSCR) |= STM32N6_PWR_VOSCR_VOS;

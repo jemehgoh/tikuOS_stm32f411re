@@ -111,6 +111,18 @@ void tiku_stm32n6_reset_handler(void) {
         ".ltorg\n");
 }
 
+/* Sets the CP10 and CP11 bits in the NSACR register to enable the EPU.
+ * This is done in line with the procedure described in the Cortex-M55 
+ * Technical Reference Manual, "Initializing the EPU". 
+ */
+void tiku_stm32n6_epu_init(void) {
+    TIKU_REG32(STM32N6_NSACR)  |= STM32N6_NSACR_CP1011_MSK;
+    (void)TIKU_REG32(STM32N6_NSACR);
+
+    TIKU_REG32(STM32N6_CPACR)  |= STM32N6_CPACR_CP10_MSK;
+    (void)TIKU_REG32(STM32N6_CPACR);
+}
+
 void tiku_stm32n6_startup(void) {
     /* The core resets with interrupts enabled; mask them until the kernel is
      * ready to take one. */
@@ -147,6 +159,14 @@ void tiku_stm32n6_startup(void) {
     for (uint32_t *b = &__bss_start; b < &__bss_end; b++) {
         *b = 0UL;
     }
+
+    /* Enable the EPU
+     * The EPU is required by the LL-ATON API for running models on the
+     * Neural-ART accelerator.
+     */
+#if (TIKU_HAS_NPU + 0)
+    tiku_stm32n6_epu_init();
+#endif
 
     /* Before the arena is zeroed, not after: the banks it lives in come out of
      * reset shut down, and a write to a shut-down bank is swallowed silently

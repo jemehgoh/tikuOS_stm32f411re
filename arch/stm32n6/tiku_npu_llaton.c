@@ -3,10 +3,10 @@
  *
  * Model locations are intentionally distinct:
  *   - drivers/stm32n6/npu/models/ : optional build-embedded compiler output
- *   - the N6 bigblob slot         : deployed combined network_rel.bin files
+ *   - the N6 raw model slot       : deployed combined network_rel.bin files
  *   - tests/npu/fixtures/          : malformed/fault-injection fixtures only
  *
- * The source image is always mapped read-only through the bigblob store. COPY
+ * The source image is always mapped read-only through the OSPI model store. COPY
  * installation and all runtime relocation work happen in the linker-owned
  * NPU tier. No TN6P envelope, EC blob address, or manual relocation is used.
  */
@@ -22,6 +22,7 @@
 #include "tiku_device_select.h"
 #include "tiku_n6_model_store.h"
 #include "tiku_npu_llaton.h"
+#include "tiku_ospi_arch.h"
 #include "tiku_stm32n6_regs.h"
 
 #include "ll_aton_reloc_network.h"
@@ -31,16 +32,45 @@
 extern uint8_t __tier_npu_start;
 extern uint8_t __tier_npu_end;
 
+/* No external writable RAM is configured for the current STM32N6 product.
+ * A board that adds one must provide all four values and initialize the
+ * region before the NPU backend starts.  Keeping the capability here avoids
+ * silently using the read-only OSPI model window or consuming general SRAM. */
+#ifndef TIKU_STM32N6_EXT_RAM_BASE
+#define TIKU_STM32N6_EXT_RAM_BASE 0u
+#endif
+#ifndef TIKU_STM32N6_EXT_RAM_SIZE
+#define TIKU_STM32N6_EXT_RAM_SIZE 0u
+#endif
+#ifndef TIKU_STM32N6_EXT_RAM_WRITABLE
+#define TIKU_STM32N6_EXT_RAM_WRITABLE 0
+#endif
+#ifndef TIKU_STM32N6_EXT_RAM_NPU_VISIBLE
+#define TIKU_STM32N6_EXT_RAM_NPU_VISIBLE 0
+#endif
+
+typedef struct {
+    uintptr_t addr;
+    size_t capacity;
+    uint8_t active;
+} tiku_llaton_ext_ram_t;
+
 typedef struct {
     ll_aton_reloc_info info;
     ll_aton_reloc_config config;
     NN_Instance_TypeDef instance;
-    tiku_arena_t arena;
-    const uint8_t *source;
+    tiku_arena_t exec_arena;
+    tiku_llaton_ext_ram_t ext_ram;
+    tiku_n6_model_image_t image;
+    uintptr_t file_ptr;
+    uintptr_t file_params_ptr;
     size_t source_len;
+    size_t params_len;
     int last_error;
     struct tiku_process *owner;
     uint8_t runtime_ready;
+    uint8_t instance_installed;
+    uint8_t network_initialized;
     uint8_t running;
 } tiku_llaton_state_t;
 
@@ -60,6 +90,27 @@ void SCB_InvalidateICache_by_Addr(void *addr, int32_t size)
 
 static void tiku_llaton_worker_step(void);
 static void tiku_llaton_finish(LL_ATON_RT_RetValues_t ret);
+static void tiku_llaton_abort_submission(void);
+static uint8_t tiku_llaton_post_wake(const tiku_npu_model_t *model,
+                                     uint8_t from_irq);
+static int validate_pools(const tiku_n6_model_image_t *image,
+                          const ll_aton_reloc_info *rt);
+static int release_runtime_resources(void);
+static int handle_load_runtime_error(tiku_npu_model_t *model,
+                                     int original_error);
+
+static void clear_model_inspection(void)
+{
+    uint8_t runtime_ready = ll_state.runtime_ready;
+
+    memset(&ll_state.info, 0, sizeof(ll_state.info));
+    ll_state.file_ptr = 0u;
+    ll_state.file_params_ptr = 0u;
+    ll_state.source_len = 0u;
+    ll_state.params_len = 0u;
+    memset(&ll_state.image, 0, sizeof(ll_state.image));
+    ll_state.runtime_ready = runtime_ready;
+}
 
 TIKU_PROCESS(npu_llaton_worker, "npu-llaton");
 
@@ -69,12 +120,18 @@ static PT_THREAD(tiku_process_thread_npu_llaton_worker(struct pt *process_pt,
                                                        tiku_event_t ev,
                                                        tiku_event_data_t data))
 {
-    (void)data;
     TIKU_PROCESS_BEGIN();
     while (1) {
         TIKU_PROCESS_WAIT_EVENT();
         if (ev == TIKU_EVENT_NPU_WAKE) {
-            tiku_llaton_worker_step();
+            if (tiku_event_npu_model(ev, data) == ll_model &&
+                ll_model != NULL && ll_state.running) {
+                tiku_llaton_worker_step();
+            } else {
+#if defined(TIKU_NPU_RUN_TEST_ENABLE)
+                ll_run_trace.ignored_wake_events++;
+#endif
+            }
         }
     }
     TIKU_PROCESS_END();
@@ -83,6 +140,60 @@ static PT_THREAD(tiku_process_thread_npu_llaton_worker(struct pt *process_pt,
 static int range_ok(uintptr_t base, size_t length, uintptr_t limit)
 {
     return base <= limit && length <= (size_t)(limit - base);
+}
+
+static int round_up_size(size_t value, size_t alignment, size_t *out)
+{
+    size_t remainder;
+
+    if (out == NULL || alignment == 0u) return 0;
+    remainder = value % alignment;
+    if (remainder != 0u && value > SIZE_MAX - (alignment - remainder)) {
+        return 0;
+    }
+    *out = value + (remainder == 0u ? 0u : alignment - remainder);
+    return 1;
+}
+
+static int mapped_range_contains(uintptr_t base, size_t length,
+                                 uintptr_t address, size_t span)
+{
+    if (address < base || address - base > length) return 0;
+    return span <= length - (size_t)(address - base);
+}
+
+static int resolve_parameter_span(uintptr_t file_ptr, size_t file_bytes,
+                                  uintptr_t file_params_ptr,
+                                  size_t params_bytes, size_t params_offset,
+                                  uintptr_t *params_ptr,
+                                  size_t *params_length)
+{
+    if (params_ptr == NULL || params_length == NULL) {
+        return TIKU_NPU_ERR_ARGUMENT;
+    }
+    *params_ptr = 0u;
+    *params_length = 0u;
+
+    if (params_offset != 0u) {
+        if (file_ptr == 0u || (file_ptr & 3u) != 0u ||
+            params_offset > file_bytes ||
+            params_offset > (size_t)(UINTPTR_MAX - file_ptr) ||
+            params_offset == file_bytes) {
+            return TIKU_NPU_ERR_HEADER;
+        }
+        *params_ptr = file_ptr + (uintptr_t)params_offset;
+        *params_length = file_bytes - params_offset;
+        return TIKU_NPU_OK;
+    }
+
+    if (file_params_ptr == 0u || (file_params_ptr & 3u) != 0u ||
+        params_bytes == 0u ||
+        params_bytes > (size_t)(UINTPTR_MAX - file_params_ptr)) {
+        return TIKU_NPU_ERR_ARGUMENT;
+    }
+    *params_ptr = file_params_ptr;
+    *params_length = params_bytes;
+    return TIKU_NPU_OK;
 }
 
 static uint32_t rd32(const uint8_t *p)
@@ -96,163 +207,273 @@ static uint32_t rel_off(uint32_t value)
     return value & UINT32_C(0x0fffffff);
 }
 
-static int image_string(const uint8_t *image, size_t length, uint32_t value)
+#define RELOC_IMAGE_HEADER_BYTES 104u
+#define RELOC_IMAGE_CTX_BYTES    60u
+#define RELOC_IMAGE_DESC_BYTES   20u
+#define RELOC_IMAGE_MAX_DESCS    10u
+#define RELOC_ADDR_CLASS_MASK    UINT32_C(0xf0000000)
+#define RELOC_FLASH_CLASS        UINT32_C(0x20000000)
+#define RELOC_RAM_CLASS          UINT32_C(0x40000000)
+
+static int image_span_ok(size_t offset, size_t span, size_t length)
+{
+    return offset <= length && span <= length - offset;
+}
+
+static int image_offset(uint32_t encoded, uint32_t address_class,
+                        size_t length, size_t *out)
+{
+    size_t offset;
+
+    if ((encoded & RELOC_ADDR_CLASS_MASK) != address_class) return 0;
+    offset = (size_t)rel_off(encoded);
+    if ((offset & 3u) != 0u || !image_span_ok(offset, 0u, length)) return 0;
+    *out = offset;
+    return 1;
+}
+
+static int image_string(const uint8_t *image, size_t length, uint32_t value,
+                        uint32_t address_class)
 {
     size_t at = (size_t)rel_off(value);
 
-    if (at >= length) return 0;
+    if ((value & RELOC_ADDR_CLASS_MASK) != address_class || at >= length) {
+        return 0;
+    }
     while (at < length && image[at] != 0u) at++;
     return at < length;
 }
 
 /* Header geometry mirrors ST's ai_reloc_bin_hdr. This preflight is needed
  * because ll_aton_reloc_get_info() receives a pointer, not a length. */
-static int image_preflight(const uint8_t *image, size_t length)
+static int image_preflight(const uint8_t *image, size_t length,
+                           uintptr_t params_ptr, size_t params_length)
 {
-    uintptr_t desc;
+    size_t data_start;
+    size_t data_end;
+    size_t data_data;
+    size_t bss_start;
+    size_t bss_end;
+    size_t got_start;
+    size_t got_end;
+    size_t rel_start;
+    size_t rel_end;
+    size_t params_start;
+    size_t params_offset;
+    uintptr_t params_base;
+    size_t ctx;
+    size_t ctx_at;
+    size_t desc_at;
+    size_t params_length_bound;
     unsigned i;
 
-    if (image == NULL || length < 104u ||
+    if (image == NULL || length < RELOC_IMAGE_HEADER_BYTES ||
         (((uintptr_t)image) & 3u) != 0u || rd32(image) != AI_RELOC_MAGIC) {
         return 0;
     }
-    uint32_t data_data = rel_off(rd32(image + 16u));
-    uint32_t data_end = rel_off(rd32(image + 20u));
-    uint32_t bss_end = rel_off(rd32(image + 24u));
-    uint32_t got_end = rel_off(rd32(image + 32u));
-    uint32_t rel_start = rel_off(rd32(image + 36u));
-    uint32_t rel_end = rel_off(rd32(image + 40u));
-    uint32_t params_start = rel_off(rd32(image + 44u));
-    uint32_t params_offset = rel_off(rd32(image + 48u));
-    uint32_t ctx = rel_off(rd32(image + 100u));
 
-    if ((data_data & 3u) != 0u || data_data > length ||
-        data_end < data_data || data_end > length ||
-        bss_end < data_end || bss_end > length ||
-        got_end < data_data || got_end > length ||
-        rel_end < got_end || rel_end > length ||
-        (params_offset != 0u && params_offset >= length) ||
-        ctx > length - data_data || data_data + ctx > length - 72u) {
+    if (!image_offset(rd32(image + 8u), RELOC_RAM_CLASS, length,
+                      &data_start) ||
+        !image_offset(rd32(image + 12u), RELOC_RAM_CLASS, length,
+                      &data_end) ||
+        !image_offset(rd32(image + 16u), RELOC_FLASH_CLASS, length,
+                      &data_data) ||
+        !image_offset(rd32(image + 20u), RELOC_RAM_CLASS, length,
+                      &bss_start) ||
+        !image_offset(rd32(image + 24u), RELOC_RAM_CLASS, length,
+                      &bss_end) ||
+        !image_offset(rd32(image + 28u), RELOC_RAM_CLASS, length,
+                      &got_start) ||
+        !image_offset(rd32(image + 32u), RELOC_RAM_CLASS, length,
+                      &got_end) ||
+        !image_offset(rd32(image + 36u), RELOC_FLASH_CLASS, length,
+                      &rel_start) ||
+        !image_offset(rd32(image + 40u), RELOC_FLASH_CLASS, length,
+                      &rel_end) ||
+        !image_offset(rd32(image + 44u), RELOC_RAM_CLASS, length,
+                      &params_start) ||
+        !image_offset(rd32(image + 100u), RELOC_RAM_CLASS, length, &ctx)) {
         return 0;
     }
 
-    uint32_t ctx_at = data_data + ctx;
+    /* These offsets live in separate address spaces in ST's image format:
+     * data/bss/GOT/parameter-table offsets are RAM-relative, while the
+     * read-only and relocation offsets are file-relative FLASH offsets. */
+    if (data_start > data_end || data_end > bss_start ||
+        bss_start > bss_end || data_start > got_start ||
+        got_start > got_end || got_end > bss_start ||
+        data_data < RELOC_IMAGE_HEADER_BYTES || data_data > rel_start ||
+        rel_start > rel_end || !image_span_ok(rel_start,
+                                               rel_end - rel_start,
+                                               length)) {
+        return 0;
+    }
+
+    /* params_offset is a raw file offset, not one of the encoded section
+     * addresses.  A zero value denotes a split parameter image. */
+    {
+        uint32_t encoded_params_offset = rd32(image + 48u);
+        int params_rc;
+
+        if ((encoded_params_offset & RELOC_ADDR_CLASS_MASK) != 0u) {
+            return 0;
+        }
+        params_offset = (size_t)encoded_params_offset;
+        if ((params_offset & 3u) != 0u) return 0;
+        params_rc = resolve_parameter_span((uintptr_t)image, length,
+                                            params_ptr, params_length,
+                                            params_offset, &params_base,
+                                            &params_length_bound);
+        if (params_rc != TIKU_NPU_OK) return 0;
+    }
+
+    if (!image_span_ok(data_data, ctx, length) ||
+        !image_span_ok(data_data + ctx, RELOC_IMAGE_CTX_BYTES, length)) {
+        return 0;
+    }
+    ctx_at = data_data + ctx;
     /* The runtime dereferences these context strings during get_info and
      * install.  Validate their file-relative offsets before entering ST code,
      * whose public get_info API has no length parameter. */
-    if (!image_string(image, length, rd32(image + ctx_at + 20u)) ||
-        !image_string(image, length, rd32(image + ctx_at + 36u))) {
+    if (!image_string(image, length, rd32(image + ctx_at + 20u),
+                      RELOC_FLASH_CLASS) ||
+        !image_string(image, length, rd32(image + ctx_at + 36u),
+                      RELOC_FLASH_CLASS)) {
         return 0;
     }
     /* Entry points are offsets into the relocatable image.  Optional entries
      * may be zero, but a nonzero entry must remain inside the code image. */
     for (uint32_t vec = 0u; vec < 13u; vec++) {
-        uint32_t entry = rel_off(rd32(image + 52u + vec * 4u));
+        uint32_t encoded_entry = rd32(image + 52u + vec * 4u);
+        uint32_t entry;
+
+        if (encoded_entry == 0u) continue;
+        if ((encoded_entry & RELOC_ADDR_CLASS_MASK) != RELOC_FLASH_CLASS) {
+            return 0;
+        }
+        entry = rel_off(encoded_entry);
         /* Function offsets carry the Thumb bit in bit 0. */
-        if (entry != 0u && ((entry & ~1u) >= rel_end ||
-                            ((entry & ~1u) & 3u) != 0u)) return 0;
+        if ((entry & ~1u) == 0u || (entry & ~1u) >= rel_end ||
+            ((entry & ~1u) & 3u) != 0u) {
+            return 0;
+        }
     }
 
     /* Each relocation word is itself an encoded address of the word that the
      * ST installer will rewrite.  Validate the site list before install: a
      * damaged site otherwise becomes an unchecked dereference inside the
      * vendor routine, which has no image-length argument. */
-    if (rel_end < rel_start || rel_start > length || rel_end > length ||
-        rel_start < got_end || ((rel_end - rel_start) & 3u) != 0u) return 0;
-    for (desc = (uintptr_t)image + rel_start;
-         desc < (uintptr_t)image + rel_end; desc += 4u) {
-        uint32_t site = rd32((const uint8_t *)desc);
+    if (rel_start < data_data || rel_end < rel_start ||
+        ((rel_end - rel_start) & 3u) != 0u) {
+        return 0;
+    }
+    for (size_t at = rel_start; at <= rel_end - 4u; at += 4u) {
+        uint32_t site = rd32(image + at);
         uint32_t site_off = rel_off(site);
-        uint32_t site_kind = site & UINT32_C(0xf0000000);
+        uint32_t site_kind = site & RELOC_ADDR_CLASS_MASK;
         if ((site_kind != UINT32_C(0x20000000) &&
              site_kind != UINT32_C(0x40000000)) ||
-            site_off > length - 4u) return -1;
+            (site_off & 3u) != 0u || !image_span_ok(site_off, 4u, length)) {
+            return -1;
+        }
     }
 
     /* The descriptor array is at data_data + params_start and is terminated
      * by a zero flags/name record. Bound the same ten entries as ST's loader,
      * and reject a half-zero record before the vendor helper sees it. */
-    if (params_start > length - data_data) {
+    if (params_start > length - data_data ||
+        data_data + params_start > rel_start) {
         return 0;
     }
-    size_t desc_at = (size_t)data_data + params_start;
-    if (desc_at > length || desc_at > UINTPTR_MAX - (uintptr_t)image) {
+    desc_at = data_data + params_start;
+    if (!image_span_ok(desc_at, RELOC_IMAGE_DESC_BYTES, length)) {
         return 0;
     }
-    desc = (uintptr_t)image + desc_at;
-    for (i = 0u; i < 10u; i++) {
+    for (i = 0u; i < RELOC_IMAGE_MAX_DESCS; i++) {
         size_t at;
-        if (i > (length - desc_at) / 20u) return 0;
-        at = desc_at + i * 20u;
-        if (at > length - 20u) return 0;
-        uint32_t name = rd32(image + at);
-        uint32_t flags = rd32(image + at + 4u);
+        uint32_t name;
+        uint32_t flags;
+
+        if ((size_t)i > (SIZE_MAX - desc_at) / RELOC_IMAGE_DESC_BYTES) {
+            return 0;
+        }
+        at = desc_at + (size_t)i * RELOC_IMAGE_DESC_BYTES;
+        if (!image_span_ok(at, RELOC_IMAGE_DESC_BYTES, length) ||
+            at > rel_start || RELOC_IMAGE_DESC_BYTES > rel_start - at) {
+            return 0;
+        }
+        name = rd32(image + at);
+        flags = rd32(image + at + 4u);
         if (name == 0u && flags == 0u) break;
-        if (name == 0u || flags == 0u || !image_string(image, length, name)) {
+        if (name == 0u || flags == 0u ||
+            !image_string(image, length, name, RELOC_FLASH_CLASS)) {
+            return 0;
+        }
+
+        uint32_t pool_type = AI_RELOC_MPOOL_GET_TYPE(flags);
+        uint32_t pool_dtype = AI_RELOC_MPOOL_GET_DTYPE(flags);
+        uint32_t pool_attr = AI_RELOC_MPOOL_GET_ATTR(flags);
+        uint32_t pool_id = AI_RELOC_MPOOL_GET_ID(flags);
+        uint32_t foff = rd32(image + at + 8u);
+        uint32_t size = rd32(image + at + 16u);
+        size_t rounded_size;
+        int has_initializer;
+
+        if (pool_type < AI_RELOC_MPOOL_TYPE_RELOC ||
+            pool_type > AI_RELOC_MPOOL_TYPE_RESET ||
+            pool_dtype < AI_RELOC_MPOOL_DTYPE_PARAM ||
+            pool_dtype > AI_RELOC_MPOOL_DTYPE_MIXED ||
+            (pool_attr & ~(AI_RELOC_MPOOL_DATTR_READ |
+                           AI_RELOC_MPOOL_DATTR_WRITE |
+                           AI_RELOC_MPOOL_DATTR_CACHEABLE)) != 0u ||
+            (pool_type == AI_RELOC_MPOOL_TYPE_RELOC && pool_id > 1u) ||
+            size > UINT32_MAX - 7u) {
+            return 0;
+        }
+        if (!round_up_size((size_t)size, 8u, &rounded_size)) return 0;
+        has_initializer = pool_type == AI_RELOC_MPOOL_TYPE_COPY ||
+                          (pool_type == AI_RELOC_MPOOL_TYPE_RELOC &&
+                           pool_dtype == AI_RELOC_MPOOL_DTYPE_PARAM);
+        if (has_initializer &&
+            ((size_t)foff > params_length_bound ||
+             rounded_size > params_length_bound - (size_t)foff)) {
             return 0;
         }
     }
-    return i < 10u;
+    return i < RELOC_IMAGE_MAX_DESCS;
 }
 
-static int model_ref_name(const char *path, char name[TIKU_BIGBLOB_NAME_MAX + 1u])
+#if defined(TIKU_NPU_PREFLIGHT_TEST_ENABLE)
+int tiku_npu_llaton_test_image_preflight(const void *image, size_t length,
+                                         uintptr_t params_ptr,
+                                         size_t params_length)
 {
-    static const char prefix[] = "/data/npu/";
-    const char *leaf = path;
-    size_t len;
-
-    if (path == NULL || name == NULL) {
-        return TIKU_NPU_ERR_NOT_FOUND;
-    }
-    if (strncmp(path, prefix, sizeof(prefix) - 1u) == 0) {
-        leaf = path + sizeof(prefix) - 1u;
-    }
-    if (*leaf == '\0' || strchr(leaf, '/') != NULL ||
-        strchr(leaf, '\\') != NULL) {
-        return TIKU_NPU_ERR_NOT_FOUND;
-    }
-    len = strlen(leaf);
-    if (len > TIKU_BIGBLOB_NAME_MAX) {
-        return TIKU_NPU_ERR_NOT_FOUND;
-    }
-    memcpy(name, leaf, len + 1u);
-    return TIKU_NPU_OK;
+    return image_preflight((const uint8_t *)image, length, params_ptr,
+                           params_length);
 }
+#endif
 
-static int map_source(const char *path, const uint8_t **source, size_t *length)
+#if defined(TIKU_NPU_POOL_TEST_ENABLE)
+int tiku_npu_llaton_test_validate_pools(const void *image, size_t length,
+                                        uintptr_t params_ptr,
+                                        size_t params_length,
+                                        uint32_t params_offset,
+                                        uint32_t ext_ram_size)
 {
-    char name[TIKU_BIGBLOB_NAME_MAX + 1u];
-    tiku_bigblob_info_t info;
-    uint32_t mapped_len;
-    int rc;
+    tiku_n6_model_image_t model_image;
+    ll_aton_reloc_info info;
 
-    if (source == NULL || length == NULL) {
-        return TIKU_NPU_ERR_ARGUMENT;
-    }
-    rc = model_ref_name(path, name);
-    if (rc != TIKU_NPU_OK) {
-        return rc;
-    }
-    rc = tiku_n6_model_store_info(&info);
-    if (rc == TIKU_BIGBLOB_ERR_NOENT) {
-        return TIKU_NPU_ERR_NOT_FOUND;
-    }
-    if (rc != TIKU_BIGBLOB_OK) {
-        return TIKU_NPU_ERR_IO;
-    }
-    if (strcmp(name, info.name) != 0) {
-        return TIKU_NPU_ERR_NOT_FOUND;
-    }
-    if (tiku_n6_model_store_verify() != TIKU_BIGBLOB_OK) {
-        return TIKU_NPU_ERR_IO;
-    }
-    *source = (const uint8_t *)tiku_n6_model_store_map(&mapped_len);
-    if (*source == NULL || mapped_len == 0U) {
-        return TIKU_NPU_ERR_IO;
-    }
-    *length = mapped_len;
-    return TIKU_NPU_OK;
+    memset(&model_image, 0, sizeof(model_image));
+    memset(&info, 0, sizeof(info));
+    model_image.file_ptr = (uintptr_t)image;
+    model_image.file_params_ptr = params_ptr;
+    model_image.file_bytes = length;
+    model_image.params_bytes = params_length;
+    info.params_off = params_offset;
+    info.ext_ram_sz = ext_ram_size;
+    return validate_pools(&model_image, &info);
 }
+#endif
 
 static int tensor_type(Buffer_DataType_TypeDef type, uint8_t *out)
 {
@@ -281,7 +502,9 @@ static int convert_tensor(const LL_Buffer_InfoTypeDef *src,
     dst->zero_point = 0;
     for (uint16_t i = 0u; i < TIKU_NPU_MODEL_MAX_RANK; i++) {
         dst->shape[i] = (i < rank) ? src->mem_shape[i] : 0u;
-        if (i < rank && dst->shape[i] == 0u) return TIKU_NPU_ERR_ARGUMENT;
+        if (i < rank && dst->shape[i] == 0u) { 
+            return TIKU_NPU_ERR_ARGUMENT;
+        }
     }
     if (src->offset != NULL && (src->type == DataType_INT8 ||
                                 src->type == DataType_UINT8)) {

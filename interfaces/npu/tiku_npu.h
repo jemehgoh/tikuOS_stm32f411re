@@ -116,10 +116,14 @@ typedef struct tiku_npu_model {
 /**
  * @brief Bind the published combined ST model.
  *
- * STM32N6 accepts the legacy /data/npu/<name> spelling and the bare stored
- * name; both resolve to the single verified bigblob model slot.
+ * STM32N6 accepts /data/npu/network_rel.bin and the compatibility bare name.
+ * The backend resolves the reference to a bounded raw image before invoking
+ * any LL-ATON inspection routine.
  */
 int tiku_npu_model_bind(tiku_npu_model_t *model, const char *model_ref);
+
+/** Shut down the application-owned STM32N6 NPU runtime. */
+int tiku_npu_shutdown(void);
 
 /** Install the bound model into the reserved NPU executable tier. */
 int tiku_npu_model_load(tiku_npu_model_t *model);

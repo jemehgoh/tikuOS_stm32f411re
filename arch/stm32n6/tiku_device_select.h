@@ -28,8 +28,10 @@
 
 #if defined(TIKU_BOARD_NUCLEO_N657X0Q)
 #include <arch/stm32n6/boards/tiku_board_nucleo_n657x0q.h>
+#elif defined(TIKU_BOARD_STM32N6570_DK)
+#include <arch/stm32n6/boards/tiku_board_stm32n6570_dk.h>
 #else
-#error "No TikuOS STM32N6 board selected. Define TIKU_BOARD_NUCLEO_N657X0Q."
+#error "No TikuOS STM32N6 board selected. Define a supported TIKU_BOARD_* macro."
 #endif
 
 #endif /* TIKU_STM32N6_DEVICE_SELECT_H_ */

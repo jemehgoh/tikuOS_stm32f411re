@@ -298,11 +298,7 @@ int main(void)
 #include "arch/stm32n6/tiku_uart_arch.h"
 #include "arch/stm32n6/tiku_gpio_arch.h"
 #include "arch/stm32n6/tiku_stm32n6_regs.h"
-
-/* NUCLEO-N657X0-Q LED3, the one the boot stub proved reachable. LED1 is PG8
- * and LED2 is PG10 on the same port. */
-#define TIKU_MIN_LED_PORT   STM32N6_GPIO_PORT_G
-#define TIKU_MIN_LED_PIN    0U
+#include "arch/stm32n6/tiku_device_select.h"
 
 int main(void)
 {
@@ -310,13 +306,16 @@ int main(void)
      * strand the console the ROM already relies on. */
     tiku_cpu_boot_stm32n6_init();
 
-    tiku_stm32n6_gpio_init_output(TIKU_MIN_LED_PORT, TIKU_MIN_LED_PIN);
+    TIKU_BOARD_LED1_INIT();
+    TIKU_BOARD_LED1_ON();
 
-    /* USART1 on PE5/PE6 -- the ST-LINK virtual COM port. */
+    /* USART1 is the board's ST-LINK virtual COM port. */
     tiku_uart_init();
 
     tiku_cpu_stm32n6_delay_ms(100);
-    tiku_uart_puts("\n\n--- TikuOS minimal smoke test (NUCLEO-N657X0-Q) ---\n");
+    tiku_uart_puts("\n\n--- TikuOS minimal smoke test (");
+    tiku_uart_puts(TIKU_BOARD_NAME);
+    tiku_uart_puts(") ---\n");
     /* The image identifies its own delay calibration, so a heartbeat period
      * can never be attributed to the wrong build. */
     tiku_uart_printf("spin=%u iters/ms\n",
@@ -333,7 +332,7 @@ int main(void)
             (unsigned int)clk,
             fault);
 
-        tiku_stm32n6_gpio_toggle(TIKU_MIN_LED_PORT, TIKU_MIN_LED_PIN);
+        TIKU_BOARD_LED1_TOGGLE();
         tiku_cpu_stm32n6_delay_ms(500U);
         i++;
     }
