@@ -7,16 +7,16 @@
  *
  * tiku_basic_ext_kits.inl - bundled native BASIC extensions.
  *
- * The first client of the builtin registry: useful words that are not interpreter
- * builtins, registered through the same public API any service uses.  Adding a
- * word is a handler plus one register call, never an edit to the interpreter.
+ * GCD, ISQRT, BITCNT, HEXPR, REV$ and ROMAN$, registered through the public
+ * registry API (tiku_basic_ext.h) as any service registers its words.  A word
+ * is a handler plus one register call.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
 
 #if (TIKU_BASIC_EXT_MAX > 0) && TIKU_BASIC_EXT_KITS
 
-/* GCD(a, b): greatest common divisor of |a| and |b|.  GCD(0,0)=0. */
+/** @brief GCD(a, b): greatest common divisor of |a| and |b|; GCD(0,0)=0. */
 static int
 bext_gcd(const long *args, int argc, long *out)
 {
@@ -33,7 +33,7 @@ bext_gcd(const long *args, int argc, long *out)
     return 0;
 }
 
-/* ISQRT(n): floor(sqrt(n)) for n >= 0 (integer, no FPU). */
+/** @brief ISQRT(n): floor(sqrt(n)) for n >= 0, in integer arithmetic. */
 static int
 bext_isqrt(const long *args, int argc, long *out)
 {
@@ -61,7 +61,7 @@ bext_isqrt(const long *args, int argc, long *out)
     return 0;
 }
 
-/* BITCNT(n): number of set bits in n (population count). */
+/** @brief BITCNT(n): number of set bits in n (population count). */
 static int
 bext_bitcnt(const long *args, int argc, long *out)
 {
@@ -76,13 +76,16 @@ bext_bitcnt(const long *args, int argc, long *out)
     return 0;
 }
 
-/* HEXPR n[, width]: statement -- print n as uppercase hex (no newline), so a
- * program can format bytes/addresses BASIC's decimal PRINT cannot.  Exercises
- * the statement hook + the parse/print/error ABI services. */
+/**
+ * @brief HEXPR n[, width]: print n as upper-case hex, with no newline; width
+ *        (1..8) pads with leading zeros.
+ *
+ * A statement word, built on the parse, print and error services.
+ */
 static void
 bext_hexpr(const char **p)
 {
-    long v;
+    long v, width = 1;
     unsigned long u;
     char buf[9];
     int i = 8;
@@ -91,19 +94,33 @@ bext_hexpr(const char **p)
     if (tiku_basic_ext_parse_expr(p, &v) != 0) {
         return;                  /* error already raised */
     }
+    skip_ws(p);
+    if (cur_peek(p) == ',') {
+        cur_advance(p);
+        if (tiku_basic_ext_parse_expr(p, &width) != 0) {
+            return;
+        }
+        if (width < 1 || width > 8) {
+            tiku_basic_ext_error(TIKU_BASIC_ERR_RANGE, "HEXPR width 1..8");
+            return;
+        }
+    }
     u = (unsigned long)v;
     buf[i] = '\0';
     do {
         buf[--i] = HX[u & 0xFu];
         u >>= 4;
-    } while (u != 0u && i > 0);
+    } while ((u != 0u || 8 - i < width) && i > 0);
     tiku_basic_ext_print(&buf[i]);
 }
 
 #if TIKU_BASIC_STRVARS_ENABLE
 
-/* REV$(s): the reverse of string s.  Demonstrates a STRING-arg string
- * function -- the handler parses its own args via the ABI. */
+/**
+ * @brief REV$(s): the reverse of string s.
+ *
+ * A string-argument string function: the handler parses its own arguments.
+ */
 static void
 bext_rev(const char **p, char *out, size_t cap)
 {
@@ -124,8 +141,11 @@ bext_rev(const char **p, char *out, size_t cap)
     out[n] = '\0';
 }
 
-/* ROMAN$(n): n (1..3999) as a Roman numeral.  Demonstrates a NUMERIC-arg
- * string function. */
+/**
+ * @brief ROMAN$(n): n (1..3999) as a Roman numeral.
+ *
+ * A numeric-argument string function.
+ */
 static void
 bext_roman(const char **p, char *out, size_t cap)
 {
@@ -161,9 +181,13 @@ bext_roman(const char **p, char *out, size_t cap)
 
 #endif /* TIKU_BASIC_STRVARS_ENABLE */
 
-/* Register the bundled words.  Called once (guarded) at the first BASIC
- * session; idempotent, so a re-call is harmless.  Failures are silent by
- * design -- a full table just means fewer bundled words, never a boot fault. */
+/**
+ * @brief Register the bundled words; idempotent.
+ *
+ * A registration that fails, as on a full table, is skipped.
+ *
+ * @note Called once, guarded, at the first BASIC session.
+ */
 static void
 basic_ext_register_kits(void)
 {

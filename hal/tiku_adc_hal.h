@@ -5,11 +5,11 @@
  *
  * Authors: Ambuj Varshney <ambuj@tiku-os.org>
  *
- * tiku_adc_hal.h - Platform-routing header for ADC
+ * tiku_adc_hal.h - platform routing for the ADC driver.
  *
- * Routes to the correct architecture-specific ADC header based on the
- * selected platform. This is the single point where the arch ADC header
- * enters the include chain for the platform-independent ADC layer.
+ * Includes arch/<platform>/tiku_adc_arch.h for the PLATFORM_* macro the build
+ * defines. Code outside arch/ includes the ADC arch header only through this
+ * file.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -29,6 +29,8 @@
 #include <arch/stm32n6/tiku_adc_arch.h>
 #elif defined(PLATFORM_RA8P1)
 #include <arch/ra8p1/tiku_adc_arch.h>
+#elif defined(PLATFORM_ESP32C61)
+#include <arch/esp32c61/tiku_adc_arch.h>
 #endif
 
 #endif /* TIKU_ADC_HAL_H_ */

@@ -19,6 +19,7 @@
 #include "tiku_timer.h"
 #include "tiku_crit.h"
 #include "tiku.h"
+#include "kernel/memory/tiku_reclaim_internal.h"
 #include <stddef.h>
 
 /*---------------------------------------------------------------------------*/
@@ -36,10 +37,27 @@ static uint16_t timer_fire_count;
 /*---------------------------------------------------------------------------*/
 
 /**
- * @brief Check if clock time `now` is past the timer's expiration
+ * @brief Check if clock time `now` is at or past the timer's expiration
  */
 static inline int timer_is_due(struct tiku_timer *t, tiku_clock_time_t now) {
   return (tiku_clock_time_t)(now - t->start) >= t->interval;
+}
+
+/**
+ * @brief Is @p t's expiration held back because the memory-reclaim gate
+ *        refuses its owner a TIMER event?
+ *
+ * A held expiration stays armed until the gate lifts; it is not pending work,
+ * so the idle loop may sleep on it.  Always 0 without TIKU_MEM_RECLAIM_ENABLE.
+ */
+static int timer_held(const struct tiku_timer *t) {
+#if TIKU_MEM_RECLAIM_ENABLE
+  return t->mode == TIKU_TIMER_MODE_EVENT && t->p != NULL &&
+         !tiku_mem_reclaim_process_dispatch(t->p, TIKU_EVENT_TIMER);
+#else
+  (void)t;
+  return 0;
+#endif
 }
 
 /**
@@ -61,17 +79,14 @@ static void timer_remove(struct tiku_timer *t) {
 /**
  * @brief Insert a timer into the active list
  *
- * Removes first if already present (prevents duplicates),
- * then prepends to head. O(n) removal but the list is
- * typically short on embedded systems.
+ * An active timer is removed first, so the list holds it once; then it is
+ * prepended and the timer process polled.
  */
 static void timer_insert(struct tiku_timer *t) {
-  /* Remove if already in list */
   if (t->active) {
     timer_remove(t);
   }
 
-  /* Prepend */
   t->next = timer_list;
   timer_list = t;
   t->active = 1;
@@ -90,32 +105,12 @@ TIKU_PROCESS_THREAD(tiku_timer_process, ev, data) {
   struct tiku_timer *t;
   struct tiku_timer *prev;
 
+  (void)data;
+
   TIKU_PROCESS_BEGIN();
 
   while (1) {
     TIKU_PROCESS_YIELD();
-
-    /*
-     * Handle process exit: remove all timers belonging to
-     * the exited process.
-     */
-    if (ev == TIKU_EVENT_EXITED) {
-      struct tiku_process *dead = tiku_event_proc(ev, data);
-      struct tiku_timer **pp = &timer_list;
-
-      while (*pp != NULL) {
-        if ((*pp)->p == dead) {
-          struct tiku_timer *victim = *pp;
-          TIMER_PRINTF("Cleanup: removed timer for exited process\n");
-          *pp = victim->next;
-          victim->next = NULL;
-          victim->active = 0;
-        } else {
-          pp = &(*pp)->next;
-        }
-      }
-      continue;
-    }
 
     if (ev != TIKU_EVENT_POLL) {
       continue;
@@ -125,23 +120,30 @@ TIKU_PROCESS_THREAD(tiku_timer_process, ev, data) {
      * If a critical-execution window is held, defer the scan.
      * The poll re-issued from tiku_crit_end() will pick up any
      * expirations that came due while the window was held.
-     * (The clock ISR also suppresses poll requests during a
-     * window, but check here too since other code can call
-     * tiku_timer_request_poll directly.)
+     * (MSP430's tick ISR also skips the poll during a window;
+     * on the other ports this check is the only one.)
      */
     if (tiku_crit_active()) {
       continue;
     }
 
     /*
-     * Scan for expired timers.  The scan restarts after
-     * each dispatch because the callback or event handler
-     * might modify the list (set/stop/reset timers).
+     * Scan for expired timers.  The scan restarts after each
+     * expiry, because a callback may set, stop or reset timers.
      */
   rescan:
     prev = NULL;
     for (t = timer_list; t != NULL; t = t->next) {
       if (timer_is_due(t, tiku_clock_time())) {
+
+        /* An event the full queue refuses, or one the reclaim gate holds,
+         * stays armed and is retried on the next poll; this scan moves
+         * past it. */
+        if (t->mode == TIKU_TIMER_MODE_EVENT && t->p != NULL &&
+            (timer_held(t) || !tiku_process_post(t->p, TIKU_EVENT_TIMER, t))) {
+          prev = t;
+          continue;
+        }
 
         /* Remove from list before dispatching */
         if (prev != NULL) {
@@ -159,9 +161,6 @@ TIKU_PROCESS_THREAD(tiku_timer_process, ev, data) {
           TIKU_PROCESS_CONTEXT_BEGIN(t->p);
           t->func(t->ptr);
           TIKU_PROCESS_CONTEXT_END(t->p);
-        } else if (t->mode == TIKU_TIMER_MODE_EVENT && t->p != NULL) {
-          TIMER_PRINTF("Expired: event posted to %s\n", t->p->name);
-          tiku_process_post(t->p, TIKU_EVENT_TIMER, t);
         }
 
         /* Restart scan — list may have changed */
@@ -182,6 +181,23 @@ void tiku_timer_init(void) {
   timer_list = NULL;
   tiku_process_start(&tiku_timer_process, NULL);
   TIMER_PRINTF("Init complete\n");
+}
+
+/* tiku_process_exit() calls this inside its atomic section, before
+ * supervision can start the owner again.  The EXITED broadcast can be
+ * dropped or arrive after a restart, so it cancels nothing. */
+void tiku_timer_cancel_process(const struct tiku_process *owner) {
+  struct tiku_timer **pp = &timer_list;
+  while (*pp != NULL) {
+    if ((*pp)->p == owner) {
+      struct tiku_timer *t = *pp;
+      *pp = t->next;
+      t->next = NULL;
+      t->active = 0;
+    } else {
+      pp = &(*pp)->next;
+    }
+  }
 }
 
 /*---------------------------------------------------------------------------*/
@@ -263,7 +279,16 @@ tiku_clock_time_t tiku_timer_expiration_time(struct tiku_timer *t) {
 
 /*---------------------------------------------------------------------------*/
 
-void tiku_timer_request_poll(void) { tiku_process_poll(&tiku_timer_process); }
+/*
+ * Polls only while a timer exists.  The tick calls this on every interrupt;
+ * with no timers it queues nothing, so the queue can stay empty and the idle
+ * loop asleep.  A timer inserted after the check polls from timer_insert().
+ */
+void tiku_timer_request_poll(void) {
+  if (timer_list != NULL) {
+    tiku_process_poll(&tiku_timer_process);
+  }
+}
 
 /*---------------------------------------------------------------------------*/
 
@@ -276,7 +301,7 @@ int tiku_timer_work_pending(void) {
   tiku_clock_time_t now = tiku_clock_time();
 
   for (t = timer_list; t != NULL; t = t->next) {
-    if (timer_is_due(t, now)) {
+    if (timer_is_due(t, now) && !timer_held(t)) {
       return 1;
     }
   }

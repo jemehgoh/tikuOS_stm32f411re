@@ -1,0 +1,136 @@
+/*
+ * Tiku Operating System v0.06
+ * Simple. Ubiquitous. Intelligence, Everywhere.
+ * http://tiku-os.org
+ *
+ * Authors: Ambuj Varshney <ambuj@tiku-os.org>
+ *
+ * tiku_mpu_arch.c - ESP32-C61 memory protection: the portable state machine.
+ *
+ * The segment access mask is a software shadow of the MSP430 MPU and
+ * enforces nothing.  A locked PMP entry faults any access below 4 KB (NULL),
+ * and PMA entry 12 holds the module window to W^X.
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+#include <hal/tiku_mpu_hal.h>
+#include "tiku_mpu_arch.h"
+#include "tiku_esp32c61_regs.h"
+#include "tiku_psram_arch.h"
+
+/** @brief The WRITE bits of the three SAM segment fields. */
+#define TIKU_MPU_SAM_WRITE_BITS  0x0222U
+
+/** @brief Software segment-access-mask shadow (MSP430 SAM model). */
+static uint16_t mpu_sam = TIKU_MPU_DEFAULT_SAM;
+
+/** @brief Software MPUCTL0 shadow (password | enable mirror). */
+static uint16_t mpu_ctl;
+
+uint16_t tiku_mpu_arch_get_sam(void) {
+    return mpu_sam;
+}
+
+/**
+ * @brief Set the software SAM.
+ *
+ * Bookkeeping only: mpu_ctl records the MSP430 MPUCTL0 password write, then
+ * password | enable, which the portable MPU tests read back.
+ */
+void tiku_mpu_arch_set_sam(uint16_t sam) {
+    mpu_ctl = 0xA500U;                  /* mirror MSP430 password write */
+    mpu_sam = sam;
+    mpu_ctl = 0xA500U | 0x0001U;        /* password | enable            */
+}
+
+uint16_t tiku_mpu_arch_get_ctl(void) {
+    return mpu_ctl;
+}
+
+void tiku_mpu_arch_disable_irq(void) {
+}
+
+void tiku_mpu_arch_enable_irq(void) {
+}
+
+/**
+ * @brief Reset the shadow to its default and lock the NULL guard.
+ *
+ * Nothing lives below 4 KB, and the bus answers loads there with zeros; PMP
+ * entry 0, locked with no permissions, makes any access there fault.  The
+ * lock holds until reset, so the PMP writes of a second call are ignored.
+ */
+void tiku_mpu_arch_init_segments(void) {
+    tiku_mpu_arch_set_sam(TIKU_MPU_DEFAULT_SAM);
+    ESP32C61_CSR_WRITE(ESP32C61_CSR_PMPADDR0, (0x1000UL / 8UL) - 1UL);
+    ESP32C61_CSR_WRITE(ESP32C61_CSR_PMPCFG0,
+                       (ESP32C61_CSR_READ(ESP32C61_CSR_PMPCFG0) & ~0xFFUL) |
+                       ESP32C61_PMP_LOCK_NAPOT);
+}
+
+/** @brief Restore the default (read+exec, no write) SAM policy. */
+void tiku_mpu_arch_set_default_protection(void) {
+    tiku_mpu_arch_set_sam(TIKU_MPU_DEFAULT_SAM);
+}
+
+/**
+ * @brief Set the 3-bit permission field for one software SAM segment.
+ *
+ * Each segment occupies 4 bits of the SAM word, the TIKU_MPU_READ/WRITE/EXEC
+ * flags in bits [2:0] of it.
+ */
+void tiku_mpu_arch_set_seg_perm(uint8_t seg, uint8_t perm) {
+    uint16_t shift = (uint16_t)(seg * 4U);
+    uint16_t mask  = (uint16_t)(0x07U << shift);
+
+    tiku_mpu_arch_set_sam((uint16_t)((mpu_sam & ~mask) |
+                                     (((uint16_t)perm & 0x07U) << shift)));
+}
+
+/**
+ * @brief Open an NVM write window in the shadow.
+ *
+ * @return The prior SAM word; lock_nvm() restores it, so windows nest
+ */
+uint16_t tiku_mpu_arch_unlock_nvm(void) {
+    uint16_t saved = mpu_sam;
+
+    tiku_mpu_arch_set_sam((uint16_t)(saved | TIKU_MPU_SAM_WRITE_BITS));
+    return saved;
+}
+
+/**
+ * @brief Close an NVM write window.
+ * @param saved_state  The value tiku_mpu_arch_unlock_nvm() returned
+ */
+void tiku_mpu_arch_lock_nvm(uint16_t saved_state) {
+    tiku_mpu_arch_set_sam(saved_state);
+}
+
+/** @brief No violation flags latch on this port. @return 0 */
+uint16_t tiku_mpu_arch_get_violation_flags(void) {
+    return 0U;
+}
+
+void tiku_mpu_arch_clear_violation_flags(void) {
+}
+
+void tiku_mpu_arch_enable_violation_nmi(void) {
+}
+
+/**
+ * @brief Set PMA entry 12 over the module window: read/execute when
+ *        @p enable is non-zero, read/write otherwise.
+ *
+ * Entry 12 takes priority over the PSRAM's read/write entry 13, so the
+ * window is never writable and executable at once.
+ */
+void tiku_mpu_arch_module_window_exec(int enable) {
+    ESP32C61_CSR_WRITE(ESP32C61_CSR_PMAADDR12,
+                       (TIKU_ESP32C61_MODULE_WINDOW |
+                        (TIKU_ESP32C61_MODULE_WINDOW_BYTES / 2UL - 1UL)) >> 2);
+    ESP32C61_CSR_WRITE(ESP32C61_CSR_PMACFG12, enable ? ESP32C61_PMA_NAPOT_RX
+                                                     : ESP32C61_PMA_NAPOT_RW);
+    __asm__ volatile ("fence.i" ::: "memory");
+}

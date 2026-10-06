@@ -5,11 +5,11 @@
  *
  * Authors: Ambuj Varshney <ambuj@tiku-os.org>
  *
- * tiku_cache.c - write-back cache for hot FRAM regions.
+ * tiku_cache.c - write-back cache for hot NVM regions.
  *
- * Absorbs rapid read-modify-write bursts in SRAM and flushes to FRAM at explicit
- * sync points, cutting both write energy and cell wear.  Uncommitted data is
- * volatile, so callers choose the sync points.
+ * Absorbs rapid read-modify-write bursts in SRAM and flushes to NVM at
+ * explicit sync points, cutting both write energy and cell wear.  Unflushed
+ * data is volatile, so callers choose the sync points.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -26,16 +26,9 @@
 /*---------------------------------------------------------------------------*/
 
 /*
- * A flat table of pointers to all registered cached regions. This
- * allows tiku_cache_flush_all() to iterate every active region
- * without requiring the caller to maintain a list.
- *
- * Why a pointer table and not embedded list nodes:
- *   The cached_region_t structs live wherever the caller places them
- *   (typically static storage). An intrusive linked list would add
- *   a next-pointer to the struct and complicate destruction (must
- *   unlink). A flat pointer table is simpler, bounded, and trivial
- *   to scan on a small MCU.
+ * Pointers to every registered cached region, which tiku_cache_flush_all()
+ * walks.  The tiku_cached_region_t structs live wherever the caller places
+ * them (typically static storage) and carry no link field.
  */
 static tiku_cached_region_t *cache_table[TIKU_CACHE_MAX_REGIONS];
 static tiku_mem_arch_size_t  cache_count;
@@ -45,7 +38,7 @@ static tiku_mem_arch_size_t  cache_count;
 /*---------------------------------------------------------------------------*/
 
 /**
- * @brief Register a region in the global table
+ * @brief Register a region in the global table.
  *
  * @return TIKU_MEM_OK on success, TIKU_MEM_ERR_FULL if table is full
  */
@@ -62,7 +55,7 @@ static tiku_mem_err_t table_add(tiku_cached_region_t *region)
 }
 
 /**
- * @brief Remove a region from the global table
+ * @brief Remove a region from the global table.
  *
  * Swaps the last entry into the vacated slot to keep the table
  * compact. O(n) scan but n <= TIKU_CACHE_MAX_REGIONS (small).
@@ -75,7 +68,6 @@ static tiku_mem_err_t table_remove(tiku_cached_region_t *region)
 
     for (i = 0; i < cache_count; i++) {
         if (cache_table[i] == region) {
-            /* Swap with last entry and shrink */
             cache_count--;
             cache_table[i] = cache_table[cache_count];
             cache_table[cache_count] = NULL;
@@ -91,9 +83,9 @@ static tiku_mem_err_t table_remove(tiku_cached_region_t *region)
 /*---------------------------------------------------------------------------*/
 
 /**
- * @brief Create a cached region over a FRAM address
+ * @brief Create a cached region over an NVM address.
  *
- * Copies current FRAM contents into SRAM so the working copy starts
+ * Copies the current NVM contents into SRAM so the working copy starts
  * in sync with persistent storage.
  */
 tiku_mem_err_t tiku_cache_create(tiku_cached_region_t *region,
@@ -121,18 +113,17 @@ tiku_mem_err_t tiku_cache_create(tiku_cached_region_t *region,
     region->dirty        = 0;
     region->active       = 1;
 
-    /* Seed SRAM cache with current FRAM contents */
     tiku_mem_arch_nvm_read(sram_buf, fram_addr, size);
 
     return TIKU_MEM_OK;
 }
 
 /**
- * @brief Get a pointer to the SRAM working copy
+ * @brief Get a pointer to the SRAM working copy.
  *
- * Marks the region dirty since the caller will presumably write
- * through the returned pointer. This is the fast path — all
- * subsequent reads and writes hit SRAM until an explicit flush.
+ * Marks the region dirty, so the next flush writes it back whether or not
+ * the caller wrote.  Reads and writes through the pointer hit SRAM until a
+ * flush.
  */
 void *tiku_cache_get(tiku_cached_region_t *region)
 {
@@ -146,7 +137,7 @@ void *tiku_cache_get(tiku_cached_region_t *region)
 }
 
 /**
- * @brief Mark a cached region as dirty
+ * @brief Mark a cached region as dirty.
  */
 tiku_mem_err_t tiku_cache_mark_dirty(tiku_cached_region_t *region)
 {
@@ -161,10 +152,10 @@ tiku_mem_err_t tiku_cache_mark_dirty(tiku_cached_region_t *region)
 }
 
 /**
- * @brief Flush a single cached region from SRAM back to FRAM
+ * @brief Flush a single cached region from SRAM back to NVM.
  *
- * Unlocks the MPU, copies SRAM to FRAM via the HAL, and relocks.
- * No-op if the region is clean.
+ * Unlocks the MPU, copies SRAM to NVM via the HAL, and relocks.  No-op if
+ * the region is clean; a failed relock leaves it dirty.
  */
 tiku_mem_err_t tiku_cache_flush(tiku_cached_region_t *region)
 {
@@ -183,7 +174,10 @@ tiku_mem_err_t tiku_cache_flush(tiku_cached_region_t *region)
     tiku_mem_arch_nvm_write(region->fram_backing,
                              region->sram_cache,
                              region->size);
-    tiku_mpu_lock_nvm(saved);
+    tiku_mem_err_t status = tiku_mpu_lock_nvm_status(saved);
+    if (status != TIKU_MEM_OK) {
+        return status;
+    }
 
     region->dirty = 0;
 
@@ -193,9 +187,8 @@ tiku_mem_err_t tiku_cache_flush(tiku_cached_region_t *region)
 /**
  * @brief Flush all registered cached regions.
  *
- * Unlocks the MPU once for the whole batch, which beats flushing one at a time
- * when several are dirty -- each unlock/lock pair writes the password-protected
- * control register.
+ * Opens the NVM window once for the whole batch.  On a failed relock no
+ * region is marked clean.
  */
 tiku_mem_err_t tiku_cache_flush_all(void)
 {
@@ -226,21 +219,28 @@ tiku_mem_err_t tiku_cache_flush_all(void)
             tiku_mem_arch_nvm_write(r->fram_backing,
                                      r->sram_cache,
                                      r->size);
-            r->dirty = 0;
         }
     }
 
-    tiku_mpu_lock_nvm(saved);
+    tiku_mem_err_t status = tiku_mpu_lock_nvm_status(saved);
+    if (status != TIKU_MEM_OK) {
+        return status;
+    }
+    for (i = 0; i < cache_count; i++) {
+        if (cache_table[i]->active) {
+            cache_table[i]->dirty = 0;
+        }
+    }
 
     return TIKU_MEM_OK;
 }
 
 /**
- * @brief Reload a cached region from FRAM into SRAM
+ * @brief Reload a cached region from NVM into SRAM.
  *
- * Overwrites the SRAM working copy with fresh FRAM contents. Useful
- * when external code (DMA, ISR, another subsystem) has written
- * directly to FRAM and the cache needs to resync.
+ * Overwrites the SRAM working copy with the NVM contents and clears the dirty
+ * flag, discarding unflushed changes.  Used when external code (DMA, an ISR,
+ * another subsystem) wrote the NVM directly.
  */
 tiku_mem_err_t tiku_cache_reload(tiku_cached_region_t *region)
 {
@@ -259,7 +259,7 @@ tiku_mem_err_t tiku_cache_reload(tiku_cached_region_t *region)
 }
 
 /**
- * @brief Get the number of registered cached regions
+ * @brief Get the number of registered cached regions.
  *
  * Returns the current size of the global cache table. Used by the
  * hibernate layer to iterate all regions for reload on warm resume.
@@ -270,7 +270,7 @@ tiku_mem_arch_size_t tiku_cache_get_count(void)
 }
 
 /**
- * @brief Get a cached region by index
+ * @brief Get a cached region by index.
  *
  * Returns a pointer to the region at the given table index, or NULL
  * if the index is out of range. Used by the hibernate layer.
@@ -285,11 +285,12 @@ tiku_cached_region_t *tiku_cache_get_region(tiku_mem_arch_size_t index)
 }
 
 /**
- * @brief Destroy a cached region
+ * @brief Destroy a cached region.
  *
  * Removes the region from the global table and clears the descriptor.
- * Does not flush — caller must flush before destroying if persistence
- * is needed.
+ *
+ * @note Does not flush: call tiku_cache_flush() first if the data must
+ *       persist.
  */
 tiku_mem_err_t tiku_cache_destroy(tiku_cached_region_t *region)
 {

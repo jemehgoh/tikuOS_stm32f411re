@@ -19,7 +19,7 @@
 /*---------------------------------------------------------------------------*/
 
 #include "tiku_shell_cmd_resume.h"
-#include <kernel/shell/tiku_shell.h>             /* SHELL_PRINTF via tiku_shell_io.h */
+#include <kernel/shell/tiku_shell.h>             /* SHELL_PRINTF */
 #include <kernel/process/tiku_process.h>
 
 /*---------------------------------------------------------------------------*/
@@ -39,7 +39,7 @@ tiku_shell_cmd_resume(uint8_t argc, const char *argv[])
         return;
     }
 
-    /* Parse PID from argument (simple atoi for small integers) */
+    /* Parse the decimal PID */
     pid = 0;
     for (idx = 0; argv[1][idx] != '\0'; idx++) {
         if (argv[1][idx] < '0' || argv[1][idx] > '9') {

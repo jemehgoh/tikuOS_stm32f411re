@@ -5,11 +5,10 @@
  *
  * Authors: Ambuj Varshney <ambuj@tiku-os.org>
  *
- * tiku_shell_io.h - I/O abstraction for the CLI.
+ * tiku_shell_io.h - I/O abstraction for the shell.
  *
- * Decouples the CLI from any transport: a backend supplies three function
- * pointers (putc, rx_ready, getc) plus a flags byte, and the active backend can be
- * swapped at run time.
+ * A backend supplies putc, rx_ready and getc, a flags byte and a capability
+ * byte; the active backend can be swapped at run time.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -30,7 +29,7 @@
 /** Convert \n to \r\n on output (serial terminals) */
 #define TIKU_SHELL_IO_CRLF   0x01
 
-/** Echo received characters back to the sender */
+/** The line editor echoes typed characters back to this backend */
 #define TIKU_SHELL_IO_ECHO   0x02
 
 /*---------------------------------------------------------------------------*/
@@ -41,18 +40,17 @@
  * @brief I/O backend descriptor
  *
  * Each transport fills one of these and passes it to
- * tiku_shell_io_set_backend().  The CLI never touches hardware
- * directly — all I/O goes through these three function pointers.
+ * tiku_shell_io_set_backend().  Output goes through putc.  The line editor
+ * calls getc only on the TCP backend and reads tiku_console_getc() otherwise.
  */
-typedef struct {
+typedef struct tiku_shell_io {
     void    (*putc)(char c);        /**< Transmit one raw byte */
     uint8_t (*rx_ready)(void);      /**< Non-zero when getc has data */
     int     (*getc)(void);          /**< Read one byte, -1 if empty */
     uint8_t flags;                  /**< Bitwise OR of TIKU_SHELL_IO_* */
-    uint8_t cap;                    /**< Capability this channel confers on
-                                         VFS writes (a TIKU_VFS_CAP_* mask).
-                                         The console is CAP_ALL, a remote
-                                         backend restricted; 0 fails closed. */
+    uint8_t cap;                    /**< TIKU_VFS_CAP_* mask VFS writes get
+                                         while it is active; 0 allows only
+                                         writes that need none. */
 } tiku_shell_io_t;
 
 /*---------------------------------------------------------------------------*/
@@ -62,10 +60,11 @@ typedef struct {
 /**
  * @brief Install a backend as the active I/O channel.
  *
- * May be called more than once (e.g. switch from UART to network).
- * Passing NULL disables all CLI I/O.
+ * Also sets the VFS caller capability to the backend's cap, or to
+ * TIKU_VFS_CAP_ALL for NULL.  With NULL, output is dropped and getc returns
+ * -1.
  *
- * @param backend  Backend descriptor (caller keeps ownership)
+ * @param backend  Backend descriptor; it must stay valid while installed
  */
 void tiku_shell_io_set_backend(const tiku_shell_io_t *backend);
 
@@ -97,8 +96,8 @@ void tiku_shell_io_puts(const char *s);
 /**
  * @brief Lightweight formatted output through the active backend.
  *
- * Supports: %s %d %u %x %c %% and optional width / 'l' modifier.
- * Converts \n to \r\n when TIKU_SHELL_IO_CRLF is set.
+ * Supports %d %u %x %X %p %s %c %% with the '-' and '0' flags, a width and
+ * 'l'.  Converts \n to \r\n when TIKU_SHELL_IO_CRLF is set.
  */
 void tiku_shell_io_printf(const char *fmt, ...);
 
@@ -116,6 +115,8 @@ uint8_t tiku_shell_io_rx_ready(void);
 /**
  * @brief Read one byte from the active backend (non-blocking).
  *
+ * @note On a console backend this is the raw wire, frame bytes included; a
+ *       builtin reading keystrokes uses tiku_shell_net_getc().
  * @return 0-255 on success, -1 if nothing available.
  */
 int tiku_shell_io_getc(void);
@@ -136,10 +137,7 @@ uint8_t tiku_shell_io_has_crlf(void);
 
 /**
  * @def SHELL_PRINTF(...)
- * @brief Shorthand used by CLI code and command handlers for output.
- *
- * Routes through the I/O abstraction so the same command code works
- * over any backend (UART, network, LLM channel, etc.).
+ * @brief Formatted output to the active backend: tiku_shell_io_printf().
  */
 #define SHELL_PRINTF(...) tiku_shell_io_printf(__VA_ARGS__)
 
@@ -151,8 +149,8 @@ uint8_t tiku_shell_io_has_crlf(void);
 extern const tiku_shell_io_t tiku_shell_io_uart;
 
 #if defined(TIKU_CONSOLE_USB)
-/** RP2350 USB CDC-ACM backend. Defined in arch/arm-rp2350/tiku_usb_cdc_arch.c.
- *  Selected at boot when TIKU_CONSOLE=usb (see the printf HAL + Makefile). */
+/** The native USB CDC-ACM backend: arch/arm-rp2350/tiku_usb_cdc_arch.c or
+ *  arch/nordic/tiku_usb_cdc_arch.c.  Selected at boot when TIKU_CONSOLE=usb. */
 extern const tiku_shell_io_t tiku_shell_io_usbcdc;
 #endif
 

@@ -7,21 +7,25 @@
  *
  * tiku_shell_cmd_freq.c - "freq" command: show or set the CPU core frequency.
  *
- * Setting drives the platform's frequency path -- the DCO on MSP430, the
- * performance mode on Ambiq.  A request the platform cannot honour leaves the
- * clock unchanged and is reported back.
+ * Setting a rate uses the MCLK divider on MSP430, the performance mode on
+ * Ambiq and the clock tree elsewhere.  A rate the platform cannot honour is
+ * clamped or ignored; the command prints the rate it reads back.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
 
 #include "tiku_shell_cmd_freq.h"
 #include <kernel/shell/tiku_shell.h>   /* SHELL_PRINTF */
-#include <hal/tiku_cpu.h>              /* tiku_cpu_freq_init / tiku_cpu_mclk_hz */
-#include <string.h>                    /* strcmp ("probe" subcommand)          */
+#include <hal/tiku_cpu.h>              /* tiku_cpu_freq_init, _mclk_hz */
+#include <string.h>                    /* strcmp ("probe" subcommand) */
 
-/* Round to nearest: a measured clock sits a hair under its nominal rate, and
- * truncating reported an exact 600 MHz switch as 599. */
+/* Round to the nearest MHz: a measured clock reads slightly under its
+ * nominal rate. */
 #define TIKU_HZ_TO_MHZ(hz)  (((hz) + 500000UL) / 1000000UL)
+
+#if defined(PLATFORM_MSP430)
+#include <arch/msp430/tiku_cpu_freq_boot_arch.h>  /* MCLK divider */
+#endif
 
 #if defined(PLATFORM_STM32N6)
 #include <arch/stm32n6/tiku_cpu_freq_boot_arch.h> /* clock-tree read-back */
@@ -32,12 +36,20 @@
 #include <arch/ra8p1/tiku_ra8p1_regs.h>           /* CAC clock selectors */
 #endif
 
+#if defined(PLATFORM_ESP32C61)
+#include <arch/esp32c61/tiku_cpu_freq_boot_arch.h> /* clock-tree read-back */
+#endif
+
 #if defined(PLATFORM_AMBIQ) && defined(AM_PART_APOLLO510)
 #include <arch/ambiq/tiku_cpu_freq_boot_arch.h>   /* HP identity probe */
 
-/* "freq probe" -- dump the silicon/trim/power identity that decides whether
- * (and how) High-Performance mode can be enabled on this exact chip. Read-only:
- * changes no clock, voltage, or perf mode. */
+/**
+ * @brief "freq probe": print the silicon, trim and power identity.
+ *
+ * High-Performance mode depends on these values.  The probe changes no
+ * clock, voltage or performance mode; when INFO1 is in OTP it powers OTP on
+ * for the read and restores its power state after.
+ */
 static void
 freq_cmd_probe(void)
 {
@@ -74,11 +86,9 @@ freq_cmd_probe(void)
                  (((p.mcuperfreq >> 3) & 3u) == 2u) ? "HP" : "LP");
     SHELL_PRINTF("  MEASURED    %lu Hz core clock (SysTick vs 32 kHz XT)\n",
                  tiku_cpu_freq_ambiq_measured_hz());
-    /* VDDF plan.  Measured HP active power sat 53% above the datasheet's
-     * IRUNHPFB row while LP was within 6% of IRUNLPFB, and P ~ V^2 makes an
-     * over-volt the prime suspect -- so print the boost this port computes and
-     * the trim the silicon is actually running.  The plan is built on the FIRST
-     * HP request, so run `freq 250` before expecting numbers here. */
+    /* VDDF: the boost this port computes for HP and the trim the silicon
+     * runs.  The boost plan exists only after the first HP request
+     * (`freq 250`); before that the plan line says it is not computed. */
     SHELL_PRINTF("  VDDF trim   applied=0x%02x (live MCUCTRL.VREFGEN4"
                  ".TVRGFVREFTRIM)\n", (unsigned)p.vddf_applied);
     if (p.vddf_plan_ok) {
@@ -94,8 +104,7 @@ freq_cmd_probe(void)
                      (unsigned)p.vddf_boost_codes,
                      (unsigned long)p.vddf_ltrim,
                      (unsigned long)p.vddf_etrim);
-        /* Plain %u only: SHELL_PRINTF's lightweight formatter has no %+d (it
-         * printed the format string verbatim), and no %p either. */
+        /* Plain %u only: the shell formatter has no '+' flag. */
         if (p.vddf_hp == p.vddf_ps13_raw) {
             SHELL_PRINTF("    -> HP runs the FACTORY state-13 trim exactly "
                          "(no boost applied)\n");
@@ -108,10 +117,7 @@ freq_cmd_probe(void)
     } else {
         SHELL_PRINTF("    plan      not computed yet -- run `freq 250` first\n");
     }
-    /* Raw regulator/buck state, for diffing LP vs HP from the host.  Raw hex
-     * on purpose: interpretation belongs to the analysis, and a firmware
-     * formatter that decodes fields is a second place for a transcription bug
-     * to hide.  Reads only. */
+    /* Raw regulator and buck register values; reads only. */
     SHELL_PRINTF("  REGS vrefgen2=%08lx vrefgen3=%08lx vrefgen4=%08lx\n",
                  (unsigned long)p.r_vrefgen2,
                  (unsigned long)p.r_vrefgen3,
@@ -152,8 +158,9 @@ static const char *freq_n6_src(uint8_t s)
 /**
  * @brief Print the live STM32N6 clock tree.
  *
- * Reads RCC and PWR back rather than reporting what was requested, so a
- * setting that did not take shows up as itself.
+ * The tree is read back from RCC and PWR, so a setting that did not take
+ * prints as the hardware holds it.  The last line adds tiku_cpu_mclk_hz(),
+ * the core clock measured against LPTIM1.
  */
 static void freq_cmd_probe_n6(void)
 {
@@ -183,17 +190,35 @@ static void freq_cmd_probe_n6(void)
 }
 #endif /* PLATFORM_STM32N6 */
 
+#if defined(PLATFORM_ESP32C61)
+/** @brief The PCR tree read back: root, each divider, and the measured core. */
+static void freq_cmd_probe_c61(void)
+{
+    static const char *const root[4] = {"XTAL", "RC_FAST", "PLL 160 MHz", "?"};
+    tiku_esp32c61_clock_t c;
+
+    tiku_cpu_esp32c61_clock_probe(&c);
+    SHELL_PRINTF("  root      %s\n", root[c.root & 3u]);
+    SHELL_PRINTF("  CPU       %lu Hz (/%u), %lu Hz measured\n",
+                 c.cpu_hz, (unsigned)c.cpu_div, tiku_cpu_mclk_hz());
+    SHELL_PRINTF("  AHB       %lu Hz (/%u)\n", c.ahb_hz, (unsigned)c.ahb_div);
+    SHELL_PRINTF("  APB       %lu Hz (/%u of AHB)\n", c.apb_hz,
+                 (unsigned)c.apb_div);
+}
+#endif /* PLATFORM_ESP32C61 */
+
 #if defined(PLATFORM_RA8P1)
 /*
  * PCLKB is the measurable proxy for the core: the CAC cannot count CPUCLK0
- * directly, and PCLKB divides from the same PLL1P at a ratio fixed per rung.
+ * directly, and PCLKB divides the same PLL1P by a fixed ratio at each core
+ * rate `freq` accepts.
  */
 
 /**
  * @brief Measure the live tree against the crystal, on-chip.
  *
- * Counts one clock against another with no host stopwatch involved, so a rung
- * that reports a rate it is not running at is caught rather than believed.
+ * Counts PCLKB against the crystal with the CAC, so a clock setting that is
+ * not running at its reported rate shows up as a large error.
  */
 static void freq_cmd_probe_ra8p1(void)
 {
@@ -208,12 +233,10 @@ static void freq_cmd_probe_ra8p1(void)
                  tiku_cpu_ra8p1_bclk_get_hz());
 
     /*
-     * Widest reference window (/8192).  At /32 one count is 750 kHz, so a
-     * perfectly good tree reads a count low and looks 1.25% out -- the
-     * measurement's own quantisation, mistakeable for a clock error.  Here a
-     * count is ~2.9 kHz, and 62.5 MHz still lands well inside the 16-bit
-     * counter.  The multiply is widened because count x 24 MHz overflows 32
-     * bits by two orders of magnitude.
+     * Reference divider /8192 (RCDS code 3): one count is about 2.9 kHz of
+     * PCLKB at a 24 MHz crystal, and PCLKB at 62.5 MHz stays inside the
+     * 16-bit counter.  count x TIKU_BOARD_MOSC_HZ overflows 32 bits, so the
+     * product is 64-bit.
      */
     count = tiku_cpu_ra8p1_cac_measure(RA8P1_CAC_CLK_PCLKB,
                                        RA8P1_CAC_CLK_MAIN, 3U);
@@ -264,6 +287,12 @@ tiku_shell_cmd_freq(uint8_t argc, const char *argv[])
         return;
     }
 #endif
+#if defined(PLATFORM_ESP32C61)
+    if (strcmp(argv[1], "probe") == 0) {
+        freq_cmd_probe_c61();
+        return;
+    }
+#endif
 
     /* Parse the requested core frequency in MHz (decimal). */
     p   = argv[1];
@@ -281,6 +310,17 @@ tiku_shell_cmd_freq(uint8_t argc, const char *argv[])
 #elif defined(PLATFORM_RA8P1)
         SHELL_PRINTF("  no arg: show the core clock;\n");
         SHELL_PRINTF("  <mhz>: 240 (boot default), 480 or 1000.\n");
+#elif defined(PLATFORM_ESP32C61)
+        SHELL_PRINTF("  no arg: show the core clock; probe: the clock tree;\n");
+#if TIKU_ESP32C61_OFFER_MIN_MHZ > 40U
+        SHELL_PRINTF("  <mhz>: 80 or 160 (PLL; the radios hang on the "
+                     "crystal).\n");
+#else
+        SHELL_PRINTF("  <mhz>: 10, 20 or 40 (crystal), 80 or 160 (PLL).\n");
+#endif
+#elif defined(PLATFORM_MSP430)
+        SHELL_PRINTF("  no arg: show the core clock; <mhz>: 8, 4, 2 or 1 "
+                     "(MCLK divided from the 8 MHz DCO).\n");
 #else
         SHELL_PRINTF("  no arg: show the core clock; <mhz>: request a frequency "
                      "(96, or turbo: 192 on Apollo4, 250 on Apollo510).\n");
@@ -288,7 +328,16 @@ tiku_shell_cmd_freq(uint8_t argc, const char *argv[])
         return;
     }
 
+#if defined(PLATFORM_MSP430)
+    /* tiku_cpu_freq_init() takes a DCO preset index here, and moving the DCO
+     * moves SMCLK and the console's baud rate with it.  The MCLK divider
+     * changes the core alone. */
+    if (req <= 8u) {
+        tiku_cpu_msp430_boot_divide(req * 1000000UL);
+    }
+#else
     tiku_cpu_freq_init((unsigned int)req);
+#endif
     now = TIKU_HZ_TO_MHZ(tiku_cpu_mclk_hz());
     if (now == req) {
         SHELL_PRINTF("CPU: %lu MHz\n", now);

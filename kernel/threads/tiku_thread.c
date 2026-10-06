@@ -7,9 +7,9 @@
  *
  * tiku_thread.c - preemptive worker threads: portable core.
  *
- * Policy only; the PendSV switcher, frame layout and DWT live in the arch
- * backend.  Thread 0 (the kernel) has absolute priority, workers round-robin
- * what it leaves, and the switcher falls back to the kernel when nothing runs.
+ * Policy only; the switch exception, frame layout and cycle counter live in
+ * the arch backend.  Thread 0 (the kernel) has absolute priority, workers
+ * round-robin what it leaves, and with no runnable worker the kernel runs.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -20,15 +20,17 @@
 
 #include "tiku_thread.h"
 #include <hal/tiku_cpu.h>            /* tiku_atomic_enter/exit */
+#include <kernel/timers/tiku_clock.h>  /* wait deadlines */
+#include <kernel/process/tiku_process.h>  /* an exit polls its waiter */
 
 /*---------------------------------------------------------------------------*/
 /* ARCH BACKEND INTERFACE (arch/<family>/tiku_thread_arch.c)                 */
 /*---------------------------------------------------------------------------*/
 
-/** One-time bring-up: ISR stack, MSP->PSP migration, PendSV priority,
- *  DWT cycle counter.  Runs in kernel (thread) context. */
+/** One-time bring-up (on Cortex-M: ISR stack, MSP->PSP migration, PendSV
+ *  priority, cycle counter).  Runs in kernel (thread) context. */
 extern void      tiku_thread_arch_boot(void);
-/** Pend the context-switch exception (ISR-safe, idempotent). */
+/** Pend the context-switch exception (callable from an ISR, idempotent). */
 extern void      tiku_thread_arch_pend(void);
 /** Free-running CPU cycle counter (wraps; deltas are what matter). */
 extern uint32_t  tiku_thread_arch_cycles(void);
@@ -49,7 +51,7 @@ extern uint32_t *tiku_thread_arch_frame_init(uint32_t *stack_top,
 static tiku_thread_t *s_threads[TIKU_THREADS_MAX];
 
 /** @brief Currently running worker, or NULL when thread 0 (kernel)
- *  owns the CPU.  Written only inside the PendSV switcher. */
+ *  owns the CPU.  Written only inside tiku_thread_switch(). */
 static tiku_thread_t * volatile s_current;
 
 /** @brief Kernel thread runnable?  Cleared by kernel_block, set by
@@ -68,7 +70,7 @@ static uint32_t *s_kernel_sp;
 /** @brief Kernel thread cycle account (thread 0's share). */
 static unsigned long long s_kernel_cycles;
 
-/** @brief DWT snapshot at the last switch (start of current tenure). */
+/** @brief Cycle-counter snapshot at the last switch (start of tenure). */
 static uint32_t s_tenure_start;
 
 /** @brief Stack-canary violations seen at switch time. */
@@ -77,38 +79,47 @@ static volatile uint16_t s_canary_faults;
 /**
  * @brief Is worker @p t eligible for the CPU right now?
  *
- * READY and within its energy budget; a budget of 0 is unlimited.  The single
- * enforcement point -- both the switcher's pick loop and
- * tiku_thread_worker_ready() consult it, so the two can never disagree.
+ * READY and below its cycle ceiling, budget - 1; a budget of 0 is unlimited.
+ * The switcher's pick loop and tiku_thread_worker_ready() both use it.
  */
 static int worker_runnable(const tiku_thread_t *t)
 {
     return t != (const tiku_thread_t *)0 &&
            t->state == TIKU_THREAD_READY &&
-           (t->budget == 0ull || t->cycles < t->budget);
+           (t->budget == 0ull || t->cycles < t->budget - 1ull);
+}
+
+/**
+ * @brief Make runnable every worker whose wait deadline has come.  Its bit
+ *        stays in the queue: that is how the wait tells a timeout.  Called
+ *        from the switch and from the kernel's ready check, so a deadline is
+ *        seen even while no switch happens.
+ */
+static void wake_due(void)
+{
+    uint8_t i;
+
+    for (i = 0; i < TIKU_THREADS_MAX; i++) {
+        tiku_thread_t *t = s_threads[i];
+
+        if (t != (tiku_thread_t *)0 && t->state == TIKU_THREAD_BLOCKED &&
+            t->timed && !TIKU_CLOCK_LT(tiku_clock_time(), t->wake_at)) {
+            t->state = TIKU_THREAD_READY;
+        }
+    }
 }
 
 /*---------------------------------------------------------------------------*/
-/* THE SWITCH (called from the PendSV switcher with IRQs implicitly          */
-/* serialised — PendSV is the lowest-priority exception)                     */
+/* THE SWITCH                                                                */
 /*---------------------------------------------------------------------------*/
 
 /**
- * @brief Save the outgoing context's sp, account its cycles, pick next.
+ * @brief Non-zero in kernel-thread (or pre-thread boot) context, zero in a
+ *        worker.
  *
- * Called by the arch PendSV handler with the outgoing sp, returning the incoming
- * one.  Policy: the kernel if runnable, else the next READY worker from the
- * round-robin cursor, else the kernel again -- it is what knows how to idle.
- *
- * @param old_sp  Outgoing stack pointer (past the software frame)
- * @return Incoming stack pointer
- */
-/**
- * @brief Non-zero in kernel-thread (or pre-thread boot) context, zero in a worker.
- *
- * The confinement predicate for TIKU_MEM_KERNEL_ONLY: memory mutators refuse
- * worker-context calls rather than race the kernel's lock-free structures.  One
- * aligned volatile read, so it is safe from any context, an ISR included.
+ * TIKU_MEM_KERNEL_ONLY tests it: memory mutators refuse calls from a worker,
+ * since the kernel's structures take no locks.  It only reads two variables,
+ * so any context may call it, an ISR included.
  */
 int tiku_thread_in_kernel(void)
 {
@@ -116,14 +127,16 @@ int tiku_thread_in_kernel(void)
 }
 
 /**
- * @brief Context-switch core: park the outgoing context, pick the next worker.
+ * @brief Context-switch core: park the outgoing context, pick the next one.
  *
- * Charges elapsed cycles to whoever ran, saves @p old_sp, checks the outgoing
- * stack canary, then takes the next READY in-budget worker from the round-robin
- * cursor.  With no runnable worker it returns to the kernel context.
+ * Charges elapsed cycles to whoever ran, saves @p old_sp and checks the
+ * outgoing stack canary.  Picks the kernel if runnable, else the next READY
+ * in-budget worker from the round-robin cursor, else the kernel again.
  *
  * @param old_sp  Stack pointer of the context being switched out.
  * @return The stack pointer of the context to switch in.
+ * @note Called only from the arch switch exception (PendSV, or the ESP32-C61
+ *       software interrupt), which runs at the lowest priority.
  */
 uint32_t *tiku_thread_switch(uint32_t *old_sp)
 {
@@ -147,9 +160,12 @@ uint32_t *tiku_thread_switch(uint32_t *old_sp)
         }
     }
 
+    wake_due();
+
     /* Pick the incoming context: the next READY, in-budget worker from
      * the round-robin cursor.  An exhausted worker is skipped here, so it
-     * silently loses its turn until a refill lifts it back over budget. */
+     * loses its turn until a refill raises its ceiling above the cycles it
+     * has used. */
     if (!s_kernel_ready) {
         for (i = 0; i < TIKU_THREADS_MAX; i++) {
             uint8_t idx = (uint8_t)((s_rr + i) % TIKU_THREADS_MAX);
@@ -213,6 +229,8 @@ int tiku_thread_start(tiku_thread_t *t, void (*entry)(void *), void *arg)
     }
     s_threads[slot] = t;
 
+    t->slot  = (uint8_t)slot;
+    t->timed = 0;
     t->entry = entry;
     t->arg   = arg;
     t->stack_base[0] = THREAD_CANARY;
@@ -237,7 +255,15 @@ void tiku_thread_exit(void)
     tiku_thread_t *self = s_current;
 
     if (self != (tiku_thread_t *)0) {
+        /* DONE and the waiter's poll share one section: a switch between
+         * them would take this worker off the CPU for good, unpolled. */
+        tiku_atomic_enter();
         self->state = TIKU_THREAD_DONE;
+        if (self->waiter != (struct tiku_process *)0) {
+            tiku_process_poll(self->waiter);
+            self->waiter = (struct tiku_process *)0;
+        }
+        tiku_atomic_exit();
     }
     /* Give the CPU back for good; the kernel (or the next worker)
      * takes over at the pended switch.  Never returns. */
@@ -246,22 +272,42 @@ void tiku_thread_exit(void)
     }
 }
 
+int tiku_thread_forget(tiku_thread_t *t)
+{
+    int rc = -1;
+    uint8_t i;
+
+    if (t == (tiku_thread_t *)0) {
+        return -1;
+    }
+    tiku_atomic_enter();
+    if (t->state == TIKU_THREAD_DONE || t->state == TIKU_THREAD_UNUSED) {
+        for (i = 0; i < TIKU_THREADS_MAX; i++) {
+            if (s_threads[i] == t) {
+                s_threads[i] = (tiku_thread_t *)0;
+            }
+        }
+        rc = 0;
+    }
+    tiku_atomic_exit();
+    return rc;
+}
+
 int tiku_thread_join(tiku_thread_t *t)
 {
     if (t == (tiku_thread_t *)0 || t->state == TIKU_THREAD_UNUSED) {
         return -1;
     }
     /* Kernel-context wait: repeatedly hand the CPU to the workers.
-     * The system tick's poll post wakes the kernel every tick, so
-     * this loop re-checks at tick granularity.  Test/teardown tool —
-     * steady-state code should take a completion event instead. */
+     * The tick wakes the kernel every tick (tiku_sched_notify()), so
+     * this loop re-checks at tick granularity. */
     while (t->state != TIKU_THREAD_DONE) {
         tiku_atomic_enter();
         if (tiku_thread_worker_ready()) {
             tiku_thread_kernel_block();
         }
         tiku_atomic_exit();
-        /* PendSV fires here (if pended); kernel resumes on wake. */
+        /* A pended switch fires here; the kernel resumes on wake. */
     }
     return 0;
 }
@@ -283,12 +329,46 @@ uint16_t tiku_thread_switches(const tiku_thread_t *t)
 int tiku_thread_worker_ready(void)
 {
     uint8_t i;
+
+    tiku_atomic_enter();
+    wake_due();
+    tiku_atomic_exit();
     for (i = 0; i < TIKU_THREADS_MAX; i++) {
         if (worker_runnable(s_threads[i])) {
             return 1;
         }
     }
     return 0;
+}
+
+tiku_thread_t *tiku_thread_self(void)
+{
+    return s_current;
+}
+
+int tiku_thread_next_deadline(unsigned long *at)
+{
+    tiku_clock_time_t now = tiku_clock_time();
+    int found = 0;
+    uint8_t i;
+
+    for (i = 0; i < TIKU_THREADS_MAX; i++) {
+        tiku_thread_t *t = s_threads[i];
+
+        if (t != (tiku_thread_t *)0 && t->state == TIKU_THREAD_BLOCKED &&
+            t->timed) {
+            tiku_clock_time_t w = (tiku_clock_time_t)t->wake_at;
+
+            if (!found || TIKU_CLOCK_LT(w, (tiku_clock_time_t)*at)) {
+                *at = w;
+                found = 1;
+            }
+        }
+    }
+    if (found && TIKU_CLOCK_LT((tiku_clock_time_t)*at, now)) {
+        *at = now;                      /* already due: no sleep at all */
+    }
+    return found;
 }
 
 uint8_t tiku_thread_count(void)
@@ -311,7 +391,24 @@ tiku_thread_state_t tiku_thread_state(const tiku_thread_t *t)
 int tiku_thread_is_done(const tiku_thread_t *t)
 {
     /* A NULL/never-started worker reads as done so an await can't hang. */
-    return (t == (const tiku_thread_t *)0) || (t->state == TIKU_THREAD_DONE);
+    return (t == (const tiku_thread_t *)0) || (t->state == TIKU_THREAD_DONE) ||
+           (t->state == TIKU_THREAD_UNUSED);
+}
+
+int tiku_thread_await(tiku_thread_t *t, struct tiku_process *p)
+{
+    int done;
+
+    /* This test-and-record and the exit's DONE-and-poll are both masked, so
+     * an exit either comes first and reads as done here, or finds the
+     * waiter. */
+    tiku_atomic_enter();
+    done = tiku_thread_is_done(t);
+    if (!done) {
+        t->waiter = p;
+    }
+    tiku_atomic_exit();
+    return done;
 }
 
 /*---------------------------------------------------------------------------*/
@@ -319,11 +416,10 @@ int tiku_thread_is_done(const tiku_thread_t *t)
 /*---------------------------------------------------------------------------*/
 
 /*
- * budget is a 64-bit field the PendSV switcher reads while picking the
- * next worker; a two-store update could be torn by the switch, so every
- * mutation runs under the PRIMASK atomic section (PendSV is an interrupt
- * and cannot fire while it is masked).  cycles is written only by the
- * switch itself, so the comparisons never race it.
+ * budget is a 64-bit field the switch reads while picking the next
+ * worker, and a two-store update can tear under it, so every update
+ * below runs inside the atomic section, which masks the switch
+ * exception.  Only the switch writes cycles.
  */
 
 void tiku_thread_budget_grant(tiku_thread_t *t, unsigned long long cycles)
@@ -332,13 +428,9 @@ void tiku_thread_budget_grant(tiku_thread_t *t, unsigned long long cycles)
         return;
     }
     tiku_atomic_enter();
-    /* Ceiling = already-consumed + allowance.  Guard the one aliasing
-     * corner: a never-run worker (cycles == 0) granted 0 would land on
-     * budget == 0 and read as "unlimited" — force it to the parked side. */
-    t->budget = t->cycles + cycles;
-    if (t->budget == 0ull) {
-        t->budget = 1ull;
-    }
+    /* Stored as consumed + allowance + 1, since 0 means unlimited: a
+     * never-run worker granted 0 gets a budget of 1, which parks it. */
+    t->budget = t->cycles + cycles + 1ull;
     tiku_atomic_exit();
 }
 
@@ -348,7 +440,7 @@ void tiku_thread_budget_refill(tiku_thread_t *t, unsigned long long cycles)
         return;
     }
     tiku_atomic_enter();
-    if (t->budget != 0ull) {          /* only extend an already-enforced budget */
+    if (t->budget != 0ull) {          /* extend only an enforced budget */
         t->budget += cycles;
     }
     tiku_atomic_exit();
@@ -373,7 +465,8 @@ unsigned long long tiku_thread_budget_remaining(const tiku_thread_t *t)
     tiku_atomic_enter();
     rem = (t->budget == 0ull)
         ? ~0ull
-        : ((t->cycles < t->budget) ? (t->budget - t->cycles) : 0ull);
+        : ((t->cycles < t->budget - 1ull) ? (t->budget - 1ull - t->cycles)
+                                          : 0ull);
     tiku_atomic_exit();
     return rem;
 }
@@ -385,7 +478,7 @@ int tiku_thread_budget_exhausted(const tiku_thread_t *t)
         return 0;
     }
     tiku_atomic_enter();
-    ex = (t->budget != 0ull && t->cycles >= t->budget);
+    ex = (t->budget != 0ull && t->cycles >= t->budget - 1ull);
     tiku_atomic_exit();
     return ex;
 }
@@ -393,6 +486,104 @@ int tiku_thread_budget_exhausted(const tiku_thread_t *t)
 uint16_t tiku_thread_canary_faults(void)
 {
     return s_canary_faults;
+}
+
+/*---------------------------------------------------------------------------*/
+/* WAIT QUEUES                                                               */
+/*---------------------------------------------------------------------------*/
+
+int tiku_thread_wait(tiku_waitq_t *q, unsigned long ticks)
+{
+    tiku_thread_t *self = s_current;
+    tiku_clock_time_t until = (tiku_clock_time_t)(tiku_clock_time() + ticks);
+    uint8_t bit = (self == (tiku_thread_t *)0) ? TIKU_WAITQ_KERNEL
+                                              : (uint8_t)(1u << self->slot);
+
+    q->waiters |= bit;
+    if (self != (tiku_thread_t *)0) {
+        /* Off the CPU until a wake clears the bit, or the switcher sees the
+         * deadline; the switch fires as the atomic section opens. */
+        self->timed = (uint8_t)(ticks != 0u);
+        self->wake_at = until;
+        self->state = TIKU_THREAD_BLOCKED;
+        tiku_thread_arch_pend();
+        tiku_atomic_exit();
+        tiku_atomic_enter();
+        self->timed = 0;
+    } else {
+        tiku_cpu_idle_enter_t wfi = tiku_cpu_idle_hook(TIKU_CPU_IDLE_LIGHT);
+
+        /* The kernel has nothing else to run meanwhile: workers get the CPU
+         * if any is ready, else the CPU waits for the next interrupt.  Any
+         * event post brings it back for the caller to look again. */
+        while ((q->waiters & bit) != 0u &&
+               (ticks == 0u || TIKU_CLOCK_LT(tiku_clock_time(), until))) {
+            if (tiku_thread_worker_ready()) {
+                tiku_thread_kernel_block();
+            } else if (wfi != (tiku_cpu_idle_enter_t)0) {
+                wfi();
+            }
+            tiku_atomic_exit();
+            tiku_atomic_enter();
+            if (s_kernel_ready && (q->waiters & bit) != 0u) {
+                break;                  /* an event post: let it be seen */
+            }
+        }
+    }
+    if ((q->waiters & bit) == 0u) {
+        return 1;                       /* woken */
+    }
+    q->waiters &= (uint8_t)~bit;
+    return ticks == 0u || TIKU_CLOCK_LT(tiku_clock_time(), until);
+}
+
+/** @brief Clear @p bits' waiters from @p q and make each runnable. */
+static void waitq_release(tiku_waitq_t *q, uint8_t bits)
+{
+    uint8_t i;
+
+    q->waiters &= (uint8_t)~bits;
+    for (i = 0; i < TIKU_THREADS_MAX; i++) {
+        tiku_thread_t *t = s_threads[i];
+
+        if ((bits & (1u << i)) != 0u && t != (tiku_thread_t *)0 &&
+            t->state == TIKU_THREAD_BLOCKED) {
+            t->state = TIKU_THREAD_READY;
+        }
+    }
+    if ((bits & TIKU_WAITQ_KERNEL) != 0u) {
+        tiku_thread_kernel_wake();
+    }
+    tiku_thread_arch_pend();
+}
+
+void tiku_thread_wake_one(tiku_waitq_t *q)
+{
+    uint8_t m, bit = 0u, i;
+
+    tiku_atomic_enter();
+    m = q->waiters;
+    for (i = 0; i < TIKU_THREADS_MAX && bit == 0u; i++) {
+        if ((m & (1u << i)) != 0u) {
+            bit = (uint8_t)(1u << i);
+        }
+    }
+    if (bit == 0u) {
+        bit = (uint8_t)(m & TIKU_WAITQ_KERNEL);
+    }
+    if (bit != 0u) {
+        waitq_release(q, bit);
+    }
+    tiku_atomic_exit();
+}
+
+void tiku_thread_wake_all(tiku_waitq_t *q)
+{
+    tiku_atomic_enter();
+    if (q->waiters != 0u) {
+        waitq_release(q, q->waiters);
+    }
+    tiku_atomic_exit();
 }
 
 /*---------------------------------------------------------------------------*/

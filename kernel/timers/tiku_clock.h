@@ -30,26 +30,27 @@
  * @typedef tiku_clock_time_t
  * @brief System clock time type
  *
- * Override by defining TIKU_CLOCK_CONF_TIME_T before including this header.
+ * 16 bits on MSP430 and unsigned long elsewhere; defining
+ * TIKU_CLOCK_CONF_TIME_T before including this header overrides it.
  */
 #ifdef TIKU_CLOCK_CONF_TIME_T
 typedef TIKU_CLOCK_CONF_TIME_T tiku_clock_time_t;
-#else
+#elif defined(PLATFORM_MSP430)
 typedef unsigned short tiku_clock_time_t;
+#else
+/* These defaults must match the width tiku.h configures.  A translation unit
+ * can reach this header before tiku.h, and the include guard keeps the first
+ * typedef: a narrower one makes its struct tiku_timer 4 bytes shorter than the
+ * timer subsystem's, and the timer's stores overrun the caller's object. */
+typedef unsigned long tiku_clock_time_t;
 #endif
 
-/*
- * How long an interval this type can measure.
+/**
+ * @brief Longest interval the clock type can measure: half its range.
  *
- * The counter wraps, and the arithmetic below is wraparound-safe only for
- * intervals shorter than half its range: 256 s at 16 bits and 128 Hz, and a
- * plain difference is wrong past 512 s.  That is not hypothetical -- a 605 s
- * encode once reported 92 s, and before that a 25 s turn reported 3 489 178,
- * both from taking one difference across a wrap.
- *
- * Measure long things as a sum of short differences, each taken in the
- * counter's own width, or use a cycle counter.  Widening this type is the
- * other option and costs a 16-bit MCU real work in every timer compare.
+ * The counter wraps; the arithmetic below is correct only for intervals
+ * shorter than this (256 s at 16 bits and 128 Hz).  A longer span is a sum of
+ * short differences, each in the counter's own width.
  */
 #define TIKU_CLOCK_MAX_INTERVAL \
     ((tiku_clock_time_t)(((tiku_clock_time_t)~(tiku_clock_time_t)0) / 2u))
@@ -69,23 +70,22 @@ typedef unsigned short tiku_clock_time_t;
 /*---------------------------------------------------------------------------*/
 
 /*
- * Both are expressed in the clock type's OWN width, with no fixed-width
- * cast anywhere.  A `signed short` cast here would be correct only while
- * the type is 16 bits, so overriding TIKU_CLOCK_CONF_TIME_T -- which the
- * typedef above openly invites -- would silently truncate every comparison
- * and every difference.
+ * Both use the clock type's own width, so they stay correct when
+ * TIKU_CLOCK_CONF_TIME_T overrides it.
  */
 
 /**
  * @def TIKU_CLOCK_LT(a, b)
- * @brief Wraparound-safe less-than comparison
+ * @brief Non-zero when @p a is before @p b, across a counter wrap, for
+ *        points less than TIKU_CLOCK_MAX_INTERVAL apart.
  */
 #define TIKU_CLOCK_LT(a, b) \
     ((tiku_clock_time_t)((a) - (b)) > TIKU_CLOCK_MAX_INTERVAL)
 
 /**
  * @def TIKU_CLOCK_DIFF(a, b)
- * @brief Wraparound-safe difference (a - b)
+ * @brief Signed difference a - b as a long, across a counter wrap, for points
+ *        less than TIKU_CLOCK_MAX_INTERVAL apart.
  */
 #define TIKU_CLOCK_DIFF(a, b)                                                 \
     (TIKU_CLOCK_LT((a), (b)) ? -(long)(tiku_clock_time_t)((b) - (a))          \
@@ -93,7 +93,10 @@ typedef unsigned short tiku_clock_time_t;
 
 /**
  * @def TIKU_CLOCK_MS_TO_TICKS(ms)
- * @brief Convert milliseconds to clock ticks
+ * @brief Convert milliseconds to clock ticks, rounding down.
+ *
+ * The product (ms) * TIKU_CLOCK_SECOND is computed in the type of @p ms: on
+ * MSP430 an int argument above 255 overflows, so pass an unsigned long.
  */
 #define TIKU_CLOCK_MS_TO_TICKS(ms) \
     ((tiku_clock_time_t)(((ms) * TIKU_CLOCK_SECOND) / 1000))
@@ -105,7 +108,9 @@ typedef unsigned short tiku_clock_time_t;
 /**
  * @brief Initialize the system clock
  *
- * Delegates to tiku_clock_arch_init(). Call once during system boot.
+ * Delegates to tiku_clock_arch_init().
+ *
+ * @note Call once during system boot.
  */
 void tiku_clock_init(void);
 
@@ -149,12 +154,13 @@ unsigned char tiku_clock_fault(void);
 /**
  * @brief Stretch the next tick interrupt up to @p ticks_ahead away.
  *
- * Called with interrupts masked before a tick-woken idle while timers are armed
- * but none due: the arch may program its compare straight to the next deadline
- * and accounts true elapsed ticks on wake, so the kernel clock stays exact.
+ * The scheduler calls it before a tick-woken idle while timers are armed but
+ * none due.  The arch may program its compare straight to the next deadline,
+ * and counts the elapsed ticks on wake, so the kernel clock stays exact.
  *
  * @param ticks_ahead Ticks until the next software-timer deadline (>1)
  * @return Non-zero if the stretch was armed, 0 if unsupported
+ * @note Call with interrupts masked.
  */
 int tiku_clock_tickless_begin(tiku_clock_time_t ticks_ahead);
 
@@ -171,8 +177,7 @@ void tiku_clock_tickless_end(void);
  * @brief Does this build have a tickless-idle backend?
  *
  * @return Non-zero when tiku_clock_tickless_begin() can stretch (weak
- *         default 0).  Tests use this to pick between the per-tick
- *         and tickless wake-count expectations.
+ *         default 0)
  */
 int tiku_clock_tickless_available(void);
 

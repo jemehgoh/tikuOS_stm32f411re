@@ -7,9 +7,9 @@
  *
  * tiku_vfs_tree.c - system VFS tree root assembly.
  *
- * Builds the production root from the per-subtree modules in tree/.  The inner
- * tree is const data wired at compile time; only this top level is assembled at
- * run time, because /proc builds its arrays dynamically and /data is optional.
+ * Builds the root from the per-subtree modules in tree/.  The subtrees are
+ * const data; this top level is assembled at run time because /proc builds its
+ * arrays at run time.  Drivers mount their nodes after it.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -27,6 +27,13 @@
 #include "tree/tiku_vfs_tree_boot.h"
 #include "tree/tiku_vfs_tree_dev.h"
 #include "tree/tiku_vfs_tree_data.h"
+#if TIKU_APPL_GUI
+#include "tiku_gui.h"           /* applications overlay: /gui */
+#include "tiku_draw.h"          /* applications overlay: its console channel */
+#define ROOT_SLOTS 5
+#else
+#define ROOT_SLOTS 4
+#endif
 
 /*---------------------------------------------------------------------------*/
 /* VFS TREE                                                                  */
@@ -35,24 +42,27 @@
 /*
  * /
  * ├── sys/   — tree/tiku_vfs_tree_sys.c (assembles boot, timer,
- * │            clock, watchdog, htimer, power, sched, init from
- * │            their own modules)
- * ├── dev/   — tree/tiku_vfs_tree_dev.c (assembles gpio, gpio_dir
- * │            from tree/tiku_vfs_tree_gpio.c)
+ * │            clock, watchdog, htimer, power, net, sched, init and
+ * │            other subtrees from their own modules)
+ * ├── dev/   — tree/tiku_vfs_tree_dev.c (assembles gpio, gpio_dir and
+ * │            gpio_owner from tree/tiku_vfs_tree_gpio.c and sensors
+ * │            from tree/tiku_vfs_tree_sensor.c); drivers mount their
+ * │            nodes under dev/<class>/
  * ├── proc/  — kernel/process/tiku_proc_vfs.c
- * └── data/  — tree/tiku_vfs_tree_data.c (BASIC builds only)
+ * ├── data/  — tree/tiku_vfs_tree_data.c, in every build
+ * └── gui/   — the applications overlay, when TIKU_APPL_GUI is set
  */
 
 /*
- * Mutable root children: sys + dev + proc (+ optionally data).  Sized for the
- * maximum set; vfs_root.child_count records how many are populated.  Lives in
- * .persistent (FRAM) to spare SRAM -- written only inside the init-time MPU
- * unlock window below.
+ * Mutable root children: sys + dev + proc + data (+ gui with TIKU_APPL_GUI).
+ * Sized for the largest set; vfs_root.child_count records how many are
+ * filled.  Durable memory, written only inside the MPU unlock window of
+ * tiku_vfs_tree_init().
  */
-static TIKU_DURABLE tiku_vfs_node_t root_children[4];
+static TIKU_DURABLE tiku_vfs_node_t root_children[ROOT_SLOTS];
 
-/** Mutable root node (FRAM, written at init): name "" so that
- *  resolving "/" yields it directly. */
+/** Mutable root node, written at init.  Resolving "/" returns it without
+ *  a name match, so its name is empty. */
 static TIKU_DURABLE tiku_vfs_node_t vfs_root;
 
 /*---------------------------------------------------------------------------*/
@@ -62,9 +72,9 @@ static TIKU_DURABLE tiku_vfs_node_t vfs_root;
 /**
  * @brief Build and register the system VFS tree.
  *
- * Runs the module inits in dependency order -- boot first, because it must
- * latch SYSRSTIV before anything else reads it -- copies each top-level
- * directory into the FRAM-resident root, then calls tiku_vfs_init().
+ * Runs the module inits in dependency order -- boot first, because it latches
+ * the reset cause before anything else can clear it -- copies each top-level
+ * directory into the durable root, then calls tiku_vfs_init().
  *
  * @note Call once during boot, after hardware and process init; the drivers
  *       registry and the shell start afterwards and expect a live tree.
@@ -75,36 +85,34 @@ tiku_vfs_tree_init(void)
     uint8_t n_root;
     uint16_t mpu_saved;
 
-    /* Per-subtree init: boot first (captures SYSRSTIV before
+    /* Per-subtree init: boot first (captures the reset cause before
      * anything else can clear it), then the modules with
      * hardware/persistent state.  Each module validates its own
-     * persist cells — there is no cross-module first-boot flag. */
+     * persist cells. */
     tiku_vfs_tree_boot_init();
     tiku_vfs_tree_dev_init();
     tiku_vfs_tree_sys_init();
 
-    /* Unlock FRAM — root_children, vfs_root and the /proc/ arrays
-     * are all in .persistent (FRAM) to conserve SRAM for the
-     * stack. */
+    /* Unlock NVM: root_children and vfs_root are TIKU_DURABLE, and the
+     * /proc arrays written below are TIKU_RETAINED. */
     mpu_saved = tiku_mpu_unlock_nvm();
 
     root_children[0] = *tiku_vfs_tree_sys_get();
     root_children[1] = *tiku_vfs_tree_dev_get();
 
-    /* Build and attach /proc/ (also writes to FRAM arrays) */
+    /* Build and attach /proc/ (also writes its retained arrays) */
     root_children[2] = *tiku_proc_vfs_get();
     n_root = 3;
 
-/* Value, not defined(): tiku.h defines TIKU_SHELL_ENABLE unconditionally (0
- * when the shell is off), so `defined()` would always be true and this would
- * reference a node that is not compiled. */
-#if TIKU_SHELL_ENABLE
-    /* /data: the dynamic file store (plus /data/basic when BASIC is built).
-     * The STORE itself is always built -- kernel-level tenants reach it through
-     * tiku_vfs_tree_data_store() -- but presenting it as a namespace entry is a
-     * shell concern. */
+    /* /data: the dynamic file store (plus /data/basic when BASIC is built),
+     * attached with or without the shell. */
     root_children[3] = *tiku_vfs_tree_data_get();
     n_root = 4;
+#if TIKU_APPL_GUI
+    /* /gui: the forms a process publishes for a host desktop to draw, and
+     * the console channel that desktop's window session rides. */
+    root_children[n_root++] = *tiku_gui_vfs_get();
+    tiku_draw_init();
 #endif
 
     vfs_root = (tiku_vfs_node_t){

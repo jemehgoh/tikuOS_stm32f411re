@@ -8,8 +8,8 @@
  * tiku_gpio_arch.c - RP2350 GPIO driver.
  *
  * Maps a (port, pin) tuple onto a flat GP index and drives SIO, IO_BANK0 and
- * PADS_BANK0 directly.  Pins above GP29 are excluded so a stray shell command
- * cannot reach the QSPI bank and short the flash chip.
+ * PADS_BANK0 directly.  Pins above GP29 are refused: the RP2350A on the Pico 2
+ * boards has GP0-GP29 only.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -18,8 +18,11 @@
 #include "tiku_rp2350_regs.h"
 #include <stdint.h>
 
-/** @brief Highest GP index exposed on the Pico 2 W header (GP0..GP29). */
+/** @brief Highest GP index the driver accepts (the RP2350A has GP0..GP29). */
 #define MAX_GP_PIN  29U
+
+/** @brief GPIOn_CTRL.FUNCSEL field mask (the low five bits). */
+#define IO_CTRL_FUNCSEL_MSK  0x1FU
 
 /**
  * @brief Map a (port, pin) tuple to a flat SIO GP index (0..MAX_GP_PIN).
@@ -43,7 +46,7 @@ static inline int8_t gp_index(uint8_t port, uint8_t pin) {
 }
 
 /*---------------------------------------------------------------------------*/
-/* Per-pin direct helpers                                                    */
+/* PER-PIN HELPERS                                                           */
 /*---------------------------------------------------------------------------*/
 
 /**
@@ -59,21 +62,17 @@ void tiku_rp2350_gpio_init_output(uint8_t pin) {
     if (pin > MAX_GP_PIN) {
         return;
     }
-    /* Function = SIO. Keep input-enable on so SIO_GPIO_IN reflects
-     * the level being driven (the GPIO API contract is "you can read
-     * back what you wrote to an output pin", which MSP430 satisfies
-     * for free; on RP2350 SIO_GPIO_IN reads 0 if the pad input
-     * buffer is disabled, even when the pin is electrically high). */
+    /* Function = SIO.  Input-enable stays on: with the pad input buffer
+     * off, SIO_GPIO_IN reads 0 whatever the pin level, and
+     * tiku_gpio_arch_read() must return an output's driven level. */
     _RP2350_REG(RP2350_PADS_BANK0_GPIO(pin)) =
         RP2350_PADS_IE | RP2350_PADS_DRIVE_4MA;
     _RP2350_REG(RP2350_IO_BANK0_GPIO_CTRL(pin)) =
         RP2350_IO_FUNC_SIO;
-    /* Output low, then enable output drive. SIO does NOT use the
-     * generic +0x2000/+0x3000 atomic SET/CLR aliases — those address
-     * unmapped SoC space and are silently dropped. SIO has its own
-     * adjacent *_SET / *_CLR / *_XOR registers (offset +8 / +16 / +24
-     * from each base register) which are the only correct way to do
-     * an atomic set/clear here. */
+    /* Output low, then enable the driver.  SIO ignores the generic
+     * +0x2000/+0x3000 atomic SET/CLR aliases, so writes through them are
+     * lost; its own *_SET / *_CLR / *_XOR registers sit at +8 / +16 / +24
+     * from each base register. */
     _RP2350_REG(RP2350_SIO_GPIO_OUT_CLR) = (1U << pin);
     _RP2350_REG(RP2350_SIO_GPIO_OE_SET)  = (1U << pin);
 }
@@ -82,8 +81,8 @@ void tiku_rp2350_gpio_init_output(uint8_t pin) {
  * @brief Drive a GP output pin high or low via the SIO atomic registers.
  *
  * Uses SIO_GPIO_OUT_SET / SIO_GPIO_OUT_CLR so the operation is
- * atomic and does not disturb other pins.  Silently ignores pins
- * above MAX_GP_PIN.
+ * atomic and does not disturb other pins.  Ignores pins above
+ * MAX_GP_PIN.
  *
  * @param pin    GP pin number (0..MAX_GP_PIN).
  * @param value  Non-zero drives the pin high; zero drives it low.
@@ -103,7 +102,7 @@ void tiku_rp2350_gpio_set(uint8_t pin, uint8_t value) {
  * @brief Toggle a GP output pin using the SIO XOR register.
  *
  * The SIO_GPIO_OUT_XOR write is atomic and does not disturb other
- * pins.  Silently ignores pins above MAX_GP_PIN.
+ * pins.  Ignores pins above MAX_GP_PIN.
  *
  * @param pin  GP pin number (0..MAX_GP_PIN).
  */
@@ -115,7 +114,7 @@ void tiku_rp2350_gpio_toggle(uint8_t pin) {
 }
 
 /*---------------------------------------------------------------------------*/
-/* HAL entry points                                                          */
+/* HAL ENTRY POINTS                                                          */
 /*---------------------------------------------------------------------------*/
 
 /**
@@ -158,9 +157,8 @@ int8_t tiku_gpio_arch_set_input(uint8_t port, uint8_t pin) {
         RP2350_PADS_PUE | RP2350_PADS_SCHMITT;
     _RP2350_REG(RP2350_IO_BANK0_GPIO_CTRL((uint8_t)gp)) =
         RP2350_IO_FUNC_SIO;
-    /* Output disable. SIO uses its dedicated CLR register (see
-     * tiku_rp2350_gpio_init_output for why the generic CLR alias
-     * doesn't work for SIO). */
+    /* Output disable, through SIO's own GPIO_OE_CLR register; SIO
+     * ignores the generic atomic CLR alias. */
     _RP2350_REG(RP2350_SIO_GPIO_OE_CLR) = (1U << gp);
     return 0;
 }
@@ -169,8 +167,8 @@ int8_t tiku_gpio_arch_set_input(uint8_t port, uint8_t pin) {
  * @brief HAL: write a logic level to a (port, pin), claiming it as an
  *        output first if necessary.
  *
- * Calls tiku_rp2350_gpio_init_output() to ensure output mode, then
- * drives the pin to the requested level.
+ * Calls tiku_rp2350_gpio_init_output() on every write, which drives the pin
+ * low, then drives the pin to the requested level.
  *
  * @param port  GPIO port number (1-based, 1..4).
  * @param pin   Bit position within the port (0..7).
@@ -191,8 +189,8 @@ int8_t tiku_gpio_arch_write(uint8_t port, uint8_t pin, uint8_t val) {
  * @brief HAL: toggle a (port, pin), claiming it as an output if needed.
  *
  * If the GP pin's output-enable bit is not already set it is
- * initialised as an output first (matching MSP430 driver behaviour),
- * then toggled via SIO_GPIO_OUT_XOR.
+ * initialised as an output first, driven low, then toggled via
+ * SIO_GPIO_OUT_XOR.
  *
  * @param port  GPIO port number (1-based, 1..4).
  * @param pin   Bit position within the port (0..7).
@@ -203,8 +201,7 @@ int8_t tiku_gpio_arch_toggle(uint8_t port, uint8_t pin) {
     if (gp < 0) {
         return -1;
     }
-    /* If the pin isn't already an output, claim it as one (matches
-     * the MSP430 driver's behaviour for `gpio 4 6 t`). */
+    /* A pin that is not an output becomes one first. */
     if (!(_RP2350_REG(RP2350_SIO_GPIO_OE) & (1U << gp))) {
         tiku_rp2350_gpio_init_output((uint8_t)gp);
     }
@@ -215,9 +212,8 @@ int8_t tiku_gpio_arch_toggle(uint8_t port, uint8_t pin) {
 /**
  * @brief HAL: sample the current logic level of a (port, pin).
  *
- * Reads SIO_GPIO_IN.  For output pins, the pad input buffer is kept
- * enabled by tiku_rp2350_gpio_init_output() so the driven level is
- * reflected correctly.
+ * Reads SIO_GPIO_IN.  tiku_rp2350_gpio_init_output() keeps the pad input
+ * buffer of an output enabled, so an output reads back its driven level.
  *
  * @param port  GPIO port number (1-based, 1..4).
  * @param pin   Bit position within the port (0..7).
@@ -246,4 +242,26 @@ int8_t tiku_gpio_arch_get_dir(uint8_t port, uint8_t pin) {
         return -1;
     }
     return (_RP2350_REG(RP2350_SIO_GPIO_OE) & (1U << gp)) ? 1 : 0;
+}
+
+/**
+ * @brief HAL: report whether a (port, pin) is routed to a peripheral.
+ *
+ * Reads GPIOn_CTRL.FUNCSEL: SIO and the null (disconnected) function count as
+ * GPIO, every other function as a peripheral.  The pin is only read.
+ *
+ * @param port  GPIO port number (1-based, 1..4).
+ * @param pin   Bit position within the port (0..7).
+ * @return      1 if routed to a peripheral, 0 otherwise, -1 on out-of-range.
+ */
+int tiku_gpio_arch_is_peripheral(uint8_t port, uint8_t pin) {
+    int8_t gp = gp_index(port, pin);
+    uint32_t funcsel;
+    if (gp < 0) {
+        return -1;
+    }
+    funcsel = _RP2350_REG(RP2350_IO_BANK0_GPIO_CTRL((uint32_t)gp)) &
+              IO_CTRL_FUNCSEL_MSK;
+    return (funcsel != RP2350_IO_FUNC_SIO && funcsel != RP2350_IO_FUNC_NULL) ?
+           1 : 0;
 }

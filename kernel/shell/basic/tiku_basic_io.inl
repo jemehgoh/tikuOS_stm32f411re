@@ -7,9 +7,9 @@
  *
  * tiku_basic_io.inl - shell-I/O helpers for Tiku BASIC.
  *
- * Holds the blocking line reader used by the REPL and by INPUT.  It mirrors the
- * host shell's backspace and echo behaviour and treats Ctrl-C as a hard cancel of
- * the line.
+ * Holds the blocking line reader INPUT uses.  It mirrors the host shell's
+ * backspace and echo behaviour and treats Ctrl-C as a hard cancel of the
+ * line.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -19,7 +19,7 @@
  *
  * Blocks in a tight poll loop until a full line arrives or Ctrl-C
  * is received.  Per-character handling mirrors the host shell so
- * BACKSPACE / 0x7F and local echo behave the same.
+ * backspace (0x08 or 0x7F) and local echo behave the same.
  *
  * @param buf  Destination buffer (NUL-terminated on return).
  * @param cap  Capacity of @p buf in bytes.
@@ -33,17 +33,15 @@ read_line(char *buf, uint16_t cap)
     while (1) {
         int ch;
 #if TIKU_SHELL_CMD_SLIP
-        /* SLIP-aware read: route any frame bytes still trickling in from a
-         * prior BROWSE / HTTPGET$ TCP teardown into the IP stack instead of
-         * letting them land in the line editor as garbage and wedge the
-         * console; take only genuine keystrokes. */
+        /* tiku_shell_net_getc() hands frame bytes still arriving from an
+         * earlier BROWSE or HTTPGET$ connection to their channel and returns
+         * only keystrokes; it also kicks the watchdog. */
         ch = tiku_shell_net_getc();
         if (ch < 0) continue;
 #else
-        /* Non-SLIP builds have no net_getc to feed the check-in hang
-         * detector, so kick it here: a quiet REPL prompt / INPUT wait is
-         * liveness, not a wedge.  Without this an idle prompt warm-resets
-         * at TIKU_HANG_THRESHOLD_TICKS (~8 s at 128 Hz). */
+        /* The kick feeds the check-in hang detector, which otherwise
+         * warm-resets an idle INPUT after TIKU_HANG_THRESHOLD_TICKS (8 s at
+         * 128 Hz). */
         tiku_watchdog_kick();
         if (!tiku_shell_io_rx_ready()) continue;
         ch = tiku_shell_io_getc();

@@ -58,8 +58,8 @@ timer_detail_read(uint8_t idx, char *buf, size_t max)
 /**
  * @brief Generate a fixed-index wrapper around timer_detail_read().
  *
- * VFS read handlers carry no user argument, so one tiny wrapper per
- * exposed slot hardcodes the index (~10 bytes of code each).
+ * VFS read handlers carry no user argument, so one wrapper per exposed
+ * slot hardcodes the index.
  */
 #define TIMER_DETAIL(idx)                                                   \
     static int timer_detail_##idx(char *buf, size_t max) {                  \
@@ -92,8 +92,7 @@ timer_count_read(char *buf, size_t max)
  * @brief Read handler for /sys/timer/fired.
  *
  * Renders the total number of timer expirations dispatched since
- * boot as a decimal line.  A diff between two reads gives the
- * timer event rate without instrumenting the driver.
+ * boot as a decimal line.
  *
  * @param buf  Output buffer for the rendered text
  * @param max  Capacity of @p buf in bytes
@@ -119,16 +118,19 @@ timer_fired_read(char *buf, size_t max)
 static int
 timer_next_read(char *buf, size_t max)
 {
-    tiku_clock_time_t next = tiku_timer_next_expiration();
-    tiku_clock_time_t now  = tiku_clock_time();
+    tiku_clock_time_t next;
+    tiku_clock_time_t now = tiku_clock_time();
 
-    if (next == 0) {
+    /* A deadline can fall on tick 0, so 0 from next_expiration() is not
+     * "none"; the timer list is asked directly. */
+    if (!tiku_timer_any_pending()) {
         return snprintf(buf, max, "none\n");
     }
+    next = tiku_timer_next_expiration();
 
-    if (next > now) {
+    if (TIKU_CLOCK_LT(now, next)) {
         return snprintf(buf, max, "%lu\n",
-                        (unsigned long)(next - now));
+                        (unsigned long)(tiku_clock_time_t)(next - now));
     }
 
     return snprintf(buf, max, "0\n");
@@ -141,9 +143,8 @@ timer_next_read(char *buf, size_t max)
 /**
  * @brief Read handler for /sys/clock/ticks.
  *
- * Renders the raw system tick counter, a 16-bit wrapping value (~8.5 minute
- * period at the default 128 Hz).  Useful for short interval measurements and
- * for checking the tick is alive; /sys/uptime gives elapsed time.
+ * Renders the raw system tick counter: 16 bits on MSP430, wrapping every
+ * 512 s at the default 128 Hz, and 32 bits elsewhere.
  *
  * @param buf  Output buffer for the rendered text
  * @param max  Capacity of @p buf in bytes
@@ -165,7 +166,7 @@ clock_ticks_read(char *buf, size_t max)
  *
  * Renders the hardware timer's free-running counter (Timer A1 on MSP430).
  * Resolution follows the active preset in tiku_htimer_config.h, ~1 us in the
- * high-accuracy default; two successive reads show the counter advancing.
+ * high-accuracy default.
  *
  * @param buf  Output buffer for the rendered text
  * @param max  Capacity of @p buf in bytes
@@ -182,8 +183,7 @@ htimer_now_read(char *buf, size_t max)
  * @brief Read handler for /sys/htimer/scheduled.
  *
  * Renders "1\n" when a one-shot hardware timer callback is armed
- * and "0\n" otherwise.  Only one htimer can be pending at a time,
- * so this is the full hardware-timer occupancy picture.
+ * and "0\n" otherwise.  Only one htimer can be pending at a time.
  *
  * @param buf  Output buffer for the rendered text
  * @param max  Capacity of @p buf in bytes

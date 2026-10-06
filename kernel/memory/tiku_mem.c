@@ -5,10 +5,11 @@
  *
  * Authors: Ambuj Varshney <ambuj@tiku-os.org>
  *
- * tiku_mem.c - Arena allocator implementation
+ * tiku_mem.c - arena allocator and memory module init.
  *
- * Implements the arena (bump-pointer) allocator for fragmentation-free
- * memory management on microcontrollers with small SRAM.
+ * Implements the arena (bump-pointer) allocator, which has no per-object
+ * free and so no fragmentation, and tiku_mem_init(), which brings the memory
+ * module up at boot.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -20,6 +21,7 @@
 #include "tiku_mem.h"
 #include <stddef.h>
 #include <stdint.h>
+#include "tiku_mem_internal.h"
 
 /*---------------------------------------------------------------------------*/
 /* PRIVATE HELPERS                                                           */
@@ -37,8 +39,8 @@
 static tiku_mem_arch_size_t align_up(tiku_mem_arch_size_t size)
 {
     const tiku_mem_arch_size_t mask = TIKU_MEM_ARCH_ALIGNMENT - 1U;
-    /* Saturate instead of wrapping to 0 on a near-max request (16-bit on
-     * MSP430), so the caller's capacity check rejects it cleanly. */
+    /* A near-max request (16-bit on MSP430) saturates to the largest aligned
+     * value, which the caller's capacity check rejects. */
     if (size > (tiku_mem_arch_size_t)(~(tiku_mem_arch_size_t)0 - mask)) {
         return (tiku_mem_arch_size_t)(~(tiku_mem_arch_size_t)0 & ~mask);
     }
@@ -53,13 +55,14 @@ static tiku_mem_arch_size_t align_up(tiku_mem_arch_size_t size)
  * @brief Initialize an arena without region-registry validation.
  *
  * For library code needing an arena over an embedded struct member before the
- * region registry exists.  The arena is marked SRAM tier; every other operation
- * behaves identically.
+ * region registry exists.  The arena is marked SRAM tier and claims nothing in
+ * the registry; it otherwise works as one from tiku_arena_create().
  *
  * @param arena    Arena control block to initialize
  * @param buf      Pointer to the backing buffer
  * @param size     Size of the backing buffer in bytes
- * @return TIKU_MEM_OK on success, TIKU_MEM_ERR_INVALID on bad arguments
+ * @return TIKU_MEM_OK on success, TIKU_MEM_ERR_INVALID on bad arguments,
+ *         TIKU_MEM_ERR_BUSY while @p arena holds a tracked reservation
  */
 tiku_mem_err_t tiku_arena_create_raw(tiku_arena_t *arena, uint8_t *buf,
                                       tiku_mem_arch_size_t size)
@@ -68,12 +71,19 @@ tiku_mem_err_t tiku_arena_create_raw(tiku_arena_t *arena, uint8_t *buf,
     if (arena == NULL || buf == NULL) {
         return TIKU_MEM_ERR_INVALID;
     }
+    if (tiku_backing_output_busy(arena)) {
+        return TIKU_MEM_ERR_BUSY;
+    }
 
     /* Align the buffer base up to the platform's required alignment. */
     {
         uintptr_t raw     = (uintptr_t)buf;
         uintptr_t mask    = (uintptr_t)(TIKU_MEM_ARCH_ALIGNMENT - 1U);
-        uintptr_t aligned = (raw + mask) & ~mask;
+        uintptr_t aligned;
+        if (raw > UINTPTR_MAX - mask || size > UINTPTR_MAX - raw) {
+            return TIKU_MEM_ERR_INVALID;
+        }
+        aligned = (raw + mask) & ~mask;
         tiku_mem_arch_size_t adj = (tiku_mem_arch_size_t)(aligned - raw);
 
         if (size <= adj) {       /* misaligned base leaves no usable span */
@@ -89,6 +99,8 @@ tiku_mem_err_t tiku_arena_create_raw(tiku_arena_t *arena, uint8_t *buf,
     arena->id       = 0;
     arena->active   = 1;
     arena->tier     = TIKU_MEM_SRAM;
+    arena->backing = (tiku_mem_backing_t){0};
+    arena->claim_base = NULL;
 
     return TIKU_MEM_OK;
 }
@@ -96,69 +108,91 @@ tiku_mem_err_t tiku_arena_create_raw(tiku_arena_t *arena, uint8_t *buf,
 /*---------------------------------------------------------------------------*/
 
 /**
- * @brief Initialize an arena over a caller-provided buffer
+ * @brief Initialize an arena over a caller-provided buffer.
  *
- * The arena does not own or allocate the buffer — the caller provides
- * a static array or a section of SRAM. This avoids any dependency on
- * a heap allocator.
+ * The buffer must lie inside a registered SRAM or NVM region; the arena takes
+ * that region's tier and claims the buffer in the region registry.
  *
  * @param arena    Arena control block to initialize
  * @param buf      Pointer to the backing buffer
  * @param size     Size of the backing buffer in bytes
  * @param id       User-assigned identifier for debugging
- * @return TIKU_MEM_OK on success, TIKU_MEM_ERR_INVALID on bad arguments
+ * @return TIKU_MEM_OK on success, TIKU_MEM_ERR_INVALID on bad arguments,
+ *         TIKU_MEM_ERR_BUSY while @p arena holds a tracked reservation, or
+ *         the tiku_region_claim() error
  */
 tiku_mem_err_t tiku_arena_create(tiku_arena_t *arena, uint8_t *buf,
                                  tiku_mem_arch_size_t size, uint8_t id)
 {
+    tiku_arena_t ready;
+    tiku_mem_err_t err;
     TIKU_MEM_KERNEL_ONLY(TIKU_MEM_ERR_INVALID);
-    if (arena == NULL || buf == NULL) {
-        return TIKU_MEM_ERR_INVALID;
+    if (arena == NULL || tiku_backing_output_busy(arena)) {
+        return arena == NULL ? TIKU_MEM_ERR_INVALID : TIKU_MEM_ERR_BUSY;
     }
-
-    /* Determine which memory tier the buffer resides in.
-     * Both SRAM and NVM are valid backing stores — the tier is
-     * recorded so callers can introspect placement later. */
+    err = tiku_arena_create_raw(&ready, buf, size);
+    if (err != TIKU_MEM_OK) {
+        return err;
+    }
     if (tiku_region_contains(buf, size, TIKU_MEM_REGION_SRAM)) {
-        arena->tier = TIKU_MEM_SRAM;
+        ready.tier = TIKU_MEM_SRAM;
     } else if (tiku_region_contains(buf, size, TIKU_MEM_REGION_NVM)) {
-        arena->tier = TIKU_MEM_NVM;
+        ready.tier = TIKU_MEM_NVM;
     } else {
         return TIKU_MEM_ERR_INVALID;
     }
-    tiku_region_claim(buf, size, id);
-
-    /* Align the buffer base up to the platform's required alignment.
-     * The claim covers the original range; the arena uses the aligned
-     * subset so every returned pointer is naturally aligned. */
-    {
-        uintptr_t raw     = (uintptr_t)buf;
-        uintptr_t mask    = (uintptr_t)(TIKU_MEM_ARCH_ALIGNMENT - 1U);
-        uintptr_t aligned = (raw + mask) & ~mask;
-        tiku_mem_arch_size_t adj = (tiku_mem_arch_size_t)(aligned - raw);
-
-        if (size <= adj) {       /* misaligned base leaves no usable span */
-            return TIKU_MEM_ERR_INVALID;
-        }
-        arena->buf      = (uint8_t *)aligned;
-        arena->capacity = size - adj;
+    err = tiku_region_claim(buf, size, id);
+    if (err != TIKU_MEM_OK) {
+        return err;
     }
-    arena->offset   = 0;
-    arena->peak     = 0;
-    arena->fail     = 0;
-    arena->count    = 0;
-    arena->id       = id;
-    arena->active   = 1;
-
+    ready.claim_base = buf;
+    ready.id = id;
+    *arena = ready;
     return TIKU_MEM_OK;
+}
+
+/** @brief Whether @p arena is active, consistent and matches its backing. */
+static int arena_valid(const tiku_arena_t *arena)
+{
+    return arena != NULL && arena->active && arena->buf != NULL &&
+           arena->offset <= arena->capacity &&
+           tiku_backing_check(arena, arena->backing, TIKU_BACKING_ARENA);
+}
+
+tiku_mem_err_t tiku_arena_destroy(tiku_arena_t *arena)
+{
+    tiku_mem_err_t err;
+    TIKU_MEM_KERNEL_ONLY(TIKU_MEM_ERR_INVALID);
+    if (!arena_valid(arena)) {
+        return TIKU_MEM_ERR_INVALID;
+    }
+    if (arena->offset != 0u || arena->count != 0u) {
+        return TIKU_MEM_ERR_BUSY;
+    }
+    if (arena->backing.slot_plus_one != 0u) {
+        if (tiku_backing_release == NULL) return TIKU_MEM_ERR_INVALID;
+        err = tiku_backing_release(arena, arena->backing, TIKU_BACKING_ARENA);
+        if (err != TIKU_MEM_OK) return err;
+    } else if (arena->claim_base != NULL) {
+        err = tiku_region_unclaim(arena->claim_base);
+        if (err != TIKU_MEM_OK) return err;
+    }
+    *arena = (tiku_arena_t){0};
+    return TIKU_MEM_OK;
+}
+
+tiku_mem_err_t tiku_mem_workspace_close(tiku_mem_workspace_t *workspace)
+{
+    tiku_mem_err_t err = tiku_arena_reset(workspace);
+    return err == TIKU_MEM_OK ? tiku_arena_destroy(workspace) : err;
 }
 
 /**
  * @brief Allocate memory from an arena (bump-pointer).
  *
  * Advances the offset by the aligned size and tracks the peak for high-water
- * reporting.  There is no individual free: dropping it removes per-object
- * metadata, free-list walks and fragmentation, which small SRAM cannot afford.
+ * reporting.  The memory is not zeroed.  There is no individual free;
+ * tiku_arena_reset() reclaims every allocation at once.
  *
  * @param arena    Arena to allocate from (must be active)
  * @param size     Bytes requested (must be > 0)
@@ -170,14 +204,13 @@ void *tiku_arena_alloc(tiku_arena_t *arena, tiku_mem_arch_size_t size)
     tiku_mem_arch_size_t aligned;
     void *ptr;
 
-    if (arena == NULL || !arena->active || size == 0) {
+    if (!arena_valid(arena) || size == 0 || !tiku_backing_can_mutate(arena->backing)) {
         return NULL;
     }
 
     aligned = align_up(size);
 
-    /* Check for overflow: would the new offset exceed capacity? */
-    if (aligned > arena->capacity - arena->offset) {
+    if (aligned < size || aligned > arena->capacity - arena->offset) {
         arena->fail++;
         return NULL;
     }
@@ -185,7 +218,6 @@ void *tiku_arena_alloc(tiku_arena_t *arena, tiku_mem_arch_size_t size)
     ptr = &arena->buf[arena->offset];
     arena->offset += aligned;
 
-    /* Track lifetime high-water mark */
     if (arena->offset > arena->peak) {
         arena->peak = arena->offset;
     }
@@ -198,19 +230,21 @@ void *tiku_arena_alloc(tiku_arena_t *arena, tiku_mem_arch_size_t size)
 /**
  * @brief Reset an arena, reclaiming all allocations at once.
  *
- * Sets the offset back to zero.  The buffer is NOT zeroed -- that would make
- * reset O(n) and defeat a bump allocator -- so callers must not assume it is.
- * The peak high-water mark survives, so it stays a lifetime maximum.
+ * Sets the offset and the allocation count back to zero.  The buffer is not
+ * zeroed; tiku_arena_secure_reset() zeroes it.  The peak high-water mark is
+ * kept as a lifetime maximum.
  *
  * @param arena    Arena to reset
- * @return TIKU_MEM_OK on success, TIKU_MEM_ERR_INVALID if arena is NULL
+ * @return TIKU_MEM_OK on success, TIKU_MEM_ERR_INVALID for an invalid arena,
+ *         TIKU_MEM_ERR_BUSY while a reclaim job holds its owner
  */
 tiku_mem_err_t tiku_arena_reset(tiku_arena_t *arena)
 {
     TIKU_MEM_KERNEL_ONLY(TIKU_MEM_ERR_INVALID);
-    if (arena == NULL) {
+    if (!arena_valid(arena)) {
         return TIKU_MEM_ERR_INVALID;
     }
+    if (!tiku_backing_can_mutate(arena->backing)) return TIKU_MEM_ERR_BUSY;
 
     arena->offset = 0;
     arena->count  = 0;
@@ -227,11 +261,11 @@ tiku_mem_err_t tiku_arena_reset(tiku_arena_t *arena)
 tiku_mem_err_t tiku_arena_secure_reset(tiku_arena_t *arena)
 {
     TIKU_MEM_KERNEL_ONLY(TIKU_MEM_ERR_INVALID);
-    if (arena == NULL) {
+    if (!arena_valid(arena)) {
         return TIKU_MEM_ERR_INVALID;
     }
+    if (!tiku_backing_can_mutate(arena->backing)) return TIKU_MEM_ERR_BUSY;
 
-    /* Delegate to the arch layer for a platform-optimized secure wipe. */
     tiku_mem_arch_secure_wipe(arena->buf, arena->capacity);
 
     arena->offset = 0;
@@ -241,16 +275,17 @@ tiku_mem_err_t tiku_arena_secure_reset(tiku_arena_t *arena)
 }
 
 /**
- * @brief Fill a stats struct with the arena's current state
+ * @brief Fill a stats struct with the arena's current state.
  *
  * @param arena    Arena to query
  * @param stats    Output structure
- * @return TIKU_MEM_OK on success, TIKU_MEM_ERR_INVALID if either is NULL
+ * @return TIKU_MEM_OK on success, TIKU_MEM_ERR_INVALID for an invalid arena
+ *         or a NULL @p stats
  */
 tiku_mem_err_t tiku_arena_stats(const tiku_arena_t *arena,
                                 tiku_mem_stats_t *stats)
 {
-    if (arena == NULL || stats == NULL) {
+    if (!arena_valid(arena) || stats == NULL) {
         return TIKU_MEM_ERR_INVALID;
     }
 
@@ -267,13 +302,6 @@ tiku_mem_err_t tiku_arena_stats(const tiku_arena_t *arena,
 /* MODULE INIT                                                               */
 /*---------------------------------------------------------------------------*/
 
-/**
- * @brief Initialize the memory management module.
- *
- * The region registry goes first, because arena and persist registrations
- * validate their buffers against it.  Then MPU NVM write-protection is armed,
- * and finally the HAL does the platform's own memory setup.
- */
 #if defined(TIKU_THREADS_ENABLE) && TIKU_THREADS_ENABLE
 /** Worker-context calls refused by TIKU_MEM_KERNEL_ONLY since boot. */
 static uint32_t mem_guard_violations;
@@ -294,6 +322,13 @@ uint32_t tiku_mem_guard_violations(void)
 }
 #endif /* TIKU_THREADS_ENABLE */
 
+/**
+ * @brief Initialize the memory management module.
+ *
+ * The region registry goes first, because arena and persist registrations
+ * validate their buffers against it.  Then come the platform's memory setup,
+ * MPU NVM protection and, with the cell table, the persist-cell move.
+ */
 void tiku_mem_init(void)
 {
     tiku_mem_arch_size_t count;
@@ -303,16 +338,20 @@ void tiku_mem_init(void)
     table = tiku_region_arch_get_table(&count);
     tiku_region_init(table, count);
 
-    /* arch_init runs FIRST so any port that mirrors .uninit out to
-     * non-volatile storage (e.g. RP2350's flash backup sector) can
-     * restore the SRAM working copy via plain memcpy.  Activating the
-     * MPU first would write-protect .uninit before that restore could
-     * land its bytes -- the MemManage handler would then reset the
-     * chip on the very first persist read. */
+    /* arch_init runs before the MPU is armed, so a port that mirrors
+     * .uninit out to non-volatile storage (e.g. RP2350's flash backup
+     * sector) can restore the SRAM working copy before .uninit is
+     * write-protected. */
     tiku_mem_arch_init();
 
-    /* Activate NVM write-protection now that the working copy is in
-     * place.  Subsequent persist / lc-persist / init writes go through
+    /* NVM write-protection goes on once the working copy is in place.
+     * Subsequent persist / lc-persist / init writes go through
      * tiku_mpu_unlock_nvm() / lock_nvm() to bracket their changes. */
     tiku_mpu_init();
+
+#if defined(TIKU_CELL_TABLE) && TIKU_CELL_TABLE
+    /* Before any cell is read: cells an update moved are carried to their
+     * new places by key (tiku_persist_move_boot, tiku_mem.h). */
+    tiku_persist_move_boot();
+#endif
 }

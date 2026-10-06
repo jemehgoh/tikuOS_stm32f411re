@@ -7,9 +7,9 @@
  *
  * tiku_display.h - portable control of one accelerated screen.
  *
- * Draws accumulate a damage rectangle and flush() makes exactly that region
- * visible, whatever "visible" costs on the part: a transfer to the panel on
- * one, a cache clean under a controller that scans continuously on another.
+ * Draws accumulate a damage rectangle, and flush() makes that region visible:
+ * a transfer to the panel on one part, a cache clean under a continuously
+ * scanning controller on another.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -19,8 +19,8 @@
 
 #include <stdint.h>
 
-/** @brief Outcomes; a caller that only tests != OK still behaves. */
-#define TIKU_DISPLAY_OK              0
+/* Outcomes; every error is negative. */
+#define TIKU_DISPLAY_OK              0  /**< success                       */
 #define TIKU_DISPLAY_ERR_STATE      -1  /**< not initialised, or busy      */
 #define TIKU_DISPLAY_ERR_INVALID    -2  /**< geometry or buffer refused    */
 #define TIKU_DISPLAY_ERR_UNSUPPORTED -3 /**< backend has no such primitive */
@@ -32,12 +32,12 @@ typedef enum {
 } tiku_display_fmt_t;
 
 /*
- * Optional primitives.  A backend advertises only what its hardware really
- * does; asking for one it lacks is refused rather than emulated, so a caller
- * can tell "drew nothing" from "drew slowly in software".
+ * Optional primitives.  A backend advertises only what its hardware does; a
+ * call for a primitive it lacks returns TIKU_DISPLAY_ERR_UNSUPPORTED and
+ * draws nothing.
  */
-#define TIKU_DISPLAY_CAP_CIRCLE   (1u << 0)
-#define TIKU_DISPLAY_CAP_ROUNDED  (1u << 1)
+#define TIKU_DISPLAY_CAP_CIRCLE   (1u << 0)  /**< fills circles            */
+#define TIKU_DISPLAY_CAP_ROUNDED  (1u << 1)  /**< fills rounded rectangles */
 #define TIKU_DISPLAY_CAP_FLIP     (1u << 2)  /**< can swap whole buffers  */
 
 /**
@@ -75,20 +75,19 @@ typedef struct {
 int tiku_display_init(tiku_display_t *d, void *fb, uint16_t w, uint16_t h);
 
 /**
- * @brief Which optional primitives this backend really has.
+ * @brief Which optional primitives this backend has.
  *
  * @note Ask after tiku_display_init(): a capability can depend on resources
- *       the screen only claims as it comes up, so the answer before then is
- *       the conservative one.
+ *       the screen claims as it comes up, and before then it reads as absent.
  */
 uint32_t tiku_display_caps(void);
 
 /**
  * @brief The screen's native size, which the panel fixes.
  *
- * @note Ask before allocating: a framebuffer of any other size is refused,
- *       because a controller scanning the wrong geometry shows a smear
- *       rather than reporting an error.
+ * @note Ask before allocating: init refuses a framebuffer of any other size,
+ *       since a controller scanning the wrong geometry shows a smear and
+ *       reports no error.
  *
  * @param w  Receives width in pixels, or NULL
  * @param h  Receives height in pixels, or NULL

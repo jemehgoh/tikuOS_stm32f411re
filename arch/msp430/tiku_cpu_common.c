@@ -7,8 +7,8 @@
  *
  * tiku_cpu_common.c - MSP430 CPU common functions
  *
- * This file provides MSP430-specific implementations of common
- * CPU functions including delay routines and hardware abstractions.
+ * Busy-wait delays scaled from the MCLK rate, the SYSRSTIV reset cause and
+ * the TLV die-record unique ID.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -19,18 +19,24 @@
 
 #include "tiku_cpu_common.h"
 #include <string.h>
+#include <hal/tiku_cpu.h>
 
 /*---------------------------------------------------------------------------*/
 /* PRIVATE CONSTANTS                                                        */
 /*---------------------------------------------------------------------------*/
 
-/** Approximate loop iterations per millisecond at 8MHz */
-#define TIKU_DELAY_LOOPS_PER_MS    1000
+/* Busy-delay loop counts scale with MCLK from a calibration at 8 MHz.  Loop
+ * overhead keeps them approximate, worst at the lowest rates. */
 
-/** Approximate loop iterations per microsecond at 8MHz.
- *  At 8 MHz each NOP is ~125 ns; one loop iteration (NOP + branch)
- *  is ~2 cycles = 250 ns, so 4 iterations per microsecond. */
-#define TIKU_DELAY_LOOPS_PER_US    4
+/** @brief The rate to scale a busy delay by, 8 MHz before clock setup. */
+static unsigned long delay_hz(void)
+{
+    unsigned long hz = tiku_cpu_mclk_hz();
+
+    /* tiku_cpu_mclk_hz() reads 0 until cpu_freq_msp430_init() runs, and a
+     * delay scaled from 0 is a thousand times too short; 8 MHz stands in. */
+    return hz ? hz : 8000000UL;
+}
 
 /*---------------------------------------------------------------------------*/
 /* PRIVATE TYPES                                                            */
@@ -58,9 +64,8 @@
  * @brief Delay for a specified number of milliseconds
  * @param ms Number of milliseconds to delay
  *
- * This function provides a software-based delay using nested loops.
- * The delay is approximate and depends on CPU frequency and compiler
- * optimization settings.
+ * Busy-waits in NOP loops scaled from the MCLK rate.  The delay is
+ * approximate and depends on compiler optimization settings.
  *
  * @note This is a blocking delay function
  * @warning Not suitable for precise timing requirements
@@ -70,10 +75,12 @@
 void tiku_cpu_msp430_delay_ms(unsigned int ms)
 {
     unsigned int i, j;
+    unsigned int loops = (unsigned int)(delay_hz() / 8000UL);
+    if (!loops) loops = 1;
 
     for (i = 0; i < ms; i++) {
 
-        for (j = 0; j < TIKU_DELAY_LOOPS_PER_MS; j++) {
+        for (j = 0; j < loops; j++) {
 
             __no_operation();
 
@@ -89,9 +96,11 @@ void tiku_cpu_msp430_delay_ms(unsigned int ms)
 void tiku_cpu_msp430_delay_us(unsigned int us)
 {
     unsigned int i;
+    unsigned int loops = (unsigned int)(delay_hz() / 2000000UL);
+    if (!loops) loops = 1;
 
     while (us--) {
-        for (i = 0; i < TIKU_DELAY_LOOPS_PER_US; i++) {
+        for (i = 0; i < loops; i++) {
             __no_operation();
         }
     }
@@ -99,10 +108,10 @@ void tiku_cpu_msp430_delay_us(unsigned int us)
 
 /*---------------------------------------------------------------------------*/
 
-/** Boot-time reset cause (captured once before SYSRSTIV auto-clears) */
+/** SYSRSTIV as read by the first tiku_cpu_msp430_reset_reason() call. */
 static uint16_t boot_rstiv;
 
-/** Flag so SYSRSTIV is captured only on the first call */
+/** Set once boot_rstiv holds the captured value. */
 static uint8_t  rstiv_captured;
 
 uint16_t

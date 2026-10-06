@@ -7,8 +7,8 @@
  *
  * tiku_shell_cmd_name.c - "name" command implementation.
  *
- * Reads or sets /sys/device/name.  The underlying node is NVM-backed, so a change
- * persists across reset and power loss.
+ * Reads or sets /sys/device/name.  The underlying node is held in durable
+ * memory, so a change persists across reset and power loss.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -31,6 +31,9 @@ tiku_shell_cmd_name(uint8_t argc, const char *argv[])
         if (n < 0) {
             SHELL_PRINTF("name: read failed\n");
             return;
+        }
+        if (n > (int)sizeof(buf) - 1) {     /* keep the NUL inside the buffer */
+            n = (int)sizeof(buf) - 1;
         }
         buf[n] = '\0';
         SHELL_PRINTF("%s", buf);

@@ -7,9 +7,9 @@
  *
  * tiku_bt_transport.h - driver-agnostic Bluetooth transport interface.
  *
- * The vtable each driver implements to carry HCI for the portable stack, whether
- * that is BTSDIO over a chip's shared RAM rings or an HCI UART.  Keeps the stack
- * independent of any one Bluetooth part.
+ * The vtable a driver fills to carry HCI for the stack in
+ * tikukits/net/bluetooth/: BTSDIO over a chip's shared RAM rings, or a
+ * controller's in-memory HCI.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -28,7 +28,7 @@ extern "C" {
  *
  * Called by the generic stack as it pumps HCI traffic.  Implementations must be
  * synchronous, since they run from shell context, the runner and ISR
- * follow-ups; only one caller touches the transport at a time today.
+ * follow-ups; only one caller touches the transport at a time.
  */
 typedef struct {
     /**
@@ -50,16 +50,27 @@ typedef struct {
      * transport state is ready to send/recv. 0 during bring-up.
      */
     int (*is_ready)(void);
+
+    /**
+     * Optional: wait up to @p ms for a packet while the stack expects a
+     * reply.  A controller running as a worker thread needs the CPU in
+     * that time; with NULL the stack sleeps for the wait.
+     */
+    void (*wait)(uint16_t ms);
+
+    /** Optional: the controller firmware's version string (NULL: none). */
+    const char *(*version)(void);
 } tiku_bt_transport_t;
 
 /**
  * @brief Register the active BT transport.
  *
- * A driver calls this once during init, after its chip-side bring-up.  Only one
- * transport is active and a second call replaces the first, so the vtable must
- * outlive every BT operation -- usually a static const in the driver.
+ * One transport is active; a second call replaces the first.  A vtable with
+ * no send, recv or is_ready is refused.
  *
  * @return 0 on success, non-zero on bad args.
+ * @note Call once from the driver's init, after its chip bring-up.  The
+ *       vtable must outlive every BT operation; drivers keep it static const.
  */
 int tiku_bt_register_transport(const tiku_bt_transport_t *t);
 

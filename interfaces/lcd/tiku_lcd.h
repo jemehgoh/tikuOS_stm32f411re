@@ -8,8 +8,8 @@
  * tiku_lcd.h - platform-independent segment-LCD interface.
  *
  * A small API for fixed-segment glass, with optional icons where the board sets
- * TIKU_BOARD_LCD_HAS_ICONS.  Boards without an LCD compile fine: entry points
- * become no-ops and TIKU_LCD_PRESENT folds to a constant for branching.
+ * TIKU_BOARD_LCD_HAS_ICONS.  On a board without an LCD every entry point is a
+ * no-op and TIKU_LCD_PRESENT is the constant 0.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -25,18 +25,19 @@
 /*===========================================================================*/
 
 #ifndef TIKU_BOARD_HAS_LCD
+/** @brief 1 when the board header declares an LCD; 0 by default. */
 #define TIKU_BOARD_HAS_LCD          0
 #endif
 
 #ifndef TIKU_BOARD_LCD_NUM_CHARS
+/** @brief Character cells on the board's LCD; 0 without one. */
 #define TIKU_BOARD_LCD_NUM_CHARS    0
 #endif
 
 /**
- * @brief Compile-time + runtime predicate: 1 if the board has an LCD.
+ * @brief 1 if the board has an LCD, else 0.
  *
- * Folds to a constant; safe to use as the condition in a normal
- * `if` so portable code can avoid `#ifdef` clutter.
+ * A constant, usable in #if and as the condition of a plain `if`.
  */
 #define TIKU_LCD_PRESENT            TIKU_BOARD_HAS_LCD
 
@@ -53,9 +54,10 @@ uint8_t tiku_lcd_num_chars(void);
 /**
  * @brief Bring up the LCD controller and clear the panel.
  *
- * Configures the peripheral -- charge pump, mux ratio, frame frequency, pin
- * muxing -- and blanks every segment.  Safe to call at boot before the
- * scheduler starts, and a no-op on boards without an LCD.
+ * Configures the peripheral (charge pump, mux ratio, frame frequency, pin
+ * muxing) and blanks every segment; a no-op on boards without an LCD.
+ *
+ * @note Callable at boot, before the scheduler starts.
  */
 void tiku_lcd_init(void);
 
@@ -96,9 +98,8 @@ void tiku_lcd_puts(const char *s);
 /**
  * @brief Write a right-aligned string ending at the last position.
  *
- * Positions to the left of the string are blanked. Useful for
- * displaying a value (clock, sensor, version) flush-right while a
- * fixed label sits on the left via tiku_lcd_puts_at().
+ * Positions to the left of the string are blanked; a string longer than the
+ * panel keeps its first tiku_lcd_num_chars() characters.
  *
  * @param s  Null-terminated ASCII string, or NULL (clears).
  */
@@ -108,8 +109,8 @@ void tiku_lcd_puts_right(const char *s);
  * @brief Overwrite characters starting at @p pos without blanking
  *        the rest of the line.
  *
- * Lets you compose "label + value" displays without rewriting the
- * untouched cells. The write stops at the end of the panel.
+ * Cells outside the written span keep their content.  The write stops at
+ * the end of the panel.
  *
  * @param pos  Starting position, 0 .. tiku_lcd_num_chars()-1.
  * @param s    Null-terminated ASCII string. NULL is treated as "".
@@ -117,15 +118,13 @@ void tiku_lcd_puts_right(const char *s);
 void tiku_lcd_puts_at(uint8_t pos, const char *s);
 
 /*===========================================================================*/
-/* NUMBER FORMATTING (all right-aligned, blank-padded)                        */
+/* NUMBER FORMATTING (RIGHT-ALIGNED, BLANK-PADDED)                            */
 /*===========================================================================*/
 
 /**
  * @brief Display a non-negative integer, right-aligned.
  *
- * Values larger than 10^N - 1 (where N is the panel width) are
- * clamped to all-nines so the user sees "overflow" rather than
- * the wrong number.
+ * A value above 10^N - 1 (N the panel width) shows as all nines.
  *
  * @param value  Unsigned value to render.
  */
@@ -148,11 +147,10 @@ void tiku_lcd_put_int(int32_t value);
  *        right-aligned, in @p digits cells.
  *
  * @param value   Value to render.
- * @param digits  1 .. tiku_lcd_num_chars(). Larger values are
- *                clamped to the panel width.
+ * @param digits  1 .. tiku_lcd_num_chars(). 0 counts as 1, and larger
+ *                values are clamped to the panel width.
  *
- * Useful for register dumps and debug prints. Cells to the left
- * of the hex field are blanked.
+ * Cells to the left of the hex field are blanked.
  */
 void tiku_lcd_put_hex(uint32_t value, uint8_t digits);
 
@@ -172,7 +170,7 @@ void tiku_lcd_put_hex(uint32_t value, uint8_t digits);
 void tiku_lcd_put_fixed(int32_t value, uint8_t decimals);
 
 /*===========================================================================*/
-/* ICONS (only available when TIKU_BOARD_LCD_HAS_ICONS)                       */
+/* ICONS (WITH TIKU_BOARD_LCD_HAS_ICONS)                                      */
 /*===========================================================================*/
 
 #if defined(TIKU_BOARD_LCD_HAS_ICONS) && TIKU_BOARD_LCD_HAS_ICONS

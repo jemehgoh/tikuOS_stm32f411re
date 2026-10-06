@@ -5,11 +5,11 @@
  *
  * Authors: Ambuj Varshney <ambuj@tiku-os.org>
  *
- * tiku_shell_cmd_bt.h - "bt" shell command (CYW43439 Bluetooth)
+ * tiku_shell_cmd_bt.h - "bt" shell command (the BLE host stack)
  *
- * Compiled in only when both TIKU_DRV_WIFI_CYW43_ENABLE and
- * TIKU_DRV_WIFI_CYW43_BT_ENABLE are set; the table entry in
- * tiku_shell.c is gated identically.
+ * Built with a radio under the host stack: the CYW43439's BT extension
+ * (TIKU_DRV_WIFI_CYW43_BT_ENABLE) or the ESP32-C61's controller
+ * (TIKU_DRV_BLE_ESP_ENABLE), the same gate as its tiku_shell.c table entry.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -24,11 +24,12 @@ extern "C" {
 #endif
 
 /**
- * @brief "bt" command handler — drive the CYW43439 Bluetooth subsystem.
+ * @brief "bt" command handler — drive the BLE host stack (CYW43439 BT or
+ *        the ESP32-C61 controller).
  *
  * Sub-commands cover status, advertising, scanning and the cached results,
- * connection management (connect/disconnect/connections), GATT discovery and
- * access (discover/read/subscribe) and bonding.  No argument prints the help.
+ * links (connect/disconnect/connections), GATT (discover/read/subscribe),
+ * bonding, and power (on/off, ESP32-C61 only).  No argument prints the help.
  *
  * @param argc  Argument count
  * @param argv  Argument vector; argv[1] selects the sub-command, argv[2..]

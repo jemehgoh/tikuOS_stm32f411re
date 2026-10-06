@@ -7,9 +7,8 @@
  *
  * tiku_lc_persist.c - NVM-backed local continuation persistence.
  *
- * Stores a protothread's continuation state in the kernel persist store, so after
- * a power cycle it resumes from its last LC_SET_PERSISTENT point instead of
- * restarting.  The enabling mechanism for intermittent computing.
+ * Stores a protothread's continuation state in the kernel persist store, so
+ * after a power cycle it resumes from its last LC_SET_PERSISTENT point.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -41,9 +40,8 @@
 
 /* The persist store and NVM pool must live in a region the kernel recognizes
  * as NVM, or tiku_persist_register() rejects the buffer at registration time.
- * TIKU_DURABLE is that placement on every target; a per-file platform list
- * here silently drops an unlisted port into .bss.  Only the HOST build opts
- * out -- its region table has no NVM class for an arbitrary section. */
+ * TIKU_DURABLE is that placement on every target.  Only the host build opts
+ * out: its region table has no NVM class for an arbitrary section. */
 #if defined(TIKU_TEST_HOST)
 #define LC_NVM_PERSISTENT
 #else
@@ -63,28 +61,17 @@ static LC_NVM_PERSISTENT uint8_t
 /*---------------------------------------------------------------------------*/
 
 /*
- * The persist store struct is placed in FRAM (.persistent section) so
- * that entry metadata (key, value_len, write_count, magic, valid)
- * survives power cycles.  On reboot, tiku_persist_init() scans the
- * FRAM-backed entries for valid magic numbers and recovers them.
+ * The persist store is durable (TIKU_DURABLE), so entry metadata (key,
+ * value_len, write_count, magic, valid) survives a power cycle, and the pool
+ * sits at a fixed address, so a recovered fram_ptr stays valid for the same
+ * image.  At boot tiku_persist_init() keeps the entries with a valid magic
+ * and clears the rest; a virgin store has none.  tiku_lc_persist_register()
+ * reuses a recovered key's slot without registering it again, so its
+ * value_len and write_count are kept.
  *
- * Why this works:
- *   - The .persistent section is linker-placed at a fixed address.
- *   - First boot after flash: FRAM is zeroed by the linker, no valid
- *     magic numbers, all entries cleared — clean start.
- *   - After power cycle: FRAM retains the entries with valid magic.
- *     tiku_persist_init() finds them, count is restored.
- *   - tiku_persist_register() finds the existing key (from previous
- *     boot) and updates only the runtime fields (fram_ptr, capacity).
- *     The stored value_len and write_count are preserved.
- *   - The NVM data pool is also linker-placed, so fram_ptr addresses
- *     are stable across boots.
- *
- * MPU consideration:
- *   All functions that modify the store entries (init, register, write,
- *   delete) are wrapped with MPU unlock/lock because the store is now
- *   in FRAM.  Read-only functions (persist_read, persist_find) don't
- *   need MPU unlock.
+ * The functions that modify entries (init, register, write, delete) hold an
+ * MPU unlock window, since the store is write-protected durable memory;
+ * reads need none.
  */
 static LC_NVM_PERSISTENT tiku_persist_store_t lc_persist_store = {0};
 static uint8_t           lc_persist_initialized;
@@ -97,9 +84,9 @@ static uint8_t           lc_nvm_next_slot;
 /**
  * @brief Initialize the LC persistent store
  *
- * Scans the FRAM-backed store for magic-validated entries that
+ * Scans the durable store for magic-validated entries that
  * survived a power cycle.  Invalid entries are cleared.
- * Safe to call multiple times — subsequent calls are no-ops.
+ * Later calls do nothing.
  */
 void tiku_lc_persist_init(void)
 {
@@ -110,20 +97,15 @@ void tiku_lc_persist_init(void)
         return;
     }
 
-    /* Do NOT memset the store — it's in FRAM and may contain valid
-     * entries from a previous boot.  tiku_persist_init() handles
-     * validation: entries with correct magic are kept, others are
-     * cleared (requires MPU unlock since the store is in FRAM). */
+    /* tiku_persist_init() keeps the entries with a valid magic, which a
+     * previous boot left, and clears the others. */
     mpu_state = tiku_mpu_unlock_nvm();
     tiku_persist_init(&lc_persist_store);
     tiku_mpu_lock_nvm(mpu_state);
 
-    /* Recover the next-free-slot index from any entries that survived
-     * the power cycle.  Each persistent LC entry's fram_ptr is the
-     * address of an lc_t-sized chunk in lc_nvm_pool — find the highest
-     * occupied slot and resume allocation just past it.  Without this,
-     * post-reboot allocations would re-hand out slots already owned by
-     * recovered keys. */
+    /* Each recovered entry's fram_ptr is an lc_t-sized chunk of
+     * lc_nvm_pool.  Allocation resumes just past the highest one, so no
+     * new key is handed a recovered key's slot. */
     lc_nvm_next_slot = 0;
     for (i = 0; i < TIKU_PERSIST_MAX_ENTRIES; i++) {
         tiku_persist_entry_t *e = &lc_persist_store.entries[i];
@@ -144,11 +126,10 @@ void tiku_lc_persist_init(void)
 /**
  * @brief Register a persistent LC slot under a key.
  *
- * Claims the next chunk of the pool and registers it.  An existing key -- a
- * duplicate this boot, or one recovered at init -- is a no-op that keeps its
- * slot and value rather than burning a fresh one.
+ * Claims the next chunk of the pool and registers it.  An existing key, from
+ * this boot or recovered at init, is left as it is, slot and value.
  *
- * @param key  Null-terminated key (max 7 chars + NUL)
+ * @param key  Null-terminated key (at most TIKU_PERSIST_MAX_KEY_LEN - 1 chars)
  * @return 0 on success, -1 if store not initialized,
  *         -2 if pool exhausted, -3 on persist error
  */
@@ -164,12 +145,10 @@ int tiku_lc_persist_register(const char *key)
         return -1;
     }
 
-    /* If the key already has an entry — duplicate registration in
-     * this boot, or an entry recovered from FRAM by tiku_persist_init
-     * — reuse it instead of burning another pool slot.  The existing
-     * fram_ptr already points into lc_nvm_pool (slot recovery in
-     * tiku_lc_persist_init bumped lc_nvm_next_slot past it), so the
-     * mapping stays consistent and write_count is preserved. */
+    /* A key with an entry, from this boot or recovered at init, keeps it:
+     * its fram_ptr is already in lc_nvm_pool below lc_nvm_next_slot, and
+     * its write_count is kept.  Any read result but NOT_FOUND counts as an
+     * entry, including a value too wide for the 1-byte probe. */
     if (tiku_persist_read(&lc_persist_store, key,
                           &probe, sizeof(probe), &probe_len)
         != TIKU_MEM_ERR_NOT_FOUND) {
@@ -182,7 +161,7 @@ int tiku_lc_persist_register(const char *key)
 
     slot_buf = &lc_nvm_pool[lc_nvm_next_slot * sizeof(lc_t)];
 
-    /* Register writes to FRAM-backed entry metadata */
+    /* Register writes the durable entry metadata. */
     mpu_state = tiku_mpu_unlock_nvm();
     err = tiku_persist_register(&lc_persist_store, key,
                                 slot_buf, sizeof(lc_t));
@@ -200,8 +179,8 @@ int tiku_lc_persist_register(const char *key)
  * @brief Save an lc_t value to NVM.
  *
  * Writes the continuation line, updating both the data slot and the durable
- * entry metadata.  It unlocks the MPU itself, because the PT_*_PERSISTENT
- * macros do not.
+ * entry metadata, inside an MPU unlock window of its own: LC_SET_PERSISTENT
+ * calls it with NVM locked.
  *
  * @param key  Key previously registered with tiku_lc_persist_register
  * @param val  The lc_t value (line number) to persist
@@ -224,13 +203,14 @@ int tiku_lc_persist_save(const char *key, lc_t val)
 /**
  * @brief Load an lc_t value from NVM.
  *
- * Non-zero when the key is unknown or has no stored value -- first boot, or
- * after a clear -- in which case the output is untouched and the protothread
- * starts from the beginning.  Read-only, so no unlock is needed.
+ * Returns -1 when the key is unknown or holds no value (first boot, after a
+ * clear) or holds 0 (after a reset); LC_RESUME_PERSISTENT then starts at
+ * case 0.  Opens no MPU window.
  *
  * @param key  Key previously registered with tiku_lc_persist_register
- * @param val  Output: the stored lc_t value
- * @return 0 on success, negative if not found or empty
+ * @param val  Output: the stored lc_t value, 0 after a reset; unchanged when
+ *             the key is unknown or holds no value
+ * @return 0 on success, -1 if not found or empty
  */
 int tiku_lc_persist_load(const char *key, lc_t *val)
 {
@@ -257,8 +237,9 @@ int tiku_lc_persist_load(const char *key, lc_t *val)
 /**
  * @brief Clear the NVM entry for a key
  *
- * Removes the continuation state so the next boot starts fresh.
- * Unlocks MPU internally since the entry metadata is in FRAM.
+ * Deletes the key's entry, inside an MPU unlock window of its own, since the
+ * entry metadata is write-protected durable memory.  The pool slot is not
+ * freed: lc_nvm_next_slot only grows for the rest of the boot.
  *
  * @param key  Key to clear
  * @return 0 on success, negative on error
@@ -278,9 +259,8 @@ int tiku_lc_persist_clear(const char *key)
 /**
  * @brief Reset the NVM value to 0 without deleting the entry.
  *
- * The checkpoint then reads as "start from the beginning", but the key stays
- * registered so later saves succeed -- unlike clear, which removes it.  Unlocks
- * the MPU itself.
+ * A load then reports the key as not set, and the key stays registered, so
+ * later saves succeed.  Opens its own MPU unlock window.
  *
  * @param key  Key to reset
  * @return 0 on success, negative on error

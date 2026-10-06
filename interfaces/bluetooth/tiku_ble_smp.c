@@ -1,11 +1,14 @@
 /*
  * Tiku Operating System v0.06
  * Simple. Ubiquitous. Intelligence, Everywhere.
+ * http://tiku-os.org
  *
  * Authors: Ambuj Varshney <ambuj@tiku-os.org>
  *
- * tiku_ble_smp.c - LE Secure Connections crypto (AES-CMAC + f4/f5/f6) and a
- * self-test.  Phase E foundation; the pairing state machine builds on this.
+ * tiku_ble_smp.c - LE Secure Connections crypto (AES-CMAC, f4/f5/f6/g2).
+ *
+ * The SMP key functions and their self-test; the pairing engine in
+ * tiku_ble_smp_pair.c uses them.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -18,12 +21,13 @@
 
 /* --- AES-CMAC (RFC 4493) over AES-128 ECB ------------------------------- */
 
+/** @brief One AES-128 ECB block on the CRACEN.  @return 0 on success. */
 static int aes_ecb(const uint8_t key[16], const uint8_t in[16], uint8_t out[16])
 {
     return tiku_crypto_arch_aes_ecb(0, key, 16u, in, out);
 }
 
-/* one-bit left shift of a 16-byte big-endian value */
+/** @brief One-bit left shift of a 16-byte big-endian value. */
 static void cmac_lshift(const uint8_t in[16], uint8_t out[16])
 {
     int i;
@@ -34,6 +38,7 @@ static void cmac_lshift(const uint8_t in[16], uint8_t out[16])
     }
 }
 
+/** @brief Derive the CMAC subkeys K1 and K2 (RFC 4493 2.3).  @return 0/-1. */
 static int cmac_subkeys(const uint8_t key[16], uint8_t k1[16], uint8_t k2[16])
 {
     uint8_t l[16];
@@ -78,11 +83,11 @@ int tiku_ble_smp_aes_cmac(const uint8_t key[16], const uint8_t *msg,
             return -1;
         }
     }
-    if (last_complete) {                            /* M_last ^ K1             */
+    if (last_complete) {                            /* M_last ^ K1        */
         for (j = 0u; j < 16u; j++) {
             block[j] = (uint8_t)(msg[16u*(n-1u) + j] ^ k1[j]);
         }
-    } else {                                        /* pad(M_last) ^ K2        */
+    } else {                                        /* pad(M_last) ^ K2   */
         rem = len - 16u*(n-1u);
         for (j = 0u; j < 16u; j++) {
             uint8_t b = (j < rem) ? msg[16u*(n-1u) + j]
@@ -101,9 +106,10 @@ int tiku_ble_smp_aes_cmac(const uint8_t key[16], const uint8_t *msg,
 /*
  * SMP fields travel the wire little-endian, but the CMAC core (and the spec's
  * f4/f5/f6 definitions) operate big-endian.  Each function reverses its inputs
- * into a big-endian scratch, CMACs, then reverses the result back.  swap()
- * copies src->dst reversed; swap_ip() reverses in place.
+ * into a big-endian scratch, CMACs, then reverses the result back.
  */
+
+/** @brief Copy @p n bytes from @p src to @p dst in reverse order. */
 static void swap(uint8_t *dst, const uint8_t *src, size_t n)
 {
     size_t i;
@@ -112,6 +118,7 @@ static void swap(uint8_t *dst, const uint8_t *src, size_t n)
     }
 }
 
+/** @brief Reverse @p n bytes in place. */
 static void swap_ip(uint8_t *b, size_t n)
 {
     size_t i;
@@ -176,6 +183,23 @@ void tiku_ble_smp_f6(const uint8_t w[16], const uint8_t n1[16],
     swap(ws, w, 16);
     (void)tiku_ble_smp_aes_cmac(ws, m, 65u, out);
     swap_ip(out, 16);
+}
+
+/* g2: the numeric-comparison value function.  AES-CMAC_X(U || V || Y),
+ * keyed by X (Na); the six-digit value both sides show is the low 32 bits
+ * of the result taken modulo one million.  The low 32 bits are the last
+ * four bytes of the big-endian CMAC, so no output swap is needed. */
+uint32_t tiku_ble_smp_g2(const uint8_t u[32], const uint8_t v[32],
+                         const uint8_t x[16], const uint8_t y[16])
+{
+    uint8_t m[80], xs[16], out[16];
+    swap(&m[0], u, 32);
+    swap(&m[32], v, 32);
+    swap(&m[64], y, 16);
+    swap(xs, x, 16);
+    (void)tiku_ble_smp_aes_cmac(xs, m, 80u, out);
+    return ((uint32_t)out[12] << 24) | ((uint32_t)out[13] << 16) |
+           ((uint32_t)out[14] << 8) | (uint32_t)out[15];
 }
 
 /* --- self-test --------------------------------------------------------- */
@@ -250,6 +274,12 @@ int tiku_ble_smp_selftest(void)
             memcmp(ltk, ltk_exp, 16) == 0 &&
             memcmp(of6, f6_exp, 16) == 0) {
             result |= 4;                           /* bit2: f4/f5/f6 KATs     */
+        }
+
+        /* g2 KAT (Core Spec Vol 3, Part H, 2.2.9): U, V and X as f4's,
+         * Y = n2, six-digit source value 0x2f9ed5ba. */
+        if (tiku_ble_smp_g2(u, v, x, n2) == 0x2f9ed5bau) {
+            result |= 8;                           /* bit3: g2 KAT            */
         }
     }
 

@@ -5,11 +5,11 @@
  *
  * Authors: Ambuj Varshney <ambuj@tiku-os.org>
  *
- * tiku_mem_hal.h - Platform-routing header for memory management
+ * tiku_mem_hal.h - per-port memory functions and their platform routing.
  *
- * Routes to the correct architecture-specific memory header based on
- * the selected platform. Provides portable fallback defaults when no
- * platform is selected (e.g. host-mode testing).
+ * Includes the active platform's tiku_mem_arch.h and declares the memory
+ * functions every port implements.  A build with no PLATFORM_* macro (host
+ * tests) gets 4-byte alignment and a 32-bit size type.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -17,7 +17,44 @@
 #ifndef TIKU_MEM_HAL_H_
 #define TIKU_MEM_HAL_H_
 
+#include <stddef.h>
 #include <stdint.h>
+
+/**
+ * @def TIKU_MEM_ARCH_IN_EXCEPTION()
+ * @brief Non-zero while an interrupt or exception handler runs.
+ *
+ * TIKU_MEM_EXCEPTION_GUARD reads it so memory mutators refuse handler context.
+ * Cortex-M reads IPSR and ESP32-C61 the CLIC level; MSP430 and host builds
+ * report 0.  A host test may define the macro first to supply its own check.
+ */
+#ifndef TIKU_MEM_ARCH_IN_EXCEPTION
+#if defined(__arm__) || defined(__thumb__)
+/** @brief Non-zero in an exception handler: IPSR holds its number. */
+static inline int tiku_mem_arch_in_exception(void)
+{
+    uint32_t ipsr;
+    __asm__ volatile ("mrs %0, ipsr" : "=r" (ipsr));
+    return ipsr != 0u;
+}
+#define TIKU_MEM_ARCH_IN_EXCEPTION() tiku_mem_arch_in_exception()
+#elif defined(PLATFORM_ESP32C61)
+/**
+ * @brief Non-zero in an interrupt handler: mintstatus holds the CLIC level
+ *        being served in its top byte, and zero outside every handler.
+ */
+static inline int tiku_mem_arch_in_exception(void)
+{
+    uint32_t st;
+
+    __asm__ volatile ("csrr %0, 0xFB1" : "=r" (st));
+    return (st >> 24) != 0u;
+}
+#define TIKU_MEM_ARCH_IN_EXCEPTION() tiku_mem_arch_in_exception()
+#else
+#define TIKU_MEM_ARCH_IN_EXCEPTION() 0
+#endif
+#endif
 
 /*---------------------------------------------------------------------------*/
 /* PLATFORM ROUTING                                                          */
@@ -35,20 +72,22 @@
 #include "arch/stm32n6/tiku_mem_arch.h"
 #elif defined(PLATFORM_RA8P1)
 #include "arch/ra8p1/tiku_mem_arch.h"
+#elif defined(PLATFORM_ESP32C61)
+#include "arch/esp32c61/tiku_mem_arch.h"
 #endif
 
 /*---------------------------------------------------------------------------*/
-/* FALLBACK DEFAULTS (host / unknown platform)                               */
+/* FALLBACK DEFAULTS (HOST OR UNKNOWN PLATFORM)                              */
 /*---------------------------------------------------------------------------*/
 
 #ifndef TIKU_MEM_ARCH_ALIGNMENT
-/** Default alignment for 32-bit platforms (ARM Cortex-M, RISC-V, host) */
+/** Allocation alignment for a build with no port header (host tests) */
 #define TIKU_MEM_ARCH_ALIGNMENT  4U
 #endif
 
 #ifndef TIKU_MEM_ARCH_SIZE_T_DEFINED
 #define TIKU_MEM_ARCH_SIZE_T_DEFINED
-/** Default 32-bit size type for platforms with > 64 KB address space */
+/** Size type for arch memory calls in a build with no port header */
 typedef uint32_t tiku_mem_arch_size_t;
 #endif
 
@@ -62,7 +101,7 @@ typedef uint32_t tiku_mem_arch_size_t;
 void tiku_mem_arch_init(void);
 
 /**
- * @brief Securely wipe a memory region
+ * @brief Zero a region through volatile writes the compiler cannot remove
  *
  * @param buf   Start of the region to wipe
  * @param len   Number of bytes to zero
@@ -88,5 +127,33 @@ void tiku_mem_arch_nvm_read(uint8_t *dst, const uint8_t *src,
  */
 void tiku_mem_arch_nvm_write(uint8_t *dst, const uint8_t *src,
                               tiku_mem_arch_size_t len);
+
+#if !defined(PLATFORM_MSP430)
+/**
+ * @brief Make pending NVM writes durable (commit the mirror or write buffer).
+ * @return 0 when done or nothing was pending, negative if completion was not
+ *         established
+ */
+int tiku_mem_arch_nvm_flush_status(void);
+/** @brief tiku_mem_arch_nvm_flush_status() with its result discarded. */
+void tiku_mem_arch_nvm_flush(void);
+
+/**
+ * @brief The durable image as last persisted, read-only.
+ *
+ * A mirror port returns its mirror's image when that checks out; an in-place
+ * port returns its persist partition.  NULL, with *len 0, when there is none.
+ *
+ * @param len  Out: image size in bytes
+ */
+const uint8_t *tiku_mem_arch_durable(size_t *len);
+
+/**
+ * @brief The working copy of the durable variables: .uninit on a mirror
+ *        port, the persist partition's .persistent on an in-place one.
+ * @param len  Out: its size in bytes
+ */
+uint8_t *tiku_mem_arch_durable_live(size_t *len);
+#endif
 
 #endif /* TIKU_MEM_HAL_H_ */

@@ -1,15 +1,15 @@
 /*
  * Tiku Operating System v0.06
  * Simple. Ubiquitous. Intelligence, Everywhere.
+ * http://tiku-os.org
  *
  * Authors: Ambuj Varshney <ambuj@tiku-os.org>
  *
- * tiku_ble_smp_pair.c - LE Secure Connections "Just Works" pairing engine.
- * See tiku_ble_smp_pair.h for the message flow.  Endianness contract: SMP
- * fields (public keys, nonces, DHKey checks) travel little-endian; f4/f5/f6
- * take that wire order directly.  The P-256 kit is big-endian (SEC1), so the
- * only conversions are at the key boundary: X/Y coords reverse when they enter
- * or leave the wire, and the ECDH shared-X reverses into the DHKey.
+ * tiku_ble_smp_pair.c - LE-SC pairing engine (Just Works, Numeric Comparison).
+ *
+ * SMP fields travel little-endian and f4/f5/f6 take that wire order directly;
+ * the P-256 kit is big-endian (SEC1), so public-key X/Y reverse when they enter
+ * or leave the wire and the ECDH shared X reverses into the DHKey.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -31,8 +31,10 @@
 
 /* Local pairing parameters: NoInputNoOutput -> Just Works, SC bit set. */
 #define SMP_IO_CAP     0x03u                 /* NoInputNoOutput               */
+#define SMP_IO_DISPLAY 0x01u                 /* DisplayYesNo -> Numeric Comp. */
 #define SMP_OOB        0x00u                 /* no OOB                        */
 #define SMP_AUTHREQ    0x08u                 /* SC=1, no MITM/bonding/keypress*/
+#define SMP_AUTHREQ_MITM 0x0Cu               /* SC=1, MITM=1 (authenticated)  */
 #define SMP_MAX_KEY    0x10u                 /* 16-byte key                   */
 
 #define SMP_FAIL_CONFIRM   0x04u             /* Confirm Value Failed          */
@@ -48,8 +50,8 @@ typedef struct {
     uint8_t  a[6], b[6];                     /* initiator A, responder B      */
     uint8_t  at, bt;                         /* address types (1 = random)    */
 
-    uint8_t  priv[32];                       /* local ECDH private (big-endian) */
-    uint8_t  pk_local[64];                   /* local public key  (wire, X||Y) */
+    uint8_t  priv[32];                       /* local private key, big-endian */
+    uint8_t  pk_local[64];                   /* local public key (wire, X||Y) */
     uint8_t  pk_peer[64];                    /* peer public key  (wire)       */
     uint8_t  na[16], nb[16];                 /* initiator, responder nonces   */
     uint8_t  dhkey[32];                      /* wire (little-endian) DHKey    */
@@ -57,7 +59,10 @@ typedef struct {
     uint8_t  iocap_a[3], iocap_b[3];         /* [io_cap, oob, authreq] each   */
     uint8_t  confirm_peer[16];               /* Cb received (initiator verify)*/
     uint8_t  have_dhkey;                     /* ECDH done                     */
-    uint8_t  last_rx_op;                      /* last processed opcode (dedup) */
+    uint8_t  numcmp;                          /* Numeric Comparison method */
+    uint8_t  have_compare;                    /* six-digit value is ready */
+    uint32_t compare;                         /* g2 mod 10^6, same both sides */
+    uint8_t  last_rx_op;                      /* last opcode handled (dedup) */
 
     uint8_t  outq[OUTQ_DEPTH][TIKU_BLE_SMP_PDU_MAX];
     uint8_t  outq_len[OUTQ_DEPTH];
@@ -66,8 +71,21 @@ typedef struct {
 
 static smp_ctx_t sc;
 
+/* Method preference, set before start() and outliving reset(): 0 = Just
+ * Works (unauthenticated), 1 = Numeric Comparison (both peers show the
+ * same six digits; a man in the middle makes the two differ). */
+static uint8_t s_numcmp;
+
+/** @brief The io_cap this side advertises for the chosen method. */
+static uint8_t method_iocap(void) { return s_numcmp ? SMP_IO_DISPLAY
+                                                     : SMP_IO_CAP; }
+/** @brief The authreq this side advertises for the chosen method. */
+static uint8_t method_authreq(void) { return s_numcmp ? SMP_AUTHREQ_MITM
+                                                      : SMP_AUTHREQ; }
+
 /* --- little helpers ----------------------------------------------------- */
 
+/** @brief Copy @p n bytes from @p src to @p dst in reverse order. */
 static void rev(uint8_t *dst, const uint8_t *src, uint16_t n)
 {
     uint16_t i;
@@ -76,6 +94,7 @@ static void rev(uint8_t *dst, const uint8_t *src, uint16_t n)
     }
 }
 
+/** @brief Queue an outgoing PDU; dropped when the queue is full. */
 static void outq_push(const uint8_t *pdu, uint8_t len)
 {
     uint8_t slot;
@@ -88,11 +107,15 @@ static void outq_push(const uint8_t *pdu, uint8_t len)
     sc.outq_count++;
 }
 
+/**
+ * @brief Queue Pairing Failed with @p reason and latch FAILED; a no-op once
+ *        DONE.
+ */
 static void fail(uint8_t reason)
 {
     uint8_t p[2];
-    /* Success is terminal: once DONE, a corrupted/duplicate late PDU (which
-     * re-runs a handler for retransmit) must never undo an established LTK. */
+    /* DONE is terminal: a corrupted or duplicate late PDU, which re-runs a
+     * handler for a retransmit, leaves an established LTK in place. */
     if (sc.state == TIKU_BLE_SMP_STATE_DONE) {
         return;
     }
@@ -104,7 +127,7 @@ static void fail(uint8_t reason)
     sc.state = TIKU_BLE_SMP_STATE_FAILED;
 }
 
-/* Build peer point 0x04 || X_be || Y_be from the wire (little-endian) key. */
+/** @brief Build peer point 0x04 || X_be || Y_be from the wire (LE) key. */
 static void peer_point_be(uint8_t point[65], const uint8_t wire[64])
 {
     point[0] = 0x04u;
@@ -112,7 +135,11 @@ static void peer_point_be(uint8_t point[65], const uint8_t wire[64])
     rev(&point[33], &wire[32], 32);          /* Y                             */
 }
 
-/* ECDH once the peer public key is in: DHKey (wire LE) = reverse(shared X). */
+/**
+ * @brief ECDH once the peer public key is in: DHKey (wire LE) is the shared X
+ *        reversed.
+ * @return 0, or -1 when the peer point is rejected
+ */
 static int compute_dhkey(void)
 {
     uint8_t point[65], sx[32];
@@ -129,7 +156,7 @@ static int compute_dhkey(void)
     return 0;
 }
 
-/* (MacKey, LTK) = f5(DHKey, Na, Nb, A, B) -- identical on both roles. */
+/** @brief (MacKey, LTK) = f5(DHKey, Na, Nb, A, B), identical on both roles. */
 static void derive_keys(void)
 {
     tiku_ble_smp_f5(sc.dhkey, sc.na, sc.nb, sc.at, sc.a, sc.bt, sc.b,
@@ -138,15 +165,17 @@ static void derive_keys(void)
 
 /* --- PDU builders ------------------------------------------------------- */
 
-static void build_pair_cmd(uint8_t opcode)          /* Request or Response   */
+/** @brief Queue a Pairing Request or Response (@p opcode) for this side. */
+static void build_pair_cmd(uint8_t opcode)
 {
     uint8_t p[7];
     p[0] = opcode;
-    p[1] = SMP_IO_CAP; p[2] = SMP_OOB; p[3] = SMP_AUTHREQ;
+    p[1] = method_iocap(); p[2] = SMP_OOB; p[3] = method_authreq();
     p[4] = SMP_MAX_KEY; p[5] = 0x00u; p[6] = 0x00u;   /* no key distribution  */
     outq_push(p, 7u);
 }
 
+/** @brief Queue Pairing Public Key with the local key. */
 static void build_public_key(void)
 {
     uint8_t p[65];
@@ -155,6 +184,7 @@ static void build_public_key(void)
     outq_push(p, 65u);
 }
 
+/** @brief Queue Pairing Confirm carrying @p cv. */
 static void build_confirm(const uint8_t cv[16])
 {
     uint8_t p[17];
@@ -163,6 +193,7 @@ static void build_confirm(const uint8_t cv[16])
     outq_push(p, 17u);
 }
 
+/** @brief Queue Pairing Random carrying nonce @p n. */
 static void build_random(const uint8_t n[16])
 {
     uint8_t p[17];
@@ -171,6 +202,7 @@ static void build_random(const uint8_t n[16])
     outq_push(p, 17u);
 }
 
+/** @brief Queue Pairing DHKey Check carrying @p e. */
 static void build_dhkey_check(const uint8_t e[16])
 {
     uint8_t p[17];
@@ -216,20 +248,39 @@ int tiku_ble_smp_pair_start(tiku_ble_smp_role_t role,
         return -1;
     }
 
+    sc.numcmp = s_numcmp;
     sc.state = TIKU_BLE_SMP_STATE_PAIRING;
     if (role == TIKU_BLE_SMP_ROLE_INITIATOR) {
-        sc.iocap_a[0] = SMP_IO_CAP; sc.iocap_a[1] = SMP_OOB;
-        sc.iocap_a[2] = SMP_AUTHREQ;
+        sc.iocap_a[0] = method_iocap(); sc.iocap_a[1] = SMP_OOB;
+        sc.iocap_a[2] = method_authreq();
         build_pair_cmd(SMP_PAIRING_REQUEST);      /* kick off the exchange    */
     } else {
-        sc.iocap_b[0] = SMP_IO_CAP; sc.iocap_b[1] = SMP_OOB;
-        sc.iocap_b[2] = SMP_AUTHREQ;
+        sc.iocap_b[0] = method_iocap(); sc.iocap_b[1] = SMP_OOB;
+        sc.iocap_b[2] = method_authreq();
     }
     return 0;
 }
 
+/**
+ * @brief Numeric Comparison value: Va = Vb = g2(PKa_x, PKb_x, Na, Nb) mod 10^6.
+ *
+ * Needs both nonces.  A man in the middle holds a different public key to each
+ * side, so the two values diverge: the user (or a two-board suite) compares.
+ */
+static void compute_compare(void)
+{
+    const uint8_t *pka_x = (sc.role == TIKU_BLE_SMP_ROLE_INITIATOR)
+                           ? &sc.pk_local[0] : &sc.pk_peer[0];
+    const uint8_t *pkb_x = (sc.role == TIKU_BLE_SMP_ROLE_INITIATOR)
+                           ? &sc.pk_peer[0] : &sc.pk_local[0];
+
+    sc.compare = tiku_ble_smp_g2(pka_x, pkb_x, sc.na, sc.nb) % 1000000u;
+    sc.have_compare = 1u;
+}
+
 /* --- initiator (central) receive path ----------------------------------- */
 
+/** @brief Initiator receive path: handle one PDU with opcode @p op. */
 static void feed_initiator(uint8_t op, const uint8_t *pdu, uint16_t len)
 {
     switch (op) {
@@ -257,6 +308,7 @@ static void feed_initiator(uint8_t op, const uint8_t *pdu, uint16_t len)
         if (memcmp(cb, sc.confirm_peer, 16) != 0) {
             fail(SMP_FAIL_CONFIRM); return;
         }
+        if (sc.numcmp) { compute_compare(); }     /* both nonces in hand      */
         derive_keys();
         {   /* Ea = f6(MacKey, Na, Nb, 0, IOcapA, A, B). */
             uint8_t ea[16], z[16];
@@ -286,6 +338,7 @@ static void feed_initiator(uint8_t op, const uint8_t *pdu, uint16_t len)
 
 /* --- responder (peripheral) receive path -------------------------------- */
 
+/** @brief Responder receive path: handle one PDU with opcode @p op. */
 static void feed_responder(uint8_t op, const uint8_t *pdu, uint16_t len)
 {
     switch (op) {
@@ -308,7 +361,8 @@ static void feed_responder(uint8_t op, const uint8_t *pdu, uint16_t len)
     case SMP_PAIRING_RANDOM:
         if (len < 17u) { return; }
         memcpy(sc.na, &pdu[1], 16);
-        derive_keys();                            /* both nonces known now    */
+        if (sc.numcmp) { compute_compare(); }     /* both nonces in hand      */
+        derive_keys();
         build_random(sc.nb);                      /* send Nb                  */
         break;
     case SMP_PAIRING_DHKEY_CHECK: {
@@ -331,6 +385,24 @@ static void feed_responder(uint8_t op, const uint8_t *pdu, uint16_t len)
     }
 }
 
+/** @brief Shortest PDU the handlers read for opcode @p op, opcode included. */
+static uint16_t min_len(uint8_t op)
+{
+    switch (op) {
+    case SMP_PAIRING_REQUEST:
+    case SMP_PAIRING_RESPONSE:
+        return 4u;
+    case SMP_PAIRING_PUBLIC_KEY:
+        return 65u;
+    case SMP_PAIRING_CONFIRM:
+    case SMP_PAIRING_RANDOM:
+    case SMP_PAIRING_DHKEY_CHECK:
+        return 17u;
+    default:
+        return 1u;
+    }
+}
+
 int tiku_ble_smp_pair_feed(const uint8_t *pdu, uint16_t len)
 {
     uint8_t op;
@@ -342,14 +414,18 @@ int tiku_ble_smp_pair_feed(const uint8_t *pdu, uint16_t len)
         sc.state = TIKU_BLE_SMP_STATE_FAILED;
         return 1;
     }
-    /* Accept PDUs while pairing, and -- for the tail's sake -- a duplicate of
-     * the last opcode even after DONE, so a peer that lost the final reply can
-     * re-request it (the same handler re-runs, and it is deterministic).
-     * Clearing the queue first keeps the regenerated PDUs correctly ordered.
-     * On the retransmit link (no full LL ACK yet) this is what makes the last
-     * DHKey Check reliably delivered. */
+    /* PDUs are accepted while pairing, and after DONE a duplicate of the last
+     * opcode is accepted too: a peer that lost the final reply sends again,
+     * and the same deterministic handler regenerates it.  The queue is
+     * cleared first so the regenerated PDUs keep their order.  The link has
+     * no full LL ACK, so this is how a lost final DHKey Check is re-sent. */
     if (sc.state != TIKU_BLE_SMP_STATE_PAIRING &&
         !(sc.state == TIKU_BLE_SMP_STATE_DONE && op == sc.last_rx_op)) {
+        return 0;
+    }
+    /* Checked before the dedup below: a short PDU recorded as the last
+     * opcode would make the next good one a repeat, which clears the queue. */
+    if (len < min_len(op)) {
         return 0;
     }
     if (op == sc.last_rx_op) {
@@ -392,5 +468,21 @@ int tiku_ble_smp_pair_ltk(uint8_t ltk[16])
         return -1;
     }
     memcpy(ltk, sc.ltk, 16);
+    return 0;
+}
+
+void tiku_ble_smp_pair_set_method(int numeric_compare)
+{
+    s_numcmp = numeric_compare ? 1u : 0u;
+}
+
+int tiku_ble_smp_pair_compare_value(uint32_t *out)
+{
+    if (!sc.have_compare) {
+        return -1;
+    }
+    if (out != (uint32_t *)0) {
+        *out = sc.compare;
+    }
     return 0;
 }

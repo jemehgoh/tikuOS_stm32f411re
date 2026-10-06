@@ -7,9 +7,9 @@
  *
  * tiku_stack.h - stack high-water measurement by painting.
  *
- * /sys/mem/free reports the live gap under SP; painting reports how close the
- * stack has ever come to overflow, which is the number that sizes it.  Bounded by
- * the arch-declared stack bottom, never _end -- the heap and MPU guard lie between.
+ * Boot fills the unused stack with a sentinel; tiku_stack_free() counts the
+ * words still intact above tiku_stack_arch_bottom(), the least headroom the
+ * stack has had since.  /sys/mem/stack_free reports it.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -21,19 +21,22 @@
 #include <stddef.h>
 
 /**
- * @brief Lowest paintable stack address (just above the MPU stack guard).
+ * @brief Lowest stack address the painter fills, as the port defines it.
  *
- * Weak; the arch MPU backend overrides it beside its guard-arming code.
- * A return of 0 means "bounds unknown": painting and measurement no-op.
+ * On most ports it is the top of the MPU stack guard; the heap and the guard
+ * lie below it.  The weak default returns 0, and with 0 tiku_stack_paint()
+ * does nothing and tiku_stack_free() returns 0.
  */
 uint32_t tiku_stack_arch_bottom(void);
 
 /**
  * @brief Paint the unused stack with the sentinel pattern.
  *
- * Call ONCE, early in boot (shallow call depth = the most stack painted).
  * Fills [tiku_stack_arch_bottom(), SP - margin); no-op when the arch bottom
  * is unknown (0).
+ *
+ * @note Call once, early in boot: the shallower the call depth, the more
+ *       stack is painted.
  */
 void tiku_stack_paint(void);
 
@@ -42,17 +45,17 @@ void tiku_stack_paint(void);
  *
  * The intact sentinel cushion above the arch stack bottom -- the closest the
  * stack has ever come to the guard, and monotonically non-increasing.  0 when
- * the feature is dormant or, alarmingly, when the whole budget is spent.
+ * the feature is dormant or the whole stack has been used.
  */
 uint32_t tiku_stack_free(void);
 
 #if defined(TIKU_STACK_TEST_HOOKS) && TIKU_STACK_TEST_HOOKS
 /**
- * @brief TEST-ONLY hook: paint an explicit range with the sentinel.
+ * @brief Test-only hook: paint an explicit range with the sentinel.
  *
- * The same painter on caller-supplied bounds, so the suite can exercise it over
- * a plain buffer instead of the live stack.  Fills [bottom, sp - margin), and
- * no-ops when @p bottom is 0 or the range is no larger than @p margin.
+ * Runs the painter on caller-supplied bounds, such as a test buffer.  Fills
+ * [bottom, sp - margin), and does nothing when @p bottom is 0 or the range is
+ * no larger than @p margin.
  *
  * @param bottom  Lowest address to paint (0 = no-op)
  * @param sp      Simulated stack pointer; painting stops @p margin below
@@ -61,7 +64,7 @@ uint32_t tiku_stack_free(void);
 void tiku_stack_test_paint(uintptr_t bottom, uintptr_t sp, uint32_t margin);
 
 /**
- * @brief TEST-ONLY hook: measure the intact cushion in an explicit range.
+ * @brief Test-only hook: measure the intact cushion in an explicit range.
  *
  * The same scanner on caller-supplied bounds: counts intact sentinel words
  * upward from @p bottom and stops at the first overwritten one -- the deepest

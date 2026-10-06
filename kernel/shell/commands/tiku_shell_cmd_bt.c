@@ -7,7 +7,8 @@
  *
  * tiku_shell_cmd_bt.c - "bt" command implementation.
  *
- * Glue to the public Bluetooth API; no driver state lives in shell code.
+ * Calls the public Bluetooth API (tiku_bt.h); an ESP32-C61 build also calls
+ * the BLE driver for status and power.  The command keeps no driver state.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -15,6 +16,9 @@
 #include "tiku_shell_cmd_bt.h"
 #include <kernel/shell/tiku_shell.h>
 #include <interfaces/bluetooth/tiku_bt.h>
+#if TIKU_DRV_BLE_ESP_ENABLE
+#include <drivers/wifi/esp/tiku_drv_ble_esp.h>
+#endif
 
 /*---------------------------------------------------------------------------*/
 
@@ -27,8 +31,9 @@ static int str_eq(const char *a, const char *b)
     return *a == 0 && *b == 0;
 }
 
-/* SHELL_PRINTF doesn't honour %02x / %04x zero-padding; emit hex
- * nibbles directly so MAC bytes + 16-bit identifiers stay aligned. */
+/**
+ * @brief Print a byte as two zero-padded hex digits.
+ */
 static void put_hex2(uint8_t b)
 {
     static const char digits[] = "0123456789abcdef";
@@ -52,7 +57,10 @@ static void put_hex4(uint16_t w)
  */
 static void bt_help(void)
 {
-    SHELL_PRINTF("bt status               CYW43 BT subsystem: MAC + version\n");
+#if TIKU_DRV_BLE_ESP_ENABLE
+    SHELL_PRINTF("bt on | off             Power the BLE controller up / down\n");
+#endif
+    SHELL_PRINTF("bt status               The radio: address + version\n");
     SHELL_PRINTF("bt advertise <name>     Start GAP advertising with local name\n");
     SHELL_PRINTF("bt advertise stop       Stop GAP advertising\n");
     SHELL_PRINTF("bt scan                 Start LE scan (clears cache)\n");
@@ -69,8 +77,11 @@ static void bt_help(void)
     SHELL_PRINTF("bt help                 this help\n");
 }
 
-/* HCI version code -> human-readable Bluetooth Core Spec name.
- * Table per Assigned Numbers / Core Spec "HCI_Version" values. */
+/**
+ * @brief Map an HCI/LMP version code to its Bluetooth Core Spec name.
+ *
+ * Values per the Assigned Numbers "HCI_Version" table.
+ */
 static const char *hci_version_name(uint8_t v)
 {
     switch (v) {
@@ -88,6 +99,8 @@ static const char *hci_version_name(uint8_t v)
     case 0x0B: return "5.2";
     case 0x0C: return "5.3";
     case 0x0D: return "5.4";
+    case 0x0E: return "6.0";
+    case 0x0F: return "6.1";
     default:   return "?";
     }
 }
@@ -111,7 +124,7 @@ static void put_name(const char *s, uint8_t n)
 }
 
 /**
- * @brief Handle "bt status": print the CYW43 BT subsystem information.
+ * @brief Handle "bt status": print what the radio under the stack reports.
  *
  * When the controller is ready, prints the BD_ADDR, HCI and LMP versions
  * (with Core Spec names), manufacturer, firmware string, and current
@@ -119,6 +132,25 @@ static void put_name(const char *s, uint8_t n)
  */
 static void bt_status(void)
 {
+#if TIKU_DRV_BLE_ESP_ENABLE
+    tiku_drv_ble_esp_status_t es;
+
+    tiku_drv_ble_esp_status(&es);
+    if (!es.up) {
+        SHELL_PRINTF("BT: off (bt on brings it up; library %s)\n",
+                     es.version);
+        return;
+    }
+    SHELL_PRINTF("Heap:     %lu of %lu bytes in use, %lu at most, %lu "
+                 "refused\n", (unsigned long)es.heap_used,
+                 (unsigned long)es.heap_size, (unsigned long)es.heap_peak,
+                 (unsigned long)es.heap_refused);
+    SHELL_PRINTF("IRQs:     %lu\n", (unsigned long)es.irqs);
+    if (es.rx_dropped != 0U) {
+        SHELL_PRINTF("Dropped:  %lu HCI packets\n",
+                     (unsigned long)es.rx_dropped);
+    }
+#endif
     if (tiku_bt_is_ready() == 0) {
         SHELL_PRINTF("BT: not ready (bring-up failed or not built in)\n");
         return;
@@ -158,6 +190,8 @@ static void bt_status(void)
                 SHELL_PRINTF(" (Broadcom)");
             else if (v.manufacturer == 0x0131U)
                 SHELL_PRINTF(" (Cypress/Infineon)");
+            else if (v.manufacturer == 0x02E5U)
+                SHELL_PRINTF(" (Espressif)");
             tiku_shell_io_putc('\n');
         }
         SHELL_PRINTF("BTFW:     %s\n", tiku_bt_fw_version());
@@ -171,6 +205,9 @@ static void bt_status(void)
 
 /*---------------------------------------------------------------------------*/
 
+/**
+ * @brief Handle "bt advertise <name>" and "bt advertise stop".
+ */
 static void bt_advertise(uint8_t argc, const char *argv[])
 {
     int rc;
@@ -191,6 +228,9 @@ static void bt_advertise(uint8_t argc, const char *argv[])
     }
 }
 
+/**
+ * @brief Handle "bt scan" (start an active scan) and "bt scan stop".
+ */
 static void bt_scan(uint8_t argc, const char *argv[])
 {
     int rc;
@@ -200,8 +240,7 @@ static void bt_scan(uint8_t argc, const char *argv[])
                      rc, tiku_bt_scan_count());
         return;
     }
-    /* Defaults: active scan, 100 ms interval, 50 ms on-window
-     * (50% duty). Roughly matches nRF Connect's default. */
+    /* Active scan, 100 ms interval, 50 ms window (50% duty). */
     rc = tiku_bt_scan_start(1U, 100U, 50U);
     if (rc == 0) {
         SHELL_PRINTF("bt: scan started (active, 100/50 ms)\n");
@@ -210,7 +249,9 @@ static void bt_scan(uint8_t argc, const char *argv[])
     }
 }
 
-/* Map LE advertising event-type code to a short label. */
+/**
+ * @brief Map an LE advertising event-type code to a short label.
+ */
 static const char *evt_type_name(uint8_t e)
 {
     switch (e) {
@@ -265,8 +306,6 @@ static void bt_connections(void)
                 put_hex2(conns[i].peer_addr[k]);
             }
         }
-        /* SHELL_PRINTF doesn't always honour %-Ns width; emit the
-         * fixed-column fields with %s then pad manually. */
         SHELL_PRINTF(" %s  ", bt_addr_type_name(conns[i].peer_addr_type));
         SHELL_PRINTF("%s   0x",
                      conns[i].role == 1U ? "peripheral" : "central   ");
@@ -277,9 +316,12 @@ static void bt_connections(void)
     }
 }
 
-/* ---- Phase 13 client-side shell helpers ---------------------------------- */
+/* ---- GATT client helpers ------------------------------------------------- */
 
-/** Parse "aa:bb:cc:dd:ee:ff" into 6 MSB-first bytes. Returns 0 on success. */
+/**
+ * @brief Parse "aa:bb:cc:dd:ee:ff" into 6 MSB-first bytes.
+ * @return 0 on success, -1 on a malformed address
+ */
 static int parse_mac(const char *s, uint8_t out[6])
 {
     uint8_t i;
@@ -304,7 +346,10 @@ static int parse_mac(const char *s, uint8_t out[6])
     return 0;
 }
 
-/** Parse a 0xNNNN or decimal NNN into uint16_t. Returns 0 on success. */
+/**
+ * @brief Parse 0x-prefixed hex or decimal @p s, at most 0xFFFF, into *out.
+ * @return 0 on success, else -1
+ */
 static int parse_u16(const char *s, uint16_t *out)
 {
     uint32_t v = 0UL;
@@ -325,7 +370,7 @@ static int parse_u16(const char *s, uint16_t *out)
     return 0;
 }
 
-/** Look up connection #N (1-based). Returns the handle or 0xFFFF on miss. */
+/** @brief Handle of connection @p slot_1based (1-based), or 0xFFFF. */
 static uint16_t conn_handle_for_slot(uint8_t slot_1based)
 {
     tiku_bt_connection_t conns[TIKU_BT_CONN_MAX];
@@ -334,8 +379,13 @@ static uint16_t conn_handle_for_slot(uint8_t slot_1based)
     return conns[slot_1based - 1U].handle;
 }
 
-/** Pick the conn handle for an optional shell arg "N" (1-based) or
- *  default to first active link. Prints + returns 0xFFFF on error. */
+/**
+ * @brief Handle of the 1-based link slot in argv[@p pos], or of the first
+ *        link when that argument is absent.
+ *
+ * @return The handle, or 0xFFFF when there is no such link; an unparsable
+ *         slot also prints a message
+ */
 static uint16_t pick_conn_handle(uint8_t argc, const char *argv[], uint8_t pos)
 {
     if (argc <= pos) {
@@ -351,6 +401,9 @@ static uint16_t pick_conn_handle(uint8_t argc, const char *argv[], uint8_t pos)
     }
 }
 
+/**
+ * @brief Handle "bt connect <slot|addr> [public]": connect as central.
+ */
 static void bt_connect_cmd(uint8_t argc, const char *argv[])
 {
     uint8_t addr[6];
@@ -363,8 +416,8 @@ static void bt_connect_cmd(uint8_t argc, const char *argv[])
     }
     /* If it looks like a MAC, parse direct; else treat as scan slot. */
     if (parse_mac(argv[2], addr) == 0) {
-        /* Default to random addr type unless the user explicitly
-         * appends ' public'. Most modern BLE devices use random. */
+        /* A BD_ADDR is taken as a random address unless "public" follows
+         * it. */
         addr_type = 1U;
         if (argc >= 4U && str_eq(argv[3], "public")) addr_type = 0U;
     } else {
@@ -398,6 +451,9 @@ static void bt_connect_cmd(uint8_t argc, const char *argv[])
     }
 }
 
+/**
+ * @brief Handle "bt discover [N]": start service discovery on link N.
+ */
 static void bt_discover_cmd(uint8_t argc, const char *argv[])
 {
     uint16_t h = pick_conn_handle(argc, argv, 2U);
@@ -411,6 +467,9 @@ static void bt_discover_cmd(uint8_t argc, const char *argv[])
                  h, rc);
 }
 
+/**
+ * @brief Handle "bt read <handle> [N]": issue an ATT Read on link N.
+ */
 static void bt_read_cmd(uint8_t argc, const char *argv[])
 {
     uint16_t attr_handle;
@@ -433,6 +492,9 @@ static void bt_read_cmd(uint8_t argc, const char *argv[])
     SHELL_PRINTF("bt: read requested (rc=%d)\n", rc);
 }
 
+/**
+ * @brief Handle "bt subscribe <cccd> [N]": enable notifications on link N.
+ */
 static void bt_subscribe_cmd(uint8_t argc, const char *argv[])
 {
     uint16_t cccd_handle;
@@ -455,6 +517,9 @@ static void bt_subscribe_cmd(uint8_t argc, const char *argv[])
     SHELL_PRINTF("bt: subscribe requested (rc=%d)\n", rc);
 }
 
+/**
+ * @brief Handle "bt disconnect [N]": tear down link N, or the first link.
+ */
 static void bt_disconnect(uint8_t argc, const char *argv[])
 {
     int rc;
@@ -491,8 +556,11 @@ static void bt_disconnect(uint8_t argc, const char *argv[])
     }
 }
 
-/* ---- Phase 14 bonding shell helpers -------------------------------------- */
+/* ---- Bonding helpers ----------------------------------------------------- */
 
+/**
+ * @brief Handle "bt bonds": list the stored LE Secure Connections bonds.
+ */
 static void bt_bonds(void)
 {
     uint8_t slot;
@@ -528,6 +596,9 @@ static void bt_bonds(void)
     }
 }
 
+/**
+ * @brief Handle "bt unpair [N]": clear bond slot N (default 0).
+ */
 static void bt_unpair_cmd(uint8_t argc, const char *argv[])
 {
     uint8_t slot = 0U;
@@ -596,6 +667,15 @@ void tiku_shell_cmd_bt(uint8_t argc, const char *argv[])
         bt_help();
         return;
     }
+#if TIKU_DRV_BLE_ESP_ENABLE
+    if (str_eq(argv[1], "on") || str_eq(argv[1], "off")) {
+        int rc = tiku_drv_ble_esp_power(str_eq(argv[1], "on") ? 1U : 0U);
+
+        SHELL_PRINTF(rc == 0 ? "BT: %s\n" : "BT: %s failed (%d)\n",
+                     argv[1], rc);
+        return;
+    }
+#endif
     if (str_eq(argv[1], "status")) {
         bt_status();
         return;

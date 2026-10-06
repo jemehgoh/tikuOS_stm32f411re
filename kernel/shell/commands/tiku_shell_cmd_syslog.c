@@ -7,8 +7,9 @@
  *
  * tiku_shell_cmd_syslog.c - "syslog" command (remote log line).
  *
- * Sends one RFC 3164 datagram over SLIP to the host.  Syslog is fire-and-forget
- * with no reply, so the command sends synchronously and needs no per-tick driver.
+ * Sends one RFC 3164 datagram to the SLIP host (.1 on the device's subnet).
+ * Syslog has no reply, so the command sends synchronously and has no
+ * per-tick driver.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -18,22 +19,24 @@
 /*---------------------------------------------------------------------------*/
 
 #include "tiku_shell_cmd_syslog.h"
-#include "tiku_shell_cmd_slip.h"                     /* tiku_shell_cmd_slip_enable */
-#include <string.h>                                  /* strcmp (net-test burst) */
+#include "tiku_shell_cmd_slip.h"                     /* slip_enable */
+#include <string.h>                                  /* strcmp (net-test) */
 #include <kernel/shell/tiku_shell.h>                 /* SHELL_PRINTF */
-#include <tikukits/net/tiku_kits_net.h>              /* TIKU_KITS_NET_IP_ADDR */
+#include <tikukits/net/tiku_kits_net.h>              /* TIKU_KITS_NET_OK */
+#include <tikukits/net/ipv4/tiku_kits_net_ipv4.h>    /* the address in use */
 #include <tikukits/net/ipv4/tiku_kits_net_udp.h>     /* udp_init */
 #include <tikukits/net/ipv4/tiku_kits_net_syslog.h>
 
-/* Bound on the assembled message; the device's UDP payload is capped well
- * below this by the syslog library anyway. */
+/* Bound on the joined message text.  The syslog kit also cuts the whole
+ * datagram to TIKU_KITS_NET_UDP_MAX_PAYLOAD (100 bytes at the default
+ * 128-byte MTU), which can leave less than this for the text. */
 #define SYSLOG_MSG_MAX  96u
 
 void
 tiku_shell_cmd_syslog(uint8_t argc, const char *argv[])
 {
     static uint8_t udp_ready;
-    static const uint8_t self[4] = TIKU_KITS_NET_IP_ADDR;
+    const uint8_t *self = tiku_kits_net_ipv4_get_addr();
     uint8_t  server[4];
     char     msg[SYSLOG_MSG_MAX];
     uint8_t  i;
@@ -45,14 +48,11 @@ tiku_shell_cmd_syslog(uint8_t argc, const char *argv[])
     }
 
 #if TIKU_SHELL_NET_TEST
-    /* Net-test affordance: `syslog @burst` replays the exact 5-message
-     * diagnostic burst the APP=net syslog process emits once at boot
-     * (tiku_kits_net_syslog_process.c): boot ok + four C-path boundary
-     * cases.  On the shell+net firmware that process does NOT autostart, so
-     * TikuBench's test_syslog_boundary.py drives it deterministically with
-     * this command -- mirroring how test_syslog_send.py triggers "boot ok".
-     * Synchronous send => each datagram is fully on the wire before the next,
-     * so the host reads all five SLIP frames in order. */
+    /* `syslog @burst` sends the five messages the APP=net syslog process
+     * (tiku_kits_net_syslog_process.c) sends at boot: "boot ok" and four
+     * clamping and truncation cases.  Each send completes before the next,
+     * so the five SLIP frames leave in order; TikuBench's
+     * test_syslog_boundary.py checks them. */
     if (argc == 2 && strcmp(argv[1], "@burst") == 0) {
         server[0] = self[0];
         server[1] = self[1];
@@ -67,18 +67,18 @@ tiku_shell_cmd_syslog(uint8_t argc, const char *argv[])
         tiku_kits_net_syslog_init();
         tiku_kits_net_syslog_set_server(server);
 
-        /* 1: happy path  ->  <134>tikuOS os: boot ok */
+        /* 1: plain message  ->  <134>tikuOS os: boot ok */
         tiku_kits_net_syslog_send(TIKU_KITS_NET_SYSLOG_SEV_INFO, "boot ok");
         /* 2: severity 255 clamps to 7/DEBUG  ->  <135>tikuOS os: sev-clamp */
         tiku_kits_net_syslog_send(255, "sev-clamp");
-        /* 3: 120 'A's truncated to the 100-byte UDP payload */
+        /* 3: 120 'A's cut to TIKU_KITS_NET_UDP_MAX_PAYLOAD (100 at MTU 128) */
         tiku_kits_net_syslog_send(TIKU_KITS_NET_SYSLOG_SEV_INFO,
             "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
             "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA");
-        /* 4: 16-char hostname truncated to 8  ->  <134>ABCDEFGH os: host-trunc */
+        /* 4: 16-char hostname cut to 8 -> <134>ABCDEFGH os: host-trunc */
         tiku_kits_net_syslog_set_hostname("ABCDEFGHIJKLMNOP");
         tiku_kits_net_syslog_send(TIKU_KITS_NET_SYSLOG_SEV_INFO, "host-trunc");
-        /* 5: 10-char tag truncated to 8  ->  <134>ABCDEFGH ZYXWVUTS: tag-trunc */
+        /* 5: 10-char tag cut to 8 -> <134>ABCDEFGH ZYXWVUTS: tag-trunc */
         tiku_kits_net_syslog_set_tag("ZYXWVUTSRQ");
         tiku_kits_net_syslog_send(TIKU_KITS_NET_SYSLOG_SEV_INFO, "tag-trunc");
 

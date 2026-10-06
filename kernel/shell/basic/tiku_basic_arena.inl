@@ -7,9 +7,9 @@
  *
  * tiku_basic_arena.inl - arena allocation for the BASIC working set.
  *
- * Not a standalone unit; included from tiku_basic.c.  Computes the footprint from
- * the configured limits, then lazily allocates every table out of the AUTO tier.
- * Each session resets and re-allocates, so the feature set costs no permanent BSS.
+ * Sizes the arena from the configured limits and reserves it from a kernel
+ * memory tier on first use; each later session resets it.  The working set
+ * held there costs no static BSS.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -18,12 +18,10 @@
 /* ARENA SIZING                                                              */
 /*---------------------------------------------------------------------------*/
 
-/* Total var-table width = 26 single-letter A..Z slots + named pool.
- * Used when sizing the arena and when walking var arrays. */
+/** Variable-table width: 26 single-letter slots A..Z plus the named pool. */
 #define BASIC_VAR_TABLE_LEN  (26u + (unsigned)TIKU_BASIC_NAMEDVAR_MAX)
 
-/* Compute the arena size the configured limits need, with a
- * small slack for word alignment between sub-allocations. */
+/* Per-feature byte counts that BASIC_ARENA_BYTES sums. */
 #if TIKU_BASIC_STRVARS_ENABLE
 #define BASIC_ARENA_STR_BYTES                                               \
     (sizeof(char *) * BASIC_VAR_TABLE_LEN +                                 \
@@ -49,11 +47,9 @@
 #define BASIC_ARENA_ARRAYS_BYTES \
     (sizeof(basic_array_t) * 26u)
 #endif
-/* Array element storage allocates from the arena lazily on DIM, so
- * the reservation is simply enough total headroom for one or two reasonably-
- * sized arrays; the exact cap depends on what else has been
- * allocated by the time DIM is invoked. Override via
- * TIKU_BASIC_ARRAY_TOTAL_LONGS to bump it. */
+/* DIM allocates element storage from the arena lazily, so the arena reserves
+ * TIKU_BASIC_ARRAY_TOTAL_LONGS longs shared by every DIMmed array.  The
+ * fallback below applies only when the config leaves it unset. */
 #ifndef TIKU_BASIC_ARRAY_TOTAL_LONGS
 #define TIKU_BASIC_ARRAY_TOTAL_LONGS 128u
 #endif
@@ -71,10 +67,15 @@
 #define BASIC_ARENA_BIGBUF_BYTES 0u
 #endif
 
+/**
+ * Arena bytes the configured limits need: the line table and its line-number
+ * index, variables, stacks, the EVERY and ON CHANGE tables, strings, DEF FN,
+ * arrays and big buffers, plus headroom for alignment between sub-allocations.
+ */
 #define BASIC_ARENA_BYTES                                                   \
     ((tiku_mem_arch_size_t)(                                                \
         sizeof(basic_line_t)       * TIKU_BASIC_PROGRAM_LINES +             \
-        sizeof(uint16_t)           * TIKU_BASIC_PROGRAM_LINES +   /* A3 line index */ \
+        sizeof(uint16_t)           * TIKU_BASIC_PROGRAM_LINES +             \
         sizeof(long)               * BASIC_VAR_TABLE_LEN +                  \
         sizeof(uint16_t)           * TIKU_BASIC_GOSUB_DEPTH +               \
         sizeof(basic_for_frame_t)  * TIKU_BASIC_FOR_DEPTH +                 \
@@ -89,43 +90,39 @@
         BASIC_ARENA_BIGBUF_BYTES +                                          \
         128u))   /* alignment headroom */
 
+#if defined(PLATFORM_ESP32C61)
+#include <arch/esp32c61/tiku_psram_arch.h>
+#define BASIC_EXTERNAL_ATTACH() ((void)tiku_esp32c61_psram_attach())
+#endif
+
 /*
- * THE ARENA MUST FIT ITS TIER POOL -- AT BUILD TIME.
+ * basic_alloc_state() requests BASIC_ARENA_BYTES in one contiguous
+ * reservation, which must not exceed its tier pool's guaranteed size; the
+ * asserts below fail the build when it does.
  *
- * basic_alloc_state() asks the AUTO tier for BASIC_ARENA_BYTES in one carve.
- * Two numbers therefore have to agree, and until v0.06 nothing compared them:
- * this figure, computed from the capacity macros below, and the tier pool size
- * the Makefile passes per MCU.  When the pool was too small the build stayed
- * completely clean and the failure appeared only when a user typed `basic` on
- * the board and got "out of memory" -- which is how
- * `MCU=nrf54l15 TIKU_THREADS_ENABLE=1` shipped with a 13.7 KB shortfall
- * (65,536 B pool against a 79,232 B request; the sizing comment beside it had
- * tallied the line table, big buffers and string heap but omitted the 16 KB
- * DIM array reserve).
- *
- * The arena is the ONLY production consumer of the tier pool -- the other
- * potential one, tiku_proc_mem, has no callers outside its own module -- so
- * these asserts are exact today, not merely necessary.  If a second consumer
- * ever appears, the pool has to cover both and this becomes a lower bound.
- *
- * Which pool applies follows AUTO's resolution order (HIFRAM -> SRAM -> NVM,
- * kernel/memory/tiku_tier.c): on MSP430 the request clears the 1 KB HIFRAM
- * threshold and lands in the upper FRAM bank; on the ARM parts no HIFRAM tier
- * exists, so it lands in SRAM.  AUTO's third option, NVM, is deliberately
- * refused in basic_alloc_state() -- the arena is rewritten on every statement
- * and a store into MRAM or QSPI flash would fault -- so it is never a
- * legitimate home and is not asserted against.  Host builds have no
- * meaningful pool and are left alone.
+ * The checks set a capacity floor, not the space free at run time: other
+ * allocations share the same backing.  The request keeps AUTO's HIFRAM/SRAM
+ * preference and never selects protected NVM; only TIKU_BASIC_ARENA_EXTERNAL
+ * builds admit external memory.  On MSP430 large-model builds the arena is
+ * past the HIFRAM threshold and lands in HIFRAM; elsewhere it uses SRAM, or
+ * the external memory where that is admitted and SRAM is short.  Host builds
+ * have no linker-derived capacity and are not checked.
  */
-#if defined(PLATFORM_MSP430)
+#if defined(TIKU_BASIC_ARENA_EXTERNAL)
+/* External memory holds the arena, so the SRAM floor does not bound it; the
+ * smallest PSRAM the part ships with does. */
+_Static_assert(BASIC_ARENA_BYTES <= TIKU_BASIC_ARENA_EXTERNAL_MIN,
+               "BASIC arena does not fit the smallest external memory -- "
+               "lower TIKU_BASIC_PROGRAM_LINES");
+#elif defined(PLATFORM_MSP430)
 _Static_assert(BASIC_ARENA_BYTES <= TIKU_TIER_HIFRAM_SIZE,
                "BASIC arena does not fit the HIFRAM tier pool -- raise "
                "TIKU_TIER_HIFRAM_SIZE or lower TIKU_BASIC_PROGRAM_LINES");
 #elif defined(TIKU_TIER_SRAM_DERIVED)
-/* The SRAM tier is linker-derived on the ARM parts, so there is no
- * compile-time size to compare against; the floor stands in for it.  The
- * same make-line figure travels to the linker as --defsym=__tier_sram_floor,
- * where the carve fragment asserts the span against it. */
+/* The SRAM tier is linker-derived here, so there is no compile-time size to
+ * compare against; the floor stands in for it.  The same make-line figure
+ * travels to the linker as --defsym=__tier_sram_floor, where the carve
+ * fragment asserts the span against it. */
 _Static_assert(BASIC_ARENA_BYTES <= TIKU_TIER_SRAM_MIN,
                "BASIC arena does not fit the SRAM tier floor -- raise "
                "TIKU_TIER_SRAM_MIN for this MCU in the Makefile, or lower "
@@ -140,12 +137,12 @@ _Static_assert(BASIC_ARENA_BYTES <= TIKU_TIER_SRAM_MIN,
  * @brief Reset the BASIC variable namespace to its just-entered state.
  *
  * Clears every user-visible binding -- scalars, strings and their heap, arrays,
- * DEF FN -- and rewinds the arena to basic_arena_mark so DIMmed element storage
- * is reclaimed.  The program line table is deliberately left alone.
+ * DEF FN, CONST flags -- and rewinds the arena to basic_arena_mark, freeing
+ * DIMmed element storage.  The program line table is left alone.
  *
- * @note Shared by basic_alloc_state(), NEW, RUN and LOAD so all four agree on
- *       what "fresh variables" means, and so re-DIMming across runs does not
- *       trip "array already DIMmed".
+ * @note Called by basic_alloc_state(), NEW, RUN, LOAD and the checkpoint
+ *       restore; without it a second RUN of a program that DIMs A fails
+ *       with "array A already DIMmed".
  */
 static void
 basic_clear_vars(void)
@@ -157,14 +154,14 @@ basic_clear_vars(void)
     basic_arena.offset = basic_arena_mark;
 
 #if TIKU_BASIC_SUBS_ENABLE
-    basic_sub_result = 0;                    /* SUB return register (F3) */
+    basic_sub_result = 0;                    /* SUB return register */
 #endif
-    basic_named_mru[0] = -1;                 /* named-slot MRU (A3 #3) */
+    basic_named_mru[0] = -1;                 /* named-slot MRU */
     basic_named_mru[1] = -1;
     for (i = 0; i < BASIC_VAR_TABLE_LEN; i++) basic_vars[i] = 0;
     for (i = 0; i < TIKU_BASIC_NAMEDVAR_MAX; i++) {
         basic_namedvar_names[i][0] = '\0';
-        basic_namedvar_const[i]    = 0;      /* CONST read-only flags (F4) */
+        basic_namedvar_const[i]    = 0;      /* CONST read-only flags */
     }
 #if TIKU_BASIC_STRVARS_ENABLE
     for (i = 0; i < BASIC_VAR_TABLE_LEN; i++) basic_strvars[i] = NULL;
@@ -201,9 +198,9 @@ basic_clear_vars(void)
  * @brief Allocate (or reset) the BASIC working-set arena and bind
  *        each sub-region to its global pointer.
  *
- * On FR5994 with MEMORY_MODEL=large the AUTO-tier request routes to
- * HIFRAM (the threshold is 1 KB); on smaller parts it falls back to
- * SRAM.
+ * The first call creates the arena from the AUTO tier: HIFRAM on MSP430
+ * large-model builds, SRAM elsewhere, or external memory when SRAM is short on
+ * a TIKU_BASIC_ARENA_EXTERNAL build.  Later calls reset it.
  *
  * @return 0 on success, -1 on allocation failure.
  */
@@ -216,38 +213,50 @@ basic_alloc_state(void)
         (void)tiku_arena_reset(&basic_arena);
     } else {
         (void)tiku_tier_init();
-        if (tiku_tier_arena_create(&basic_arena, TIKU_MEM_AUTO,
-                                    BASIC_ARENA_BYTES, 0xBAu)
+#if BASIC_RECLAIM_ENABLE || defined(TIKU_BASIC_ARENA_EXTERNAL)
+        tiku_mem_request_t options = {0};
+#if defined(TIKU_BASIC_ARENA_EXTERNAL)
+        /* SRAM first if the arena fits there, the external memory if not. */
+        BASIC_EXTERNAL_ATTACH();
+        options.flags = TIKU_MEM_ALLOW_EXTERNAL;
+#endif
+#if BASIC_RECLAIM_ENABLE
+        if (basic_reclaim_register() != 0) return -1;
+        options.owner = basic_reclaim_owner;
+        options.owner_slot = 1;
+#endif
+        if (tiku_mem_arena_create(&basic_arena, BASIC_ARENA_BYTES, &options)
+#else
+        if (tiku_mem_arena_create(&basic_arena, BASIC_ARENA_BYTES, NULL)
+#endif
             != TIKU_MEM_OK) {
             return -1;
         }
         basic_arena_ready = 1;
     }
 
-    /* Attach the arena to the owning (shell) process so ps and
-     * /proc/<pid>/sram_used report BASIC's real footprint -- measured
-     * from the bump pointer, not self-declared.  Idempotent. */
+    /* Attach the arena to the owning (shell) process: ps and
+     * /proc/<pid>/sram_used report its bump-pointer usage.  Attaching again
+     * is a no-op. */
     {
         struct tiku_process *self = TIKU_THIS();
+#if BASIC_RECLAIM_ENABLE
+        if (self) basic_reclaim_process = self;
+        self = basic_reclaim_process;
+#endif
         if (self != NULL) {
             tiku_process_attach_mem_arena(self, &basic_arena);
         }
     }
 
-    /* The arena is BASIC's hot working set -- the line table, variables and
-     * stacks are written on every statement.  It MUST be byte-writable RAM.
-     * If AUTO fell back to the NVM tier (because the SRAM tier was too small
-     * for BASIC_ARENA_BYTES), refuse here: on parts whose NVM is program-op
-     * (RP2350 QSPI flash, Ambiq MRAM) the first store would hard-fault and
-     * wedge the board at `basic` entry instead of failing cleanly.  The fix
-     * is to raise TIKU_TIER_SRAM_MIN for the part (see the Makefile). */
+    /* Working requests exclude NVM; refuse an arena that landed there. */
     if (basic_arena.tier == TIKU_MEM_NVM) {
         return -1;
     }
 
     prog = (basic_line_t *)tiku_arena_alloc(&basic_arena,
         (tiku_mem_arch_size_t)(sizeof(basic_line_t) * TIKU_BASIC_PROGRAM_LINES));
-    basic_line_order = (uint16_t *)tiku_arena_alloc(&basic_arena,   /* A3 */
+    basic_line_order = (uint16_t *)tiku_arena_alloc(&basic_arena,
         (tiku_mem_arch_size_t)(sizeof(uint16_t) * TIKU_BASIC_PROGRAM_LINES));
     basic_vars = (long *)tiku_arena_alloc(&basic_arena,
         (tiku_mem_arch_size_t)(sizeof(long) * BASIC_VAR_TABLE_LEN));
@@ -329,11 +338,19 @@ basic_alloc_state(void)
     basic_arena_mark = basic_arena.offset;
 
     /* Arena reset doesn't zero memory, so initialise explicitly: clear the
-     * line table here, then reset every variable via the shared helper (which
-     * also rewinds to the mark just captured -- a no-op on this first pass). */
+     * line table here, then reset every variable via the shared helper (its
+     * rewind to the mark just captured is a no-op here). */
     for (i = 0; i < TIKU_BASIC_PROGRAM_LINES; i++) prog[i].number = 0;
-    basic_line_index_ok = 0;                  /* A3: line index not built yet */
-    basic_symreg_ok     = 0;                  /* A3 #2: SUB/label registry too */
+#if BASIC_RECLAIM_ENABLE
+    /* The reclaim eligibility check reads these tables, possibly at the
+     * prompt before the first RUN. */
+    for (i = 0; i < TIKU_BASIC_EVERY_MAX; i++)
+        memset(&basic_everys[i], 0, sizeof basic_everys[i]);
+    for (i = 0; i < TIKU_BASIC_ONCHG_MAX; i++)
+        memset(&basic_onchgs[i], 0, sizeof basic_onchgs[i]);
+#endif
+    basic_line_index_ok = 0;                  /* line index needs a build */
+    basic_symreg_ok     = 0;                  /* nor the SUB/label registry */
     basic_clear_vars();
     return 0;
 }

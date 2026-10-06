@@ -7,9 +7,9 @@
  *
  * tiku_vfs_tree_watch.c - /sys/watch and /sys/vfs VFS nodes.
  *
- * The namespace observing itself: watch-table occupancy and per-slot contents,
- * plus tree node count and depth.  This is the diagnostic for subscription leaks.
- * Reads cost a table scan or a tree walk, both cold human-triggered paths.
+ * Watch-table occupancy and per-slot contents, plus node count, depth,
+ * manifest, change ring and read-cache counters.  Reading /sys/vfs/events
+ * drains the ring.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -31,9 +31,9 @@
 /**
  * @brief Read handler for /sys/watch/used.
  *
- * Renders the number of occupied watch slots as a decimal line.
- * The cheap leak detector: on an idle device this should return to
- * its baseline after every watch/rule teardown.
+ * Renders the number of occupied watch slots as a decimal line.  A count
+ * that stays above its idle baseline after every watch and rule is torn
+ * down means a subscription was never released.
  *
  * @param buf  Output buffer
  * @param max  Buffer capacity
@@ -71,8 +71,8 @@ watch_free_read(char *buf, size_t max)
  * @brief Render one watch slot.
  *
  * A used slot becomes "<absolute-path> <process-name>", e.g. "/dev/led0 shell";
- * a free slot becomes "free".  The path is recovered by tiku_vfs_path_of(), and
- * the deepest stock path plus a short name fits the 64-byte read buffer.
+ * a free slot becomes "free".  tiku_vfs_path_of() recovers the path into a
+ * TIKU_VFS_PATH_MAX buffer.
  *
  * @param i    Watch slot index
  * @param buf  Output buffer
@@ -94,9 +94,7 @@ watch_slot_read(uint8_t i, char *buf, size_t max)
     who = (proc != NULL && proc->name != NULL) ? proc->name : "?";
 
     if (tiku_vfs_path_of(node, path, sizeof(path)) < 0) {
-        /* Node not located in the tree (should not happen for a
-         * live slot) — fall back to its leaf name so the slot stays
-         * legible rather than blank. */
+        /* A node the tree walk does not find is shown by its own name. */
         return snprintf(buf, max, "%s %s\n", node->name, who);
     }
 
@@ -104,11 +102,9 @@ watch_slot_read(uint8_t i, char *buf, size_t max)
 }
 
 /*
- * Per-slot read handlers.  Each binds its slot index the way the
- * /proc per-pid handlers do (tiku_proc_vfs.c): a macro emits one
- * thin forwarder per slot.  Written for the default eight-slot
- * table; the assert below fires if TIKU_VFS_WATCH_MAX changes so
- * this list and the children table are extended in lockstep.
+ * Per-slot read handlers: the macro emits one forwarder per slot index.  The
+ * list covers eight slots, and the assert below fails the build when
+ * TIKU_VFS_WATCH_MAX is not 8.
  */
 #define WATCH_SLOT(idx)                                          \
     static int watch_slot_##idx##_read(char *buf, size_t max)   \
@@ -163,9 +159,8 @@ vfs_depth_read(char *buf, size_t max)
 /**
  * @brief Read handler for /sys/vfs/manifest.
  *
- * Dumps the whole static namespace as a machine-readable, tab-separated table
- * (see tiku_vfs_manifest()) so an agent discovers every node -- path, type,
- * perms, and type descriptor -- in a single read.
+ * Renders tiku_vfs_manifest(): one tab-separated line per node, boot mounts
+ * included, giving path, type, perms, descriptor, capability and id.
  *
  * @param buf  Output buffer
  * @param max  Buffer capacity
@@ -181,11 +176,11 @@ vfs_manifest_read(char *buf, size_t max)
 /* /sys/vfs/cache/{used,hits,misses} — freshness-cache observability         */
 /*---------------------------------------------------------------------------*/
 /*
- * The read-coalescing cache (kernel/vfs/tiku_vfs_cache.c) renders its
- * effectiveness here: a rising hit:miss ratio is the energy win made
- * visible (each hit is one ADC/bus access avoided).
+ * Counters of the read-coalescing cache (kernel/vfs/tiku_vfs_cache.c).  A hit
+ * is a read served without calling the node's handler.
  */
 
+/** @brief Read handler for /sys/vfs/cache/used: occupied cache slots. */
 static int
 vfs_cache_used_read(char *buf, size_t max)
 {
@@ -197,8 +192,7 @@ vfs_cache_used_read(char *buf, size_t max)
 /**
  * @brief Read handler for /sys/vfs/cache/hits.
  *
- * Renders the read-coalescing cache's cumulative hit count (each hit is
- * one sensor/bus access avoided).
+ * Renders the read-coalescing cache's cumulative hit count.
  *
  * @param buf  Output buffer
  * @param max  Capacity of @p buf
@@ -215,8 +209,8 @@ vfs_cache_hits_read(char *buf, size_t max)
 /**
  * @brief Read handler for /sys/vfs/cache/misses.
  *
- * Renders the read-coalescing cache's cumulative miss count (each miss
- * is a fresh sensor/bus access).
+ * Renders the read-coalescing cache's cumulative miss count: reads of a
+ * cacheable node that called its handler.
  *
  * @param buf  Output buffer
  * @param max  Capacity of @p buf
@@ -228,6 +222,61 @@ vfs_cache_misses_read(char *buf, size_t max)
     uint32_t misses = 0;
     tiku_vfs_cache_stats(NULL, &misses, NULL);
     return snprintf(buf, max, "%lu\n", (unsigned long)misses);
+}
+
+/*---------------------------------------------------------------------------*/
+/* /sys/vfs/events — what changed, drained by reading                        */
+/*---------------------------------------------------------------------------*/
+/*
+ * The change ring rendered as text; reading the node drains the ring.  One
+ * tab-separated record per line: <op> <id> <seq>, where id is the node's
+ * manifest id.  A trailing "# <n> drained, <m> dropped" line gives the
+ * records dropped to a full ring since boot; a rise in <m> between two reads
+ * means records were lost between them.
+ */
+
+/** Op names, indexed by tiku_vfs_op_t. */
+static const char *const vfs_op_names[] = {
+    "changed", "created", "removed", "moved"
+};
+
+/** @brief Read handler for /sys/vfs/events: drains the change ring. */
+static int
+vfs_events_read(char *buf, size_t max)
+{
+    tiku_vfs_change_t rec[TIKU_VFS_EVENTS_MAX];
+    uint8_t n, i;
+    int off = 0;
+
+    n = tiku_vfs_events_take(rec, (uint8_t)(sizeof rec / sizeof rec[0]));
+    for (i = 0; i < n; i++) {
+        const char *op = (rec[i].op < (sizeof vfs_op_names /
+                                       sizeof vfs_op_names[0]))
+                             ? vfs_op_names[rec[i].op] : "?";
+
+        off += snprintf(buf + off, (off < (int)max) ? max - (size_t)off : 0u,
+                        "%s\t%08lx\t%u\n", op,
+                        (unsigned long)tiku_vfs_node_id(rec[i].node),
+                        (unsigned)rec[i].seq);
+    }
+    off += snprintf(buf + off, (off < (int)max) ? max - (size_t)off : 0u,
+                    "# %u drained, %u dropped\n", (unsigned)n,
+                    (unsigned)tiku_vfs_events_dropped());
+    return off;
+}
+
+/** @brief Read handler for /sys/vfs/events_pending — how many are waiting. */
+static int
+vfs_events_pending_read(char *buf, size_t max)
+{
+    return snprintf(buf, max, "%u\n", (unsigned)tiku_vfs_events_pending());
+}
+
+/** @brief Read handler for /sys/vfs/events_dropped. */
+static int
+vfs_events_dropped_read(char *buf, size_t max)
+{
+    return snprintf(buf, max, "%u\n", (unsigned)tiku_vfs_events_dropped());
 }
 
 /*---------------------------------------------------------------------------*/
@@ -264,23 +313,23 @@ _Static_assert(sizeof(tiku_vfs_tree_watch_children) /
                == TIKU_VFS_TREE_WATCH_NCHILD,
                "TIKU_VFS_TREE_WATCH_NCHILD out of sync");
 
-/**
- * /sys/vfs directory table.  Exported for tiku_vfs_tree_sys.c; the
- * entry count travels as TIKU_VFS_TREE_VFS_NCHILD.
- */
 /*
- * Manifest schema version -- bump when the manifest LINE FORMAT changes so an
- * external agent consuming /sys/vfs/manifest can pin or adapt instead of
- * silently mis-parsing.  rev 2 = the five-column form (path type perms meta
- * cap); rev 1 was the pre-capability four-column form.
+ * Manifest line-format version, raised whenever the line format of
+ * tiku_vfs_manifest() changes.  Rev 4 is the six-column form (path type perms
+ * meta cap id) whose typed meta ends in ";read=<policy>", then ";secret" for
+ * a secret node.
  */
-#define TIKU_VFS_MANIFEST_REV  2u
+#define TIKU_VFS_MANIFEST_REV  4u
+
+/* Reading /sys/vfs/events drains the change ring. */
+static const tiku_vfs_desc_t desc_events = TIKU_VFS_DESC_FLAGS(
+    TIKU_VFS_T_STR, TIKU_VFS_U_NONE, TIKU_VFS_FRESH_CACHED, TIKU_VFS_E_FREE,
+    TIKU_VFS_DF_READ_CONSUMES);
 
 /**
  * @brief Read handler for /sys/vfs/manifest_rev.
  *
- * Renders the manifest schema version (TIKU_VFS_MANIFEST_REV) so an
- * agent consuming /sys/vfs/manifest can pin or adapt to the line format.
+ * Renders the manifest line-format version, TIKU_VFS_MANIFEST_REV.
  *
  * @param buf  Output buffer
  * @param max  Capacity of @p buf
@@ -291,11 +340,21 @@ static int vfs_manifest_rev_read(char *buf, size_t max)
     return snprintf(buf, max, "%u\n", (unsigned)TIKU_VFS_MANIFEST_REV);
 }
 
+/**
+ * /sys/vfs directory table.  Exported for tiku_vfs_tree_sys.c; the
+ * entry count travels as TIKU_VFS_TREE_VFS_NCHILD.
+ */
 const tiku_vfs_node_t tiku_vfs_tree_vfs_children[] = {
     { "nodes",        TIKU_VFS_FILE, vfs_nodes_read,        NULL, NULL, 0 },
     { "depth",        TIKU_VFS_FILE, vfs_depth_read,        NULL, NULL, 0 },
     { "manifest",     TIKU_VFS_FILE, vfs_manifest_read,     NULL, NULL, 0 },
     { "manifest_rev", TIKU_VFS_FILE, vfs_manifest_rev_read, NULL, NULL, 0 },
+    { "events",       TIKU_VFS_FILE, vfs_events_read,       NULL, NULL, 0,
+      &desc_events },
+    { "events_pending", TIKU_VFS_FILE, vfs_events_pending_read,
+      NULL, NULL, 0 },
+    { "events_dropped", TIKU_VFS_FILE, vfs_events_dropped_read,
+      NULL, NULL, 0 },
     { "cache",        TIKU_VFS_DIR,  NULL, NULL, vfs_cache_children,
       sizeof(vfs_cache_children) / sizeof(vfs_cache_children[0]) },
 };

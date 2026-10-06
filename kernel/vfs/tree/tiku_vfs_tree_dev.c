@@ -9,7 +9,7 @@
  *
  * Hardware-facing nodes: board LEDs, console, null, zero, and the small static
  * subtrees for uart, adc, i2c and spi.  LED nodes keep an SRAM shadow because
- * PxOUT cannot be read back uniformly; everything else queries its driver live.
+ * an output pin cannot be read back uniformly; the rest query their drivers.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -20,9 +20,10 @@
 
 #include "tiku_vfs_tree_dev.h"
 #include "tiku_vfs_tree_gpio.h"
+#include "tiku_vfs_tree_sensor.h"
 #include "tiku.h"
 #include <kernel/cpu/tiku_common.h>
-#include <kernel/timers/tiku_clock.h>   /* TIKU_CLOCK_SECOND for cache windows */
+#include <kernel/timers/tiku_clock.h>   /* TIKU_CLOCK_SECOND */
 #include <interfaces/led/tiku_led.h>
 #include <interfaces/adc/tiku_adc.h>
 #include <interfaces/bus/tiku_i2c_bus.h>
@@ -40,8 +41,8 @@
 /*
  * Shadow of each LED's logical state (1 = lit), maintained by the write
  * handlers and cleared in tiku_vfs_tree_dev_init().  Reads serve the mirror
- * because board wiring (active-high vs active-low) makes a raw PxOUT read
- * ambiguous; direct tiku_led_*() calls therefore go unnoticed here.
+ * because board wiring (active-high vs active-low) makes a raw output-register
+ * read ambiguous; direct tiku_led_*() calls therefore go unnoticed here.
  */
 static uint8_t led_state[TIKU_BOARD_LED_COUNT];
 
@@ -49,8 +50,8 @@ static uint8_t led_state[TIKU_BOARD_LED_COUNT];
  * @brief Generate the read/write handler pair for LED index N.
  *
  * Read renders the shadow state as "0\n" or "1\n".  Write decodes the first
- * payload byte -- '1' on, '0' off, 't' toggle, anything else ignored so
- * trailing shell whitespace is harmless -- updating hardware and shadow together.
+ * payload byte -- '1' on, '0' off, 't' toggle, anything else ignored -- and
+ * updates hardware and shadow together.
  */
 #define LED_VFS_FUNCS(N)                                                      \
 static int                                                                    \
@@ -76,7 +77,6 @@ led##N##_write(const char *buf, size_t len)                                   \
     return 0;                                                                 \
 }
 
-/* Generate read/write function pairs for each board LED */
 LED_VFS_FUNCS(0)
 #if TIKU_BOARD_LED_COUNT >= 2
 LED_VFS_FUNCS(1)
@@ -97,8 +97,7 @@ LED_VFS_FUNCS(3)
  * @brief Read handler for /dev/uart/overruns.
  *
  * Renders the count of RX bytes dropped because the ring buffer was full.  A
- * growing value means the consumer is not draining fast enough for the line
- * rate -- the first thing to check when pasted text arrives mangled.
+ * rising count means the consumer drains slower than the line delivers.
  *
  * @param buf  Output buffer for the rendered text
  * @param max  Capacity of @p buf in bytes
@@ -115,9 +114,8 @@ uart_overruns_read(char *buf, size_t max)
 /**
  * @brief Read handler for /dev/uart/recoveries (nRF54L only).
  *
- * Counts RX-engine wedge self-heals since boot: a lost DMA re-arm silences RX,
- * and the driver detects the captured-but-unmoved-byte signature and repairs
- * it in place.
+ * Renders the RX-engine recoveries since boot: a lost DMA re-arm silences RX,
+ * and the driver, finding a byte captured but never moved, re-arms in place.
  */
 static int
 uart_recoveries_read(char *buf, size_t max)
@@ -131,8 +129,7 @@ uart_recoveries_read(char *buf, size_t max)
  * @brief Read handler for /dev/uart/baud.
  *
  * Renders the board header's configured baud rate as a decimal line ("9600\n"
- * on MSP430 boards, "115200\n" on RP2350) -- a build-time constant, useful to a
- * host script confirming it opened the port at the right speed.
+ * on MSP430 boards, "115200\n" on RP2350), a build-time constant.
  *
  * @param buf  Output buffer for the rendered text
  * @param max  Capacity of @p buf in bytes
@@ -184,9 +181,9 @@ spi_config_read(char *buf, size_t max)
 /**
  * @brief Read handler for /dev/adc/temp.
  *
- * Triggers a conversion on the internal temperature channel and renders the RAW
- * ADC count ("2789\n"), or "err\n" on failure.  Degrees are left to the
- * consumer, which needs the per-device TLV calibration constants.
+ * Triggers a conversion on the internal temperature channel and renders the
+ * raw ADC count ("2789\n"), or "err\n" on failure.  Degrees are left to the
+ * consumer, which needs the per-device calibration constants (TLV on MSP430).
  *
  * @param buf  Output buffer for the rendered text
  * @param max  Capacity of @p buf in bytes
@@ -208,7 +205,7 @@ adc_temp_read(char *buf, size_t max)
  *
  * Same contract as adc_temp_read() but on the supply-voltage
  * channel (internally divided VCC on MSP430): raw count or
- * "err\n".  Useful for crude battery gauging on coin-cell boards.
+ * "err\n".
  *
  * @param buf  Output buffer for the rendered text
  * @param max  Capacity of @p buf in bytes
@@ -230,11 +227,11 @@ adc_battery_read(char *buf, size_t max)
 /*---------------------------------------------------------------------------*/
 
 /**
- * @brief Read handler for /dev/i2c/scan -- an ACTIVE prober.
+ * @brief Read handler for /dev/i2c/scan; each read probes the bus.
  *
  * Reading probes 7-bit addresses 0x08..0x77 with a zero-length write and
- * renders the responders as "0x18 0x48\n", or "none\n".  112 transactions of
- * bus time, so it is a debugging aid rather than something to poll.
+ * renders the responders as "0x18 0x48\n", or "none\n".  Each read costs 112
+ * bus transactions.
  *
  * @param buf  Output buffer for the rendered text
  * @param max  Capacity of @p buf in bytes
@@ -275,7 +272,7 @@ i2c_scan_read(char *buf, size_t max)
  * @brief Read handler for /dev/console — drain pending UART RX.
  *
  * Non-blocking: copies only the bytes already waiting and returns their count,
- * 0 when idle.  Raw bytes with no newline appended, unlike every other node.
+ * 0 when idle.  Raw bytes with no newline appended.
  * The shell consumes the same UART, so reading it mid-session steals bytes.
  *
  * @param buf  Output buffer for the drained bytes
@@ -324,8 +321,7 @@ console_write(const char *buf, size_t len)
 /**
  * @brief Read handler for /dev/null — always empty.
  *
- * Returns 0 bytes, matching the Unix namesake: reading null gives
- * instant EOF.
+ * Returns 0 bytes.
  *
  * @param buf  Unused
  * @param max  Unused
@@ -342,9 +338,7 @@ devnull_read(char *buf, size_t max)
 /**
  * @brief Write handler for /dev/null — discard everything.
  *
- * Accepts and ignores any payload.  Gives scripts a portable
- * "throw this away" target and exercises the write path in tests
- * without side effects.
+ * Accepts and ignores any payload.
  *
  * @param buf  Ignored
  * @param len  Ignored
@@ -365,8 +359,8 @@ devnull_write(const char *buf, size_t len)
 /**
  * @brief Read handler for /dev/zero — fill with NUL bytes.
  *
- * Fills the buffer with zeros and returns @p max.  Programmatic consumers use
- * the return value; `read /dev/zero` shows an empty string, as on Unix.
+ * Fills the buffer with zeros and returns @p max; printed as a string, the
+ * result is empty.
  *
  * @param buf  Output buffer, fully zeroed on return
  * @param max  Capacity of @p buf in bytes
@@ -386,7 +380,19 @@ devzero_read(char *buf, size_t max)
 /* NODE TABLES                                                               */
 /*---------------------------------------------------------------------------*/
 
-/* Type descriptors (const, FRAM) for the typed /dev nodes below. */
+/* Type descriptors for the typed /dev nodes below.  A bus scan
+ * addresses every device on the bus and a console read takes input, so
+ * neither is a passive read. */
+static const tiku_vfs_desc_t desc_scan = TIKU_VFS_DESC_FLAGS(
+    TIKU_VFS_T_STR, TIKU_VFS_U_NONE, TIKU_VFS_FRESH_LIVE, TIKU_VFS_E_BUS,
+    TIKU_VFS_DF_READ_EFFECT);
+static const tiku_vfs_desc_t desc_console = TIKU_VFS_DESC_FLAGS(
+    TIKU_VFS_T_STR, TIKU_VFS_U_NONE, TIKU_VFS_FRESH_LIVE, TIKU_VFS_E_CHEAP,
+    TIKU_VFS_DF_READ_CONSUMES);
+static const tiku_vfs_desc_t desc_bus_config = TIKU_VFS_DESC(
+    TIKU_VFS_T_STR, TIKU_VFS_U_NONE, TIKU_VFS_FRESH_CACHED, TIKU_VFS_E_FREE);
+static const tiku_vfs_desc_t desc_uart_count = TIKU_VFS_DESC(
+    TIKU_VFS_T_U32, TIKU_VFS_U_COUNT, TIKU_VFS_FRESH_CACHED, TIKU_VFS_E_FREE);
 /* 12-bit raw conversions, sampled live (each read wakes the ADC), so
  * both carry a read-coalescing window: repeated reads inside the window
  * share one conversion.  Temperature drifts slowly -> ~100 ms; supply
@@ -407,10 +413,13 @@ static const tiku_vfs_desc_t desc_led =
 
 /** /dev/uart directory table — RX health + configured baud */
 static const tiku_vfs_node_t dev_uart_children[] = {
-    { "overruns", TIKU_VFS_FILE, uart_overruns_read, NULL, NULL, 0 },
-    { "baud",     TIKU_VFS_FILE, uart_baud_read,     NULL, NULL, 0 },
+    { "overruns", TIKU_VFS_FILE, uart_overruns_read, NULL, NULL, 0,
+      &desc_uart_count },
+    { "baud",     TIKU_VFS_FILE, uart_baud_read,     NULL, NULL, 0,
+      &desc_bus_config },
 #if defined(PLATFORM_NORDIC)
-    { "recoveries", TIKU_VFS_FILE, uart_recoveries_read, NULL, NULL, 0 },
+    { "recoveries", TIKU_VFS_FILE, uart_recoveries_read, NULL, NULL, 0,
+      &desc_uart_count },
 #endif
 };
 #define DEV_UART_NCHILD \
@@ -424,21 +433,25 @@ static const tiku_vfs_node_t dev_adc_children[] = {
 
 /** /dev/i2c directory table — the live bus scanner */
 static const tiku_vfs_node_t dev_i2c_children[] = {
-    { "scan", TIKU_VFS_FILE, i2c_scan_read, NULL, NULL, 0 },
+    { "scan", TIKU_VFS_FILE, i2c_scan_read, NULL, NULL, 0, &desc_scan },
 };
 
 /** /dev/spi directory table — read-only configuration view */
 static const tiku_vfs_node_t dev_spi_children[] = {
-    { "config", TIKU_VFS_FILE, spi_config_read, NULL, NULL, 0 },
+    { "config", TIKU_VFS_FILE, spi_config_read, NULL, NULL, 0,
+      &desc_bus_config },
 };
 
 /*
  * The /dev directory table -- every hardware-facing node.  LED entries are
  * gated one by one on TIKU_BOARD_LED_COUNT so a one-LED board exposes exactly
- * /dev/led0; the gpio subtrees come from tiku_vfs_tree_gpio.c.  To add a node,
- * implement the handler above and append the entry here.
+ * /dev/led0; the gpio subtrees come from tiku_vfs_tree_gpio.c and sensors/
+ * from tiku_vfs_tree_sensor.c.  To add a node, implement the handler above
+ * and append the entry here.
  */
 static const tiku_vfs_node_t dev_children[] = {
+    { "sensors", TIKU_VFS_DIR, NULL, NULL,
+      tiku_vfs_tree_sensor_children, TIKU_VFS_TREE_SENSOR_NCHILD },
 #if TIKU_BOARD_LED_COUNT >= 1
     { "led0",     TIKU_VFS_FILE, led0_read, led0_write, NULL, 0, &desc_led, NULL, TIKU_VFS_CAP_HW },
 #endif
@@ -451,13 +464,16 @@ static const tiku_vfs_node_t dev_children[] = {
 #if TIKU_BOARD_LED_COUNT >= 4
     { "led3",     TIKU_VFS_FILE, led3_read, led3_write, NULL, 0, &desc_led, NULL, TIKU_VFS_CAP_HW },
 #endif
-    { "console",  TIKU_VFS_FILE, console_read, console_write, NULL, 0 },
+    { "console",  TIKU_VFS_FILE, console_read, console_write, NULL, 0,
+      &desc_console },
     { "null",     TIKU_VFS_FILE, devnull_read, devnull_write, NULL, 0 },
     { "zero",     TIKU_VFS_FILE, devzero_read, NULL, NULL, 0 },
     { "gpio",     TIKU_VFS_DIR,  NULL, NULL,
       tiku_vfs_tree_gpio_children,     TIKU_VFS_TREE_GPIO_NPORTS },
     { "gpio_dir", TIKU_VFS_DIR,  NULL, NULL,
       tiku_vfs_tree_gpio_dir_children, TIKU_VFS_TREE_GPIO_NPORTS },
+    { "gpio_owner", TIKU_VFS_DIR, NULL, NULL,
+      tiku_vfs_tree_gpio_owner_children, TIKU_VFS_TREE_GPIO_NPORTS },
     { "uart",     TIKU_VFS_DIR,  NULL, NULL, dev_uart_children,
       DEV_UART_NCHILD },
     { "adc",      TIKU_VFS_DIR,  NULL, NULL, dev_adc_children, 2 },
@@ -466,9 +482,8 @@ static const tiku_vfs_node_t dev_children[] = {
 };
 
 /**
- * The /dev directory node itself, fully formed with its name and a
- * sizeof-derived child count so the root assembly can copy it by
- * value (getter pattern — see tiku_vfs_tree_dev_get()).
+ * The /dev directory node, with a sizeof-derived child count;
+ * tiku_vfs_tree_dev_get() returns it for the root assembly to copy.
  */
 static const tiku_vfs_node_t dev_node = {
     "dev", TIKU_VFS_DIR, NULL, NULL, dev_children,
@@ -502,7 +517,6 @@ tiku_vfs_tree_dev_get(void)
 void
 tiku_vfs_tree_dev_init(void)
 {
-    /* Init LED hardware */
     tiku_led_init_all();
 
 #if TIKU_BOARD_LED_COUNT > 0

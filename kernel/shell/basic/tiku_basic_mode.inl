@@ -7,32 +7,32 @@
  *
  * tiku_basic_mode.inl - BASIC as a non-blocking shell-loop mode.
  *
- * The `basic` command enters the mode and returns; the shell poll loop then drives
- * it a batch of program steps per tick.  The scheduler runs between batches, so
- * other processes stay live during a RUN and no iteration cap is needed.
+ * `basic` enters the mode and returns; the shell poll loop then runs a batch of
+ * program steps per tick, and the scheduler runs between batches, so other
+ * processes keep running during a RUN.  The mode puts no cap on a run's steps.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
 
-/* Program steps executed per poll tick before yielding to the scheduler.
- * Larger = more throughput for a tight compute loop; smaller = lower latency
- * to other processes and the console.  One tick is TIKU_SHELL_POLL_TICKS of
- * the system clock, so this only bounds burst length, not wall-clock rate. */
+/**
+ * @brief Program steps run per poll tick before yielding to the scheduler.
+ *
+ * Larger favours a tight compute loop, smaller the latency of other processes
+ * and the console.
+ */
 #ifndef TIKU_BASIC_MODE_BATCH
 #define TIKU_BASIC_MODE_BATCH  64
 #endif
 
-/* Interactive line buffer for the mode's prompt editor.  File-static because
- * it must persist across shell poll ticks (protothread locals do not survive a
- * yield -- same reason the shell's own `cli` line buffer is file-scope). */
+/* Interactive line buffer for the mode's prompt editor; file-static because
+ * it persists across shell poll ticks, which protothread locals do not. */
 static char     basic_mode_line[TIKU_BASIC_LINE_MAX + 16];
 static uint16_t basic_mode_pos;
 
 /* Set when the mode exits (BYE, Ctrl-C at the prompt, or a headless program
- * ending) so the shell poll loop knows to restore ITS prompt on the same pass.
- * Consumed via tiku_basic_mode_take_exit().  A flag rather than a return value
- * because the exit can happen in feed_char (during the input drain) or in
- * mode_tick, and the shell checks once, after both. */
+ * ending); tiku_basic_mode_take_exit() consumes it and the shell poll loop
+ * restores its prompt on the same pass.  The exit happens in feed_char (during
+ * the input drain) or in mode_tick, and the shell checks once, after both. */
 static uint8_t  basic_mode_exit_pending;
 
 /*---------------------------------------------------------------------------*/
@@ -51,22 +51,17 @@ basic_mode_prompt(void)
     }
 }
 
-/** @brief Leave BASIC mode (no output).  The shell loop restores its prompt
- *  when it sees the active->inactive transition. */
+/** @brief Leave BASIC mode without output; the exit flag makes the shell
+ *  loop restore its prompt. */
 static void
 basic_mode_leave(void)
 {
     basic_run_end();
     basic_mode_on         = 0;
     basic_run_shell_mode  = 0;
-    basic_mode_exit_pending = 1;   /* shell loop restores its prompt this pass */
+    basic_mode_exit_pending = 1;   /* shell restores its prompt this pass */
 }
 
-/**
- * @brief Consume the "mode just exited" edge (shell poll-loop hook).
- * @return 1 exactly once after the mode leaves, so the shell reprints its
- *         own prompt; 0 otherwise.
- */
 int
 tiku_basic_mode_take_exit(void)
 {
@@ -101,10 +96,7 @@ basic_mode_after_program(void)
 /* LINE DISPATCH                                                              */
 /*---------------------------------------------------------------------------*/
 
-/**
- * @brief Dispatch one completed input line (AUTO-aware), mirroring the old
- *        blocking REPL's per-line handling.
- */
+/** @brief Dispatch one completed input line, numbered when AUTO is on. */
 static void
 basic_mode_dispatch(char *line)
 {
@@ -134,33 +126,116 @@ basic_mode_dispatch(char *line)
 /* SHELL-LOOP HOOKS                                                           */
 /*---------------------------------------------------------------------------*/
 
-/** @brief 1 while the shell is in BASIC mode. */
 int
 tiku_basic_mode_active(void)
 {
     return basic_mode_on ? 1 : 0;
 }
 
-/**
- * @brief Feed one console byte to the mode (called by the shell poll loop
- *        for every byte while tiku_basic_mode_active()).
- *
- * While a program runs, only Ctrl-C is meaningful (break).  At the prompt,
- * this is the line editor: printable echo, backspace, Ctrl-C (exit BASIC),
- * and CR/LF (dispatch the line).
+static void basic_mode_feed_char_inner(int ch);
+static void basic_mode_tick_inner(void);
+
+#if TIKU_SHELL_ENABLE
+/*
+ * The stream a link drives the mode from.  Everything the interpreter
+ * reads or writes goes through it while it is set, and the swap is made
+ * only around the mode's own hooks: the shell writes its own output
+ * through its own backend, in its own part of the loop, so the two are
+ * never interleaved.
  */
+static const tiku_shell_io_t *basic_stream;
+static const tiku_shell_io_t *basic_stream_under;
+
+void
+tiku_basic_mode_set_stream(const struct tiku_shell_io *io)
+{
+    basic_stream = io;
+}
+
+int
+tiku_basic_mode_streamed(void)
+{
+    return (basic_stream != (const tiku_shell_io_t *)0) ? 1 : 0;
+}
+
+
+/** @brief Put the stream in front for the length of one hook. */
+static void
+stream_take(void)
+{
+    if (basic_stream == (const tiku_shell_io_t *)0) {
+        return;
+    }
+    basic_stream_under = tiku_shell_io_get_backend();
+    if (basic_stream_under != basic_stream) {
+        tiku_shell_io_set_backend(basic_stream);
+    }
+}
+
+/** @brief Give the console back to the backend stream_take() displaced. */
+static void
+stream_give(void)
+{
+    if (basic_stream == (const tiku_shell_io_t *)0 ||
+        basic_stream_under == (const tiku_shell_io_t *)0) {
+        return;
+    }
+        tiku_shell_io_set_backend(basic_stream_under);
+    basic_stream_under = (const tiku_shell_io_t *)0;
+}
+#else
+/*
+ * Without the shell the interpreter owns the only console, so there is
+ * nothing to swap.
+ */
+void
+tiku_basic_mode_set_stream(const struct tiku_shell_io *io)
+{
+    (void)io;
+}
+
+int
+tiku_basic_mode_streamed(void)
+{
+    return 0;
+}
+
+static void stream_take(void) { }
+static void stream_give(void) { }
+#endif
+
 void
 tiku_basic_mode_feed_char(int ch)
 {
-    if (!basic_mode_on) {
+    if (!basic_mode_on || !basic_reclaim_available()) {
         return;
     }
+#if BASIC_RECLAIM_ENABLE
+    basic_reclaim_entered++;
+#endif
+    stream_take();
+    basic_mode_feed_char_inner(ch);
+    stream_give();
+#if BASIC_RECLAIM_ENABLE
+    basic_reclaim_entered--;
+#endif
+}
+
+/**
+ * @brief Handle one console byte: Ctrl-C or a paused debugger's command
+ *        while a program runs, else the prompt's line editor.
+ */
+static void
+basic_mode_feed_char_inner(int ch)
+{
 
     /* A program is executing: keystrokes are discarded except Ctrl-C, which
-     * breaks it (mirrors the old RUN-loop Ctrl-C poll).  INPUT takes over the
-     * console itself via a nested read_line, so it is not reached here. */
+     * breaks it, and a DEBUG command line while the debugger holds it paused.
+     * INPUT reads the console itself via a nested read_line, so it is not
+     * reached here. */
     if (basic_running) {
         if (ch == BASIC_CTRL_C) {
+            basic_mode_pos = 0;
             SHELL_PRINTF(SH_YELLOW "^C break at line %u" SH_RST "\n",
                          (unsigned)basic_pc);
             /* An orderly break drops the checkpoint, same as program end and
@@ -171,13 +246,33 @@ tiku_basic_mode_feed_char(int ch)
             basic_run_end();
             basic_mode_after_program();
         }
+#if TIKU_BASIC_DEBUG_ENABLE
+        else if (basic_debug_on && basic_debug_paused) {
+            if (ch == '\r' || ch == '\n') {
+                const char *p = basic_mode_line;
+                basic_mode_line[basic_mode_pos] = '\0';
+                if (basic_debug_overflow) {
+                    SHELL_PRINTF("[TDBG ERROR command-too-long]\n");
+                } else if (basic_mode_pos && match_kw(&p, "DEBUG")) {
+                    basic_debug_command(p);
+                }
+                basic_mode_pos = 0;
+                basic_debug_overflow = 0;
+            } else if (ch >= 32 && ch < 127 &&
+                       basic_mode_pos + 1 <
+                           (uint16_t)sizeof(basic_mode_line)) {
+                basic_mode_line[basic_mode_pos++] = (char)ch;
+            } else if (ch >= 32 && ch < 127) {
+                basic_debug_overflow = 1;
+            }
+        }
+#endif
         return;
     }
 
     /* At the prompt. */
     if (ch == BASIC_CTRL_C) {
-        /* Ctrl-C at the prompt exits BASIC (the old read_line returned -1,
-         * which broke the REPL loop). */
+        /* Ctrl-C at the prompt exits BASIC. */
         SHELL_PRINTF(SH_YELLOW "^C\n" SH_RST);
         basic_mode_bye();
         return;
@@ -217,19 +312,10 @@ tiku_basic_mode_feed_char(int ch)
     }
 }
 
-/**
- * @brief Notify BASIC that a watched VFS node changed.
- *
- * Called by the shell process on TIKU_EVENT_VFS.  Marks every event-armed
- * ON CHANGE slot on that node pending; the mode/RUN poll then re-reads and
- * fires it at the next statement boundary, so the GOSUB return address is right.
- *
- * @note Defined even when the feature is off, so the shell's dispatch hook
- *       always links.
- */
 void
 tiku_basic_mode_on_vfs(const void *node)
 {
+    if (!basic_reclaim_available()) return;
 #if TIKU_BASIC_ONCHG_EVENT
     int i;
     if (!basic_running) {
@@ -246,25 +332,33 @@ tiku_basic_mode_on_vfs(const void *node)
 #endif
 }
 
-/**
- * @brief Advance a running program by up to one batch of steps, then yield.
- *
- * Called once per shell poll tick.  A no-op when idle at the prompt.  When the
- * program ends (naturally, by error, or by a Ctrl-C the shell loop delivered
- * through feed_char), it drops to the prompt or leaves the mode.
- */
 void
 tiku_basic_mode_tick(void)
 {
-    int budget;
-
-    if (!basic_mode_on || !basic_running) {
+    if (!basic_mode_on || !basic_running || !basic_reclaim_available()) {
         return;
     }
+#if BASIC_RECLAIM_ENABLE
+    basic_reclaim_entered++;
+#endif
+    stream_take();
+    basic_mode_tick_inner();
+    stream_give();
+#if BASIC_RECLAIM_ENABLE
+    basic_reclaim_entered--;
+#endif
+}
+
+/** @brief One batch of the running program, through whatever is in front. */
+static void
+basic_mode_tick_inner(void)
+{
+    int budget;
+
 #if TIKU_BASIC_ONCHG_EVENT
-    /* F2 self-heal: the shell's rules engine does a wholesale unwatch_all() on
+    /* Self-heal: the shell's rules engine does a wholesale unwatch_all() on
      * re-arm, dropping the ON CHANGE subscriptions too.  Re-arm each active
-     * event slot idempotently every tick, exactly as the `watch` command does. */
+     * event slot idempotently every tick, as the `watch` command does. */
     {
         int i;
         for (i = 0; i < TIKU_BASIC_ONCHG_MAX; i++) {
@@ -275,18 +369,24 @@ tiku_basic_mode_tick(void)
     }
 #endif
     for (budget = TIKU_BASIC_MODE_BATCH; budget > 0 && basic_running; budget--) {
+        if (basic_debug_before_step()) { break; }
         if (basic_run_step() != BASIC_STEP_RUNNING) {
             basic_run_end();
             break;
         }
+#if TIKU_BASIC_DEBUG_ENABLE
+        if (basic_debug_on && basic_debug_steps > 0 && !basic_wait_pending) {
+            basic_debug_steps--;
+        }
+#endif
     }
     if (basic_running) {
-        /* F1: still running after this batch -- the yield boundary IS the
-         * natural checkpoint point.  When armed and due (cadence: every batch
-         * on FRAM-class NVM, at most one per TIKU_BASIC_CKPT_INTERVAL_S on the
-         * program-op media), snapshot the reified state so a power cut resumes
-         * from at most one batch / one interval back. */
-        if (basic_ckpt_armed && basic_ckpt_due()) {
+        /* Still running after this batch: the yield boundary is the
+         * checkpoint point.  When armed and due (every batch when
+         * TIKU_BASIC_CKPT_INTERVAL_S is 0, else at most once per interval),
+         * snapshot the reified state so a power cut resumes from at most one
+         * batch or one interval back. */
+        if (basic_ckpt_armed && basic_ckpt_due() && !basic_debug_parked()) {
             if (basic_ckpt_save() == 0) {
                 basic_ckpt_mark();
             }
@@ -306,27 +406,20 @@ tiku_basic_mode_tick(void)
 /* ENTRY POINTS                                                               */
 /*---------------------------------------------------------------------------*/
 
-/**
- * @brief Enter the interactive Tiku BASIC REPL as a non-blocking shell mode.
- *
- * Replaces the blocking tiku_basic_repl().  Allocates the arena, prints the
- * banner + first prompt, and returns immediately; the shell poll loop drives
- * the mode from there.
- */
 void
 tiku_basic_mode_enter(void)
 {
-    /* Refuse re-entry rather than interleave a second context.  Typing `basic`
-     * cannot reach here while in mode (console bytes go to feed_char, not the
-     * parser), but a scheduled job/rule -- `every 5 basic` -- dispatches through
-     * the parser in the shell tick section, so guard against it clobbering a
-     * live session's arena/program. */
+    /* Refuse re-entry.  Typing `basic` cannot reach here while in mode
+     * (console bytes go to feed_char, not the parser), but a scheduled job or
+     * rule (`every 5 basic`) dispatches through the parser in the shell tick
+     * section, and a second session would overwrite the live session's arena
+     * and program. */
     if (basic_mode_on) {
         basic_report(TIKU_BASIC_ERR_GENERAL, "BASIC already active");
         return;
     }
     if (basic_session_begin() != 0) {
-        return;                       /* OOM message already printed */
+        return;                       /* basic_session_begin() said why */
     }
     basic_mode_interactive  = 1;
     basic_mode_pos          = 0;
@@ -334,6 +427,7 @@ tiku_basic_mode_enter(void)
     basic_run_shell_mode    = 1;      /* step machine: shell loop owns Ctrl-C */
     basic_mode_exit_pending = 0;
     basic_quit              = 0;
+    basic_debug_reset();
     basic_auto_active       = 0;
 
     SHELL_PRINTF(SH_CYAN SH_BOLD "Tiku BASIC" SH_RST
@@ -342,15 +436,6 @@ tiku_basic_mode_enter(void)
     basic_mode_prompt();
 }
 
-/**
- * @brief Run the saved program headlessly as a non-blocking mode (`basic run`).
- *
- * Loads the persisted program, starts the step machine and returns; the shell
- * poll loop pumps it to completion.  Unlike the REPL there is no prompt -- the
- * program runs alongside the live shell and other processes.
- *
- * @return 0 if a program started running, -1 otherwise (message printed).
- */
 int
 tiku_basic_mode_run_saved(void)
 {
@@ -361,6 +446,7 @@ tiku_basic_mode_run_saved(void)
     if (basic_session_begin() != 0) {
         return -1;
     }
+    basic_debug_reset();              /* no console here to answer a pause */
     if (basic_load_from_persist() != 0) {
         return -1;                    /* "no saved program" already printed */
     }
@@ -377,19 +463,6 @@ tiku_basic_mode_run_saved(void)
     return 0;
 }
 
-/**
- * @brief Resume (or, first boot, start) the saved program headlessly (`basic
- *        run resume`) -- the power-failure-transparent autostart.
- *
- * Loads the persisted program, then continues it mid-loop from the durable
- * checkpoint; with none (a clean first boot, or an orderly end) it starts
- * fresh.
- *
- * @note That resume-or-fresh behaviour is exactly what an autostart wants: it
- *       boots straight into the program on first power-up and, after a power
- *       cut mid-run, picks it back up where it left off.
- * @return 0 if a program is running (resumed or fresh), -1 otherwise.
- */
 int
 tiku_basic_mode_resume_saved(void)
 {
@@ -400,6 +473,7 @@ tiku_basic_mode_resume_saved(void)
     if (basic_session_begin() != 0) {
         return -1;
     }
+    basic_debug_reset();              /* no console here to answer a pause */
     if (basic_load_from_persist() != 0) {
         return -1;                    /* "no saved program" already printed */
     }

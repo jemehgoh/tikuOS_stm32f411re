@@ -7,9 +7,9 @@
  *
  * tiku_led.h - platform-independent LED interface.
  *
- * An indexed LED API sized by the board header's TIKU_BOARD_LED_COUNT.  Indices
- * are zero-based: LED 0 maps to TIKU_BOARD_LED1_*, LED 1 to TIKU_BOARD_LED2_*,
- * and so on.
+ * An indexed LED API sized by the board header's TIKU_BOARD_LED_COUNT.
+ * Indices are zero-based: LED 0 maps to TIKU_BOARD_LED1_*, LED 1 to
+ * TIKU_BOARD_LED2_*, and so on, up to four LEDs.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -29,6 +29,7 @@
 /*---------------------------------------------------------------------------*/
 
 #ifndef TIKU_BOARD_LED_COUNT
+/** @brief LEDs on the board; 0 when the board header sets none. */
 #define TIKU_BOARD_LED_COUNT    0
 #endif
 
@@ -44,25 +45,26 @@ uint8_t tiku_led_count(void);
 
 /**
  * @brief Initialize LED hardware for the given index.
- * @param idx Zero-based LED index (0 .. TIKU_BOARD_LED_COUNT-1).
+ * @param idx Zero-based LED index (0 .. TIKU_BOARD_LED_COUNT-1); an index
+ *            with no LED does nothing.
  */
 void tiku_led_init(uint8_t idx);
 
 /**
  * @brief Turn on the LED at the given index.
- * @param idx Zero-based LED index.
+ * @param idx Zero-based LED index; an index with no LED does nothing.
  */
 void tiku_led_on(uint8_t idx);
 
 /**
  * @brief Turn off the LED at the given index.
- * @param idx Zero-based LED index.
+ * @param idx Zero-based LED index; an index with no LED does nothing.
  */
 void tiku_led_off(uint8_t idx);
 
 /**
  * @brief Toggle the LED at the given index.
- * @param idx Zero-based LED index.
+ * @param idx Zero-based LED index; an index with no LED does nothing.
  */
 void tiku_led_toggle(uint8_t idx);
 

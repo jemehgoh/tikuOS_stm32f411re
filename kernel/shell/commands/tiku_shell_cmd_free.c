@@ -7,9 +7,8 @@
  *
  * tiku_shell_cmd_free.c - "free" command implementation
  *
- * Displays system memory usage: SRAM and non-volatile totals with
- * per-process breakdown from the process registry's
- * sram_used / fram_used fields.
+ * Displays memory usage: SRAM and non-volatile totals, the tier pools, and a
+ * per-process breakdown (declared footprint plus live allocations).
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -24,10 +23,9 @@
 #include <kernel/memory/tiku_mem.h>
 #include "tiku.h"
 #include <stdint.h>
-/* Unconditional: this header carries the TIKU_DEVICE_NVM_LABEL and
- * TIKU_DEVICE_RAM_USABLE fallbacks that every memory report needs.  Gating it
- * on TIKU_INIT_ENABLE would make the fallbacks reachable in some builds and
- * not others -- the include-order trap. */
+/* Included in every build: this header carries the TIKU_DEVICE_NVM_LABEL and
+ * TIKU_DEVICE_RAM_USABLE fallbacks the report uses, so it does not sit behind
+ * TIKU_INIT_ENABLE. */
 #include <kernel/memory/tiku_nvm_map.h>
 
 #if TIKU_INIT_ENABLE
@@ -39,8 +37,8 @@
 /*---------------------------------------------------------------------------*/
 
 /*
- * The MSP430 GCC linker emits these symbols at section boundaries.
- * Their ADDRESSES (not values) give the region sizes.
+ * The linker scripts emit these symbols at section boundaries; their
+ * addresses (not values) give the region sizes.  The layout shown is MSP430's.
  *
  * SRAM layout (low → high):
  *   __datastart     .data start (initialised globals)
@@ -50,7 +48,7 @@
  *   ...             ← stack grows down from __stack
  *   __stack         top of SRAM
  *
- * FRAM layout:
+ * NVM (FRAM) layout:
  *   .text           code
  *   .rodata         read-only data
  *   .persistent     FRAM-resident variables (init table, etc.)
@@ -59,23 +57,26 @@
 extern char __datastart;    /* first byte of .data (SRAM base) */
 extern char _end;           /* past last byte of .bss          */
 #if defined(TIKU_TIER_SRAM_DERIVED)
-/* The SRAM tier is carved by the linker, not declared in .bss, so _end does
- * not account for it and the leftover below would report it as free. */
+/* The SRAM tier is a linker carve outside .bss: _end does not cover it.  The
+ * report adds each tier span within TIKU_DEVICE_RAM_USABLE bytes of
+ * __datastart to the static total; a span elsewhere prints as bank2 and is
+ * not added. */
 extern char __tier_sram_start;
 extern char __tier_sram_end;
 #endif
 extern char __stack;        /* top of SRAM (stack origin)      */
+extern char __tiku_stack_bottom __attribute__((weak));
+extern char __tiku_stack_guard_start __attribute__((weak));
 
-/* --- FRAM boundaries --- */
+/* --- NVM boundaries --- */
 extern char _etext;         /* past last byte of .text         */
 
 /*
- * __hifram_end is provided by arch/msp430/devices/msp430fr5994_8k_ram.ld
- * (and any future per-device LD overrides). It marks the byte right
- * after the last HIFRAM-resident section (.upper.rodata, .upper.bss,
- * .upper.text). Defined as `weak` so this file still links on parts
- * whose LD script doesn't provide the symbol; an absent symbol
- * (address == 0) means "no usage data available" and the row is skipped.
+ * __hifram_end is provided by arch/msp430/devices/msp430fr5994_8k_ram.ld and
+ * msp430fr6989_hifram.ld.  It marks the byte after the last HIFRAM-resident
+ * section (.upper.rodata, .upper.bss, .upper.text).  It is weak, so this file
+ * links on parts whose .ld lacks it; an absent symbol (address 0) skips the
+ * in-use rows.
  *
  * Gated on TIKU_MEMORY_MODEL_LARGE because in small-mode builds the
  * 16-bit relocation can't reach a HIFRAM address (>= 0x10000) — a
@@ -92,20 +93,20 @@ extern char __hifram_end __attribute__((weak));
 #endif
 
 /*
- * The MSP430 IVT lives in the top 128 bytes of lower FRAM
- * (0xFF80..0xFFFF on every FR-series part TikuOS targets). The
- * linker reserves it through the __interrupt_vector_* sections in
- * each device's .ld file, and it is subtracted here so "unallocd" reports
- * the truly empty lower-FRAM space, not "empty space + 128 B IVT".
+ * The MSP430 IVT is the top 128 bytes of lower FRAM (0xFF80..0xFFFF on
+ * every FR-series part TikuOS targets), reserved by the
+ * __interrupt_vector_* sections of each device's .ld file.  It is counted
+ * in fram_used, so "unallocd" does not report it as free.
  */
 #if defined(PLATFORM_MSP430)
 #define TIKU_FREE_IVT_BYTES 128U
 #else
-#define TIKU_FREE_IVT_BYTES 0U   /* Cortex-M: vector table is part of .text (counted in _etext), no separate IVT */
+/* Elsewhere the vector table lies below _etext and counts with the image. */
+#define TIKU_FREE_IVT_BYTES 0U
 #endif
 
 /*---------------------------------------------------------------------------*/
-/* STACK HIGH-WATER MARK                                                     */
+/* CURRENT STACK USE                                                         */
 /*---------------------------------------------------------------------------*/
 
 /**
@@ -113,6 +114,8 @@ extern char __hifram_end __attribute__((weak));
  *
  * Stack grows downward from __stack.  SP points to the last pushed
  * value.  The difference gives an approximate usage at this instant.
+ *
+ * @return Bytes in use, at most 0xFFFF
  */
 static uint16_t
 stack_used(void)
@@ -125,12 +128,22 @@ stack_used(void)
         return top - sp;
     }
     return 0;
-#elif defined(PLATFORM_RP2350) || defined(PLATFORM_AMBIQ)
-    /* Cortex-M: 32-bit SP. Truncated to uint16_t -- the peak usage a
-     * microcontroller realistically reports fits comfortably. */
+#elif defined(PLATFORM_RP2350) || defined(PLATFORM_AMBIQ) || \
+      defined(PLATFORM_NORDIC) || defined(PLATFORM_RA8P1) || \
+      defined(PLATFORM_STM32N6)
+    /* Cortex-M: 32-bit SP, clamped to 0xFFFF for the uint16_t result. */
     uintptr_t sp;
     uintptr_t top = (uintptr_t)&__stack;
     __asm__ volatile ("mov %0, sp" : "=r"(sp));
+    if (sp < top) {
+        uintptr_t used = top - sp;
+        return (used > 0xFFFFU) ? 0xFFFFU : (uint16_t)used;
+    }
+    return 0;
+#elif defined(PLATFORM_ESP32C61)
+    uintptr_t sp;
+    uintptr_t top = (uintptr_t)&__stack;
+    __asm__ volatile ("mv %0, sp" : "=r"(sp));
     if (sp < top) {
         uintptr_t used = top - sp;
         return (used > 0xFFFFU) ? 0xFFFFU : (uint16_t)used;
@@ -153,6 +166,11 @@ tiku_shell_cmd_free(uint8_t argc, const char *argv[])
     unsigned long sram_static;
     unsigned long fram_total;
     unsigned long fram_used;
+    unsigned long stack_budget;
+    uintptr_t stack_bottom = (uintptr_t)&__tiku_stack_bottom;
+    uintptr_t guard_start = (uintptr_t)&__tiku_stack_guard_start;
+    int bounded_stack = guard_start >= (uintptr_t)&_end &&
+        stack_bottom >= guard_start && stack_bottom <= (uintptr_t)&__stack;
     uint8_t proc_count = 0;
 
     (void)argc;
@@ -161,53 +179,29 @@ tiku_shell_cmd_free(uint8_t argc, const char *argv[])
     sram_total = (unsigned long)TIKU_DEVICE_RAM_USABLE;
 
     /*
-     * fram_total is the size of the lower-FRAM 16-bit window
-     * (FRAM_START..FRAM_END), not the chip's whole FRAM. The
-     * fram_code / fram_data rows below measure against this same
-     * window — using TIKU_DEVICE_FRAM_SIZE here would over-report
-     * on parts with HIFRAM (FR5994, FR6989) and the rows would
-     * stop reconciling. On those parts the upper bank is reachable
-     * only via TIKU_HIFRAM* + MEMORY_MODEL=large and is reported
-     * as a separate line below when present.
-     *
-     * The "+ 1U" wraps in uint16 (FRAM_END is 0xFFFF on most parts),
-     * so the subtraction is computed modulo 2^16 — which gives the
-     * correct lower-window size as long as FRAM_END == 0xFFFF.
+     * fram_total is the NVM window FRAM_START..FRAM_END.  On MSP430 parts
+     * with HIFRAM (FR5994, FR6989) that is the lower 16-bit window, the same
+     * window the in-use rows below measure; the upper bank (TIKU_HIFRAM*,
+     * MEMORY_MODEL=large) gets its own line.
      */
     fram_total = (unsigned long)(TIKU_DEVICE_FRAM_END + 1UL
                             - TIKU_DEVICE_FRAM_START);
     sram_static = (unsigned long)((uintptr_t)&_end - (uintptr_t)&__datastart);
 
     /*
-     * Lower-FRAM in-use byte count = _etext - FRAM_START.
-     *
-     * Why this single number rather than a code/data split:
-     *
-     *   In small mode the FRAM layout is
-     *     [ rodata . persistent . data-init . text ] _etext . slack . IVT
-     *   so _start - FRAM_START would give "const/data" and
-     *   _etext - _start would give "code".
-     *
-     *   In large mode (-mcode-region=either) the layout becomes
-     *     [ rodata . persistent . data-init . lower.text . text ]
-     *     _etext . slack . IVT
-     *   .lower.text lands BELOW _start, so that split silently
-     *   reclassifies ~30 KB of code as "const/data" -- reporting
-     *   "code = 396" on a build with 36 KB of code in lower FRAM.
-     *
-     *   _etext is the end of all FRAM-resident sections that the
-     *   linker fills upward from FRAM_START, regardless of which
-     *   memory model is in use, so _etext - FRAM_START is the
-     *   one number that's correct across both modes.
+     * NVM in use is _etext - FRAM_START.  On MSP430 _etext ends every section
+     * the linker fills upward from FRAM_START, in either memory model: the
+     * small-model layout is
+     *   [ rodata . persistent . data-init . text ] _etext . slack . IVT
+     * and the large model (-mcode-region=either) also places .lower.text
+     * below _start.  On RP2350, Ambiq, nRF54L and RA8P1 the .data load image
+     * follows _etext, and on all but RA8P1 .rodata does too, so the count
+     * leaves those sections out.
      */
     {
         unsigned long text_end = (unsigned long)(uintptr_t)&_etext;
-        /* Both bounds, not just the lower one.  On a port whose image runs
-         * from SRAM ABOVE the NVM window -- RA8P1 loads at 0x22000000 with
-         * MRAM at 0x02000000 -- a lower-bound test alone passes and reports
-         * the distance between two unrelated memories as "in use", which came
-         * out as 512 MB of a 1 MB part.  Outside the window the honest answer
-         * is that no image bytes live in NVM. */
+        /* An _etext outside the NVM window, as in an image linked into SRAM,
+         * leaves only the IVT counted as in use. */
         fram_used = (text_end > TIKU_DEVICE_FRAM_START &&
                      text_end <= TIKU_DEVICE_FRAM_END)
                     ? (unsigned long)(text_end + TIKU_FREE_IVT_BYTES
@@ -222,28 +216,33 @@ tiku_shell_cmd_free(uint8_t argc, const char *argv[])
     SHELL_PRINTF("  .data+.bss  %5lu\n", (unsigned long)sram_static);
 #if defined(TIKU_TIER_SRAM_DERIVED)
     {
-        uintptr_t tier_lo = (uintptr_t)&__tier_sram_start;
-        uintptr_t tier_hi = (uintptr_t)&__tier_sram_end;
         uintptr_t bank_lo = (uintptr_t)&__datastart;
-        unsigned long tier_span = (unsigned long)(tier_hi - tier_lo);
-
-        SHELL_PRINTF("  tier arena  %5lu\n", tier_span);
-        /* Only the parts that carve the tier from the SAME bank as the
-         * statics (RA8P1, RP2350) may fold it into that bank's leftover.
-         * Ambiq and STM32N6 carve it from a second bank -- SSRAM, AXISRAM
-         * -- so folding it into the image bank's total underflows the
-         * stack+free line.  Its capacity is the runtime tier line below. */
-        if (tier_lo >= bank_lo && tier_hi <= bank_lo + sram_total) {
-            sram_static += tier_span;
+        const uint8_t *base;
+        tiku_mem_stats_t st;
+        uint8_t si;
+        (void)tiku_tier_init();
+        for (si = 0; tiku_tier_span_stats(TIKU_MEM_SRAM, si, &base, &st)
+                     == TIKU_MEM_OK; si++) {
+            uintptr_t start = (uintptr_t)base;
+            int primary = start >= bank_lo && start <= bank_lo + sram_total &&
+                          st.total_bytes <= bank_lo + sram_total - start;
+            SHELL_PRINTF("  tier bank%u  %5lu\n", primary ? 1u : 2u,
+                         (unsigned long)st.total_bytes);
+            if (primary) { sram_static += st.total_bytes; }
         }
     }
 #endif
-    /* What's left of SRAM after static data: hosts the stack and any
-     * future heap. Not "reserved" in any protective sense — it's the
-     * available pool. Stack-now / free-now under "Runtime" below
-     * partition this number. */
-    SHELL_PRINTF("  stack+free  %5lu\n",
-                 (unsigned long)(sram_total - sram_static));
+    stack_budget = sram_total > sram_static ? sram_total - sram_static : 0UL;
+    if (bounded_stack) {
+        unsigned long reserved = (uintptr_t)&__stack - guard_start;
+        SHELL_PRINTF("  unassigned  %5lu\n",
+                     stack_budget > reserved ? stack_budget - reserved : 0UL);
+        stack_budget = (uintptr_t)&__stack - stack_bottom;
+        SHELL_PRINTF("  stack       %5lu\n", stack_budget);
+        SHELL_PRINTF("  guard       %5lu\n", (unsigned long)(stack_bottom - guard_start));
+    } else {
+        SHELL_PRINTF("  stack+free  %5lu\n", stack_budget);
+    }
 
     SHELL_PRINTF(SH_BOLD "%s" SH_RST "  %5lu total"
 #if defined(TIKU_DEVICE_HAS_HIFRAM) && TIKU_DEVICE_HAS_HIFRAM
@@ -251,15 +250,14 @@ tiku_shell_cmd_free(uint8_t argc, const char *argv[])
 #endif
                  "\n", TIKU_DEVICE_NVM_LABEL,
                  (unsigned long)fram_total);
-    /* in-use = code+rodata+persistent+data-init+(.lower.text under
-     * large mode), reported as one number because the breakdown
-     * differs between memory models. See _etext rationale above. */
+    /* in use = fram_used without the IVT: on MSP430 code, rodata, persistent
+     * and data-init (plus .lower.text in the large model). */
     SHELL_PRINTF("  in use      %5lu\n",
                  (unsigned long)(fram_used > TIKU_FREE_IVT_BYTES
                  ? (fram_used - TIKU_FREE_IVT_BYTES) : 0));
 #if defined(PLATFORM_MSP430)
-    /* The interrupt-vector table sits inside the NVM window on MSP430 only;
-     * elsewhere TIKU_FREE_IVT_BYTES is 0 and the row is just noise. */
+    /* Only on MSP430 is the interrupt-vector table inside the NVM window;
+     * elsewhere TIKU_FREE_IVT_BYTES is 0 and no ivt row prints. */
     SHELL_PRINTF("  ivt         %5u\n", (unsigned)TIKU_FREE_IVT_BYTES);
 #endif
     SHELL_PRINTF("  unallocd    %5lu\n",
@@ -268,12 +266,11 @@ tiku_shell_cmd_free(uint8_t argc, const char *argv[])
     /*
      * Parts with a separate upper FRAM bank (FR5994, FR6989). Sizes
      * are > 64 KB so they must be printed via %lu. The kernel can
-     * only place data here under MEMORY_MODEL=large; under the
-     * default small model this region is reserved but unused.
+     * only place data here under MEMORY_MODEL=large, the default on
+     * these parts; a small-model build leaves the region unused.
      *
-     * If the per-device LD provides __hifram_end (the override
-     * msp430fr5994_8k_ram.ld does), the split is used + free.
-     * Otherwise fall back to the single "total reachable" line.
+     * In a large-model build whose .ld provides __hifram_end, in-use and
+     * unallocd rows follow; otherwise only the hifram total line prints.
      */
     {
         unsigned long hifram_total =
@@ -311,10 +308,10 @@ tiku_shell_cmd_free(uint8_t argc, const char *argv[])
                          sram_tier.peak_bytes);
         }
     }
-    SHELL_PRINTF("  free now    " SH_BOLD "%5lu" SH_RST "\n",
-                 (unsigned long)(sram_total - sram_static - stack_used()));
+    SHELL_PRINTF("  stack free  " SH_BOLD "%5lu" SH_RST "\n",
+                 stack_budget > stack_used() ? stack_budget - stack_used() : 0UL);
 
-    /* FRAM: unallocated + tier allocator */
+    /* NVM: unallocated + tier allocator */
     SHELL_PRINTF(SH_BOLD "%s" SH_RST "\n", TIKU_DEVICE_NVM_LABEL);
     {
         tiku_mem_stats_t nvm_tier;
@@ -329,11 +326,9 @@ tiku_shell_cmd_free(uint8_t argc, const char *argv[])
 
 #if (TIKU_DRV_PSRAM_ENABLE + 0)
     /*
-     * PSRAM: reported only WHILE ATTACHED, which is the honest thing for a
-     * tier that comes and goes.  It is a late-attach tier -- absent at boot,
-     * present after `power psram up`, gone again after `down` -- so a static
-     * line would claim 64 MB the system does not have most of the time.
-     * `tiku_tier_stats` failing is not an error here; it is the answer.
+     * PSRAM is a late-attach tier: absent at boot, attached by `power psram
+     * up` and detached by `down`.  It prints only while attached;
+     * tiku_tier_stats() fails while it is detached.
      */
     {
         tiku_mem_stats_t ps_tier;
@@ -381,19 +376,15 @@ tiku_shell_cmd_free(uint8_t argc, const char *argv[])
 
     SHELL_PRINTF(SH_CYAN "--- Processes (%u/%u) ---" SH_RST "\n",
                  proc_count, TIKU_PROCESS_MAX);
-    /* Lower-case column set; the technology is already named by the section
-     * header above (e.g. "RRAM  2084864 total"), so this stays generic
-     * rather than shouting "RRAM" mid-table -- and it is never wrong. */
     SHELL_PRINTF(" pid  %-10s    sram     nvm  state\n", "name");
     for (i = 0; i < TIKU_PROCESS_MAX; i++) {
         struct tiku_process *p = tiku_process_get((int8_t)i);
         if (p == NULL) {
             continue;
         }
-        /* Declared proc-mem footprint PLUS measured live allocation (e.g. the
-         * BASIC arena), via the same helpers ps / /proc use -- so `free` no
-         * longer shows a process as ~0 while ps reports its real footprint.
-         * uint32_t values (a BASIC arena is hundreds of KB), hence %6lu. */
+        /* Declared footprint plus measured live allocations (e.g. the BASIC
+         * arena), via the helpers ps and /proc use.  The values are uint32_t
+         * (a BASIC arena can be hundreds of KB), hence %6lu. */
         SHELL_PRINTF(" %3d  %-10s  %6lu  %6lu  %s\n",
                      p->pid,
                      p->name ? p->name : "?",

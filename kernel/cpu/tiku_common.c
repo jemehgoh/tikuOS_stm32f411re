@@ -7,21 +7,10 @@
  *
  * tiku_common.c - common utility functions.
  *
- * Blocking delays, bit manipulation (popcount, ctz, clz) and platform identity
- * (unique device id, boot reset cause), all delegating to the HAL so the API is
- * portable.  LED control moved to interfaces/led/tiku_led.c.
+ * Blocking delays and platform identity (unique device id, reset cause) call
+ * the HAL; the bit manipulation helpers (popcount, ctz, clz) are portable C.
  *
  * SPDX-License-Identifier: Apache-2.0
- */
-
-/**
- * @file   tiku_common.c
- * @brief  Platform-independent common utilities for TikuOS.
- * @ingroup TIKU_COMMON
- *
- * All hardware-specific behaviour is delegated to macros defined in
- * hal/tiku_common_hal.h, which routes to the active architecture
- * (e.g. arch/msp430/tiku_cpu_common.c).
  */
 
 /*---------------------------------------------------------------------------*/
@@ -37,15 +26,15 @@
 /**
  * @brief Delay execution for a specified number of milliseconds.
  *
- * Performs a blocking busy-wait by delegating to the platform HAL.
- * The accuracy depends on the CPU clock frequency and compiler
- * optimisation level.
+ * Performs a blocking busy-wait by delegating to the platform HAL.  Its
+ * accuracy is the port's: a hardware counter on some, a calibrated spin loop
+ * on others.
  *
  * @param ms  Number of milliseconds to delay (0 returns immediately).
  *
- * @note This is a **blocking** call — no other process or ISR work
- *       is performed during the delay.  For non-blocking delays,
- *       use an event timer (tiku_timer / etimer) instead.
+ * @note Blocks the caller: no other process runs.  The interrupt mask is left
+ *       as it is, so enabled ISRs still run.  A wait that lets other
+ *       processes run uses a software timer (tiku_timer_set_event()).
  *
  * @warning Not suitable for sub-millisecond precision.  Use
  *          tiku_common_delay_us() for shorter intervals.
@@ -61,8 +50,8 @@ void tiku_common_delay_ms(unsigned int ms)
  * @brief Delay execution for a specified number of microseconds.
  *
  * A blocking busy-wait delegated to the platform HAL, for bit-banged protocols
- * and short hardware settling times.  Interrupts stay enabled but no
- * cooperative scheduling happens.
+ * and short hardware settling times.  The interrupt mask is left as it is,
+ * and no other process runs meanwhile.
  *
  * @param us  Number of microseconds to delay (0 returns immediately).
  * @see tiku_common_delay_ms()
@@ -98,8 +87,7 @@ uint8_t tiku_common_popcount(uint16_t val)
 /**
  * @brief Count trailing zeros -- find the position of the lowest set bit.
  *
- * Scans upward from bit 0.  Used for priority dispatch off a ready-mask and for
- * finding the first free slot in a bitmap allocator.
+ * Scans upward from bit 0.
  *
  * @param val  The 16-bit value to inspect.
  * @return     Bit position of lowest set bit (0 .. 15), or 16 if val == 0.
@@ -120,8 +108,8 @@ uint8_t tiku_common_ctz(uint16_t val)
 /**
  * @brief Count leading zeros in a 16-bit value.
  *
- * A binary search rather than a linear scan, so the cost is constant.  Gives
- * floor(log2(val)) as 15 minus the result, and the priority level of the
+ * A four-step binary search, so the cost does not depend on @p val.  For a
+ * non-zero @p val, 15 minus the result is floor(log2(val)), the index of the
  * highest set bit.
  *
  * @param val  The 16-bit value to inspect.
@@ -147,13 +135,14 @@ uint8_t tiku_common_clz(uint16_t val)
 /**
  * @brief Read the MCU's unique hardware device ID.
  *
- * Copies up to @p len bytes of the platform's identifier -- a die record, OTP
- * word or FICR register depending on the part -- for MQTT client ids, derived
- * MAC addresses and PRNG seeding.
+ * Copies up to @p len bytes of the platform's identifier, such as a die
+ * record or a FICR register.  The content is per port, and STM32N6 returns 0.
  *
- * @param buf  Destination buffer (must not be NULL).
+ * @param buf  Destination buffer; NULL copies nothing.
  * @param len  Maximum number of bytes to copy.
  * @return     Number of bytes actually written (0 if buf is NULL).
+ * @note RP2350 builds its id from linker addresses, so every board running
+ *       the same image reports the same id.
  * @see tiku_common_reset_reason()
  */
 uint8_t tiku_common_unique_id(uint8_t *buf, uint8_t len)
@@ -162,13 +151,13 @@ uint8_t tiku_common_unique_id(uint8_t *buf, uint8_t len)
 }
 
 /**
- * @brief Return the raw reset-cause register value captured at boot.
+ * @brief Return the cause of the last reset as a SYSRSTIV code.
  *
- * Latched once during early boot and cached, so later calls agree even after
- * the hardware register is cleared.  The encoding is platform-specific; the VFS
- * renders it at /sys/boot/rstiv and /sys/boot/reason.
+ * Ports whose cause register clears, on read or for the next boot, keep the
+ * value from the first call; the others read a register that stays latched
+ * until the next reset.  /sys/boot/rstiv and /sys/boot/reason render it.
  *
- * @return Raw reset-cause value (always even on MSP430).
+ * @return SYSRSTIV-style code (always even).
  * @see tiku_common_unique_id()
  */
 uint16_t tiku_common_reset_reason(void)

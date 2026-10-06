@@ -1,0 +1,87 @@
+/*
+ * Tiku Operating System v0.06
+ * Simple. Ubiquitous. Intelligence, Everywhere.
+ * http://tiku-os.org
+ *
+ * Authors: Ambuj Varshney <ambuj@tiku-os.org>
+ *
+ * cpu_settings_test.c - host test of the portable next-boot clock preference.
+ *
+ * Compiles kernel/cpu/tiku_cpu_settings.c against stub clock and persist-cell
+ * functions and checks boot-only apply, discrete rates, torn state and
+ * rejected saves; make lint runs it.
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ */
+#include <assert.h>
+#include <stdio.h>
+#include "../kernel/cpu/tiku_cpu_settings.c"
+
+static unsigned long current = 150000000UL;
+static const unsigned long choices[] = {12000000UL, 150000000UL, 1000000000UL};
+/* Stubs: the clock runs at current, with choices[] on offer unless fixed is
+ * set; a boot-time rate change counts in changes; each commit counts in writes
+ * and, while fail_write is set, stores nothing and returns TIKU_MEM_ERR_IO. */
+static int changes, writes, fail_write, fixed;
+
+unsigned long tiku_cpu_mclk_hz(void) { return current; }
+unsigned long tiku_cpu_freq_available(unsigned int i)
+{
+    if (fixed) return i == 0 ? current : 0;
+    return i < 3 ? choices[i] : 0;
+}
+void tiku_cpu_freq_boot_set(unsigned long hz) { changes++; current = hz; }
+uint8_t tiku_persist_cell_valid(const tiku_persist_cell_t *c)
+{
+    return *c->gate == c->key;
+}
+tiku_mem_err_t tiku_persist_cell_commit_status(const tiku_persist_cell_t *c,
+                                               const void *src, uint16_t len)
+{
+    writes++;
+    if (!fail_write) {
+        memcpy(c->data, src, len);
+        *c->gate = c->key;
+    }
+    return fail_write ? TIKU_MEM_ERR_IO : TIKU_MEM_OK;
+}
+
+int main(void)
+{
+    assert(tiku_cpu_settings_save(12000000UL) == -1); /* not booted */
+    tiku_cpu_settings_boot();
+    assert(changes == 0 && writes == 0);
+    assert(tiku_cpu_settings_target() == 150000000UL);
+    assert(tiku_cpu_settings_save(12000000UL) == 0);
+    assert(current == 150000000UL && changes == 0);
+    assert(tiku_cpu_settings_target() == 12000000UL);
+    tiku_cpu_settings_boot(); /* a second call changes no clock */
+    assert(changes == 0);
+    ready = 0; /* simulated reboot: persistent bytes remain */
+    tiku_cpu_settings_boot();
+    assert(current == 12000000UL && changes == 1);
+    assert(tiku_cpu_settings_save(1000000000UL) == 0);
+    assert(current == 12000000UL);
+    fixed = 1;
+    assert(tiku_cpu_settings_save(12000000UL) == -1);
+    fixed = 0;
+    assert(tiku_cpu_settings_save(999999999UL) == -1);
+    fail_write = 1;
+    int before = writes;
+    assert(tiku_cpu_settings_save(150000000UL) == -1);
+    assert(writes == before + 1); /* one write: no retry, no rollback */
+    fail_write = 0;
+    /* A corrupt gate, then a torn value: each leaves the boot clock alone. */
+    saved_clock_cell_gate = 0;
+    ready = 0;
+    current = 150000000UL;
+    tiku_cpu_settings_boot();
+    assert(changes == 1 && current == 150000000UL);
+    assert(tiku_cpu_settings_save(12000000UL) == 0);
+    saved_clock.inverse ^= 1;
+    ready = 0;
+    tiku_cpu_settings_boot();
+    assert(changes == 1 && current == 150000000UL);
+    puts("PASS: boot-only apply, discrete rates, torn state, rejected saves");
+    return 0;
+}

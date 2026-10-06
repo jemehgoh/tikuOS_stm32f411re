@@ -7,18 +7,39 @@
  *
  * tiku_basic_ext.inl - native builtin registry implementation.
  *
- * Not a standalone unit; included from tiku_basic.c after the expression parser,
- * whose entry points the service shims wrap.  The table lives in the state piece
- * and the dispatch hooks sit at each chain's fallthrough.
+ * Included from tiku_basic.c after the expression parser, whose entry points
+ * the service shims wrap.  The table lives in tiku_basic_state.inl; the
+ * dispatch hooks sit at each chain's fallthrough.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
 
 #if TIKU_BASIC_EXT_MAX > 0
 
-/* Validate + normalize a registration name.  Uppercase identifier, fits the
- * slot, not a crunched keyword (builtins win; rejecting the collision at
- * register time removes the silently-shadowed class entirely). */
+/* Builtins the chains match by spelling (match_kw()) and not by keyword
+ * token, listed whether or not this build compiles them in.  A TikuBench
+ * test checks this list against the match_kw() names in the sources. */
+static const char *const basic_ext_builtin_names[] = {
+    "APPEND", "ATAN", "AUTO", "BASE64$", "BETWEEN$", "BLEADV", "BLEAVAIL",
+    "BLEBEACON", "BLEGET$", "BLEOBSERVE", "BLEOFF", "BLESCAN$", "BLESEEN",
+    "BLESEEN$", "BLESEND", "BLEUP", "BROWSE", "BYE", "COUNT", "DEBUG", "DIR",
+    "EXP", "FETCH", "FREAD$", "FWRITE", "HELP", "HMAC$", "HTTPGET$",
+    "HTTPHEADER", "HTTPPOST$", "HTTPSTATUS", "I2CREAD", "I2CWRITE", "IMPORT",
+    "IPADDR$", "JSON$", "LCASE$", "LINE$", "LIST", "LOAD", "LOG", "LTRIM$",
+    "MODACT", "MODLOAD", "MQTTPUB", "MQTTWAIT$", "NETUP", "NEW", "NOW", "POW",
+    "QUIT", "REBOOT", "RENUM", "REPLACE$", "RTRIM$", "RUN", "SAVE", "SETTIME",
+    "SHA256$", "SPACE$", "SPC", "STRING$", "STRIP$", "TAB", "UCASE$",
+    "UDPSEND", "VFSREAD$", "VFSWRITE$", "WORD$",
+};
+
+/**
+ * @brief Validate a registration name.
+ *
+ * An upper-case identifier that fits the slot and is no builtin's name: a
+ * builtin matches first, so a colliding name could never dispatch.
+ *
+ * @return 1 if @p name may be registered, else 0.
+ */
 static int
 basic_ext_name_ok(const char *name, int allow_dollar)
 {
@@ -30,7 +51,7 @@ basic_ext_name_ok(const char *name, int allow_dollar)
      * a numeric/statement name has no '$' at all. */
     if (allow_dollar) {
         if (n < 2u || name[n - 1u] != '$') return 0;
-        n--;                                      /* validate the prefix only  */
+        n--;                                      /* validate the prefix only */
     }
     for (i = 0; i < n; i++) {
         char c = name[i];
@@ -39,10 +60,18 @@ basic_ext_name_ok(const char *name, int allow_dollar)
         }
     }
     if (basic_tok_find(name) >= 0) return 0;      /* crunched-keyword clash */
+    for (i = 0; i < sizeof basic_ext_builtin_names /
+                    sizeof basic_ext_builtin_names[0]; i++) {
+        if (strcmp(basic_ext_builtin_names[i], name) == 0) return 0;
+    }
     return 1;
 }
 
-/* Find name's slot, or a free slot, or -1.  Idempotent re-registration. */
+/**
+ * @brief Slot holding @p name, else the first free slot, else -1.
+ *
+ * Re-registering a name reuses its slot, so registration is idempotent.
+ */
 static int
 basic_ext_slot(const char *name)
 {
@@ -103,11 +132,11 @@ tiku_basic_register_strfn(const char *name, tiku_basic_ext_strfn fn)
     return 0;
 #else
     (void)name; (void)fn;
-    return -1;                                    /* no strings in this build  */
+    return -1;                                    /* no strings in this build */
 #endif
 }
 
-#else  /* registry compiled out: registration is a clean no-op failure */
+#else  /* registry compiled out: every registration returns -1 */
 
 int
 tiku_basic_register_stmt(const char *name, tiku_basic_ext_stmt_fn fn)

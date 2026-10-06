@@ -5,10 +5,10 @@
  *
  * Authors: Ambuj Varshney <ambuj@tiku-os.org>
  *
- * tiku_shell_cmd_basic.c - "basic" shell command stub.
+ * tiku_shell_cmd_basic.c - "basic" command: REPL, run/resume, /data files.
  *
- * A thin dispatch wrapper the command table calls; the interpreter itself lives
- * under kernel/shell/basic/ and is reached through tiku_basic.h.
+ * Dispatches to the interpreter under kernel/shell/basic/ (tiku_basic.h) and
+ * moves program text between the interpreter's store and /data files.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -29,37 +29,45 @@
 /*---------------------------------------------------------------------------*/
 
 /* Scratch for file<->program transfers.  Static (the shell runs commands one
- * at a time) and sized past the largest file slot so a whole program fits. */
+ * at a time).  It bounds both directions: a program file or saved program
+ * longer than TIKU_BASIC_FILE_MAX - 1 bytes is refused. */
 #ifndef TIKU_BASIC_FILE_MAX
 #define TIKU_BASIC_FILE_MAX  600u
 #endif
 static char basic_file_buf[TIKU_BASIC_FILE_MAX];
 
-/* Load @p path's program text; @p run also executes it (implicit RUN). */
+/** @brief Load @p path's program; @p run also executes it (implicit RUN). */
 static void
 basic_from_file(const char *path, int run)
 {
-    char resolved[TIKU_SHELL_CWD_SIZE];
-    int  n;
+    char   resolved[TIKU_SHELL_CWD_SIZE];
+    size_t total;
+    int    n;
 
-    /* Refuse re-entry into a live interactive BASIC session.  Reachable when a
-     * scheduled `basic run/load <path>` job or rule fires (jobs tick before the
-     * BASIC mode tick); without this it would clobber the user's in-memory
-     * program and block the cooperative scheduler mid-session. */
+    /* Returns without output while a BASIC session is active, so a job or
+     * rule that fires `basic run/load <path>` during a session (jobs tick
+     * before the BASIC mode tick) neither replaces the session's program nor
+     * starts a blocking run in the middle of it. */
     if (tiku_basic_mode_active()) {
         return;
     }
     tiku_shell_cwd_resolve(path, resolved, sizeof resolved);
-    n = tiku_vfs_read(resolved, basic_file_buf, sizeof basic_file_buf - 1u);
+    n = tiku_vfs_read_total(resolved, basic_file_buf, sizeof basic_file_buf,
+                            &total);
     if (n < 0) {
         SHELL_PRINTF("basic: cannot read '%s'\n", resolved);
         return;
     }
+    /* A file that does not fit with its NUL is refused whole. */
+    if (total >= sizeof basic_file_buf) {
+        SHELL_PRINTF("basic: '%s' is longer than %u bytes\n", resolved,
+                     (unsigned)(sizeof basic_file_buf - 1u));
+        return;
+    }
     basic_file_buf[n] = '\0';
 
-    /* Load into the program store (the same path /data/basic uses), then -- for
-     * `run` -- execute it via autorun, which reloads from that store and runs.
-     * This reuses the proven load+autorun path. */
+    /* Load into the program store (the same path /data/basic uses); for `run`,
+     * autorun then reloads the program from that store and runs it. */
     if (tiku_basic_vfs_write(basic_file_buf, (unsigned int)n) != 0) {
         SHELL_PRINTF("basic: load failed\n");
         return;
@@ -69,7 +77,7 @@ basic_from_file(const char *path, int run)
     }
 }
 
-/* Save the current program text to @p path. */
+/** @brief Save the current program text to @p path. */
 static void
 basic_to_file(const char *path)
 {
@@ -77,9 +85,12 @@ basic_to_file(const char *path)
     int  n;
 
     tiku_shell_cwd_resolve(path, resolved, sizeof resolved);
-    n = tiku_basic_vfs_read(basic_file_buf, sizeof basic_file_buf);
+    /* Bounded as a load is, so a saved file always loads back.  The read
+     * gives 0 both for no program and for one too long. */
+    n = tiku_basic_vfs_read(basic_file_buf, sizeof basic_file_buf - 1u);
     if (n <= 0) {
-        SHELL_PRINTF("basic: no program to save\n");
+        SHELL_PRINTF("basic: no program to save, or longer than %u bytes\n",
+                     (unsigned)(sizeof basic_file_buf - 1u));
         return;
     }
     if (tiku_vfs_write(resolved, basic_file_buf, (size_t)n) < 0) {
@@ -96,9 +107,8 @@ tiku_shell_cmd_basic(uint8_t argc, const char *argv[])
 {
     const char *sub = (argc >= 2u) ? argv[1] : NULL;
 
-    /* `basic resume` / `basic run resume`: F1 power-failure-transparent
-     * autostart -- continue the saved program from its checkpoint, or start it
-     * fresh if there is none. */
+    /* `basic resume` / `basic run resume`: continue the saved program from its
+     * checkpoint, or start it fresh if there is none. */
     if (sub != NULL && strcmp(sub, "resume") == 0) {
         (void)tiku_basic_mode_resume_saved();
         return;
@@ -109,7 +119,7 @@ tiku_shell_cmd_basic(uint8_t argc, const char *argv[])
         } else if (argc >= 3u) {
             basic_from_file(argv[2], 1);       /* run <path> (blocking) */
         } else {
-            (void)tiku_basic_mode_run_saved(); /* run saved (non-blocking mode) */
+            (void)tiku_basic_mode_run_saved(); /* run saved, non-blocking */
         }
         return;
     }

@@ -5,7 +5,7 @@
  *
  * Authors: Ambuj Varshney <ambuj@tiku-os.org>
  *
- * tiku_shell_cmd_fs.h - file commands ("rm", "touch") for the /data store
+ * tiku_shell_cmd_fs.h - /data commands: rm, touch, mkdir, rmdir, recv, send
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -26,8 +26,7 @@ void tiku_shell_cmd_rm(uint8_t argc, const char *argv[]);
 /**
  * @brief "touch" command handler — create an empty file if it does not exist.
  *
- * A no-op on an existing file (the store has no modification time to bump),
- * so it never truncates one.
+ * An existing file is left as it is; the store keeps no modification time.
  */
 void tiku_shell_cmd_touch(uint8_t argc, const char *argv[]);
 
@@ -51,19 +50,18 @@ void tiku_shell_cmd_rmdir(uint8_t argc, const char *argv[]);
 /**
  * @brief "recv" command handler — receive a file from the host.
  *
- * Prints "recv: ready N", then reads exactly N raw bytes from the console and
- * writes them to the path.  Length-prefixed and binary-safe, so multi-line and
- * arbitrary files up to one slot transfer where `write` cannot.
+ * Prints "recv: ready N" ("chunk C" for /data), reads N raw bytes and writes
+ * them to the path, binary-safe.  A /data file streams up to the store's
+ * limit, with a '.' after each chunk but the last; others take one buffer.
  */
 void tiku_shell_cmd_recv(uint8_t argc, const char *argv[]);
 
 /**
  * @brief "send" command handler — send a file to the host.
  *
- * Usage:
- *   send <path>           e.g.  send /data/blink.bas
- *
- * Prints "send: N", then streams N raw bytes of <path> out (binary-safe).
+ * `send <path>` prints "send: N", then streams N raw bytes of the file out
+ * (binary-safe).  A /data file goes out whole; any other node must render in
+ * fewer than TIKU_TFS_SLOT_DATA bytes (the transfer buffer) or is refused.
  */
 void tiku_shell_cmd_send(uint8_t argc, const char *argv[]);
 

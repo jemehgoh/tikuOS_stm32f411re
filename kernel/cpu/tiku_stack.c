@@ -5,10 +5,10 @@
  *
  * Authors: Ambuj Varshney <ambuj@tiku-os.org>
  *
- * tiku_stack.c - stack high-water measurement by painting.  See tiku_stack.h
- * for the safety contract: everything here stays inside
- * [tiku_stack_arch_bottom(), SP), the arch-declared true stack region --
- * never the heap, never the armed MPU guard below it.
+ * tiku_stack.c - stack high-water measurement by painting.
+ *
+ * Every read and write here stays inside [tiku_stack_arch_bottom(), SP), the
+ * stack region the port declares, above the heap and the MPU guard.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -20,11 +20,11 @@
 /* Word sentinel the unused stack is filled with. */
 #define TIKU_STACK_PAINT    0xC5C5C5C5u
 
-/* Keep this much below the live SP unpainted: the painter's own frame plus
- * slop for an interrupt arriving mid-paint. */
+/* Bytes left unpainted below the live SP: the painter's own frame and an
+ * interrupt that arrives mid-paint. */
 #define TIKU_STACK_MARGIN   128u
 
-/* Current stack pointer, platform-branched like /sys/mem/free's reader. */
+/** @brief Current stack pointer; 0 on a port this file has no reader for. */
 static uintptr_t stack_sp(void)
 {
 #if defined(PLATFORM_RP2350) || defined(PLATFORM_AMBIQ) || \
@@ -36,19 +36,23 @@ static uintptr_t stack_sp(void)
     uint16_t sp;
     __asm__ volatile ("mov r1, %0" : "=r"(sp));
     return (uintptr_t)sp;
+#elif defined(PLATFORM_ESP32C61)
+    uintptr_t sp;
+    __asm__ volatile ("mv %0, sp" : "=r"(sp));
+    return sp;
 #else
     return 0u;
 #endif
 }
 
-/* Weak default: bounds unknown -> the feature is dormant (nothing painted,
- * tiku_stack_free() == 0).  Arch MPU backends override this right beside
- * their guard-arming code. */
+/* Weak default for a port that declares no stack bottom: nothing is painted
+ * and tiku_stack_free() returns 0. */
 TIKU_WEAK uint32_t tiku_stack_arch_bottom(void)
 {
     return 0u;
 }
 
+/** @brief Fill [bottom, sp - margin) with the sentinel, word-aligned. */
 static void stack_paint_between(uintptr_t bottom, uintptr_t sp, uint32_t margin)
 {
     uint32_t *lo, *hi;
@@ -64,6 +68,7 @@ static void stack_paint_between(uintptr_t bottom, uintptr_t sp, uint32_t margin)
     }
 }
 
+/** @brief Bytes of intact sentinel from @p bottom up, scanning below @p sp. */
 static uint32_t stack_free_between(uintptr_t bottom, uintptr_t sp)
 {
     const uint32_t *p, *hi;

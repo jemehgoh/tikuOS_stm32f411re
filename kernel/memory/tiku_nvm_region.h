@@ -7,9 +7,9 @@
  *
  * tiku_nvm_region.h - the board's carved, memory-mapped NVM region.
  *
- * A linker-carved span of FRAM/MRAM/Flash exposed as one tiku_nvm_backend_t:
- * reads are a pointer dereference into be->base, writes go through be->write
- * inside an unlock window.  The NVM tier and the file store both ride it.
+ * A carved span read through be->base and written through be->write in an
+ * unlock window.  The NVM tier and /data use it on every port but MSP430,
+ * which keeps separate arrays.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -19,91 +19,29 @@
 
 #include "kernel/fs/tiku_nvm_backend.h"
 
-/*
- * Region layout -- TWO extents, in address order, and nothing else:
+/**
+ * @brief Default NVM tier size, taken from the front of the carved region.
  *
- *     [ tier | file store (/data) ]
- *      32 KB   absorbs the rest
- *
- * The NVM memory tier bump-allocates from the FRONT of the region; the file
- * store owns everything above it.  That is the whole layout.  The rule that
- * keeps it that way:
- *
- *     Fixed extents are platform CONTRACTS.  Everything feature-shaped is a
- *     named file in one self-describing store.
- *
- * The tier extent is fixed because it IS a contract (32 KB on every part --
- * see below).  Nothing else qualifies: BASIC's saved program and run-state
- * checkpoint are ordinary files (prog.bas, prog.ckpt).  Spanned files and
- * streamed writes are what make that workable -- a file can exceed one slot and
- * be replaced in place without a RAM copy of the whole thing, so a fixed extent
- * buys nothing a name does not.
- *
- * The file store's extent is DERIVED (region - tier), not hand-written, so the
- * two extents always tile the region exactly.  Deriving the FS rather than the
- * tier makes idle space structurally impossible: whatever the code window frees
- * goes to files, the one extent that can actually spend it.
- */
-
-/*
- * TIER EXTENT -- one number, every platform.
- *
- * 32 KB of region-backed NVM scratch is the PORTABLE CONTRACT: code that asks
- * the NVM tier for <= 32 KB runs on every TikuOS platform, the same way the
- * 4 KB RP2350 durable window sets the ceiling for TIKU_DURABLE.  The figure is
- * set by the smallest member of the family -- MSP430, whose HIFRAM tier has
- * shipped at 32 KB since the tier was introduced (TIKU_TIER_HIFRAM_SIZE) and
- * cannot exceed 64 KB at all, because tiku_mem_arch_size_t is 16-bit there.
- *
- * What the extent is FOR (it is deliberately small -- see the ledger note in
- * the layout comment above):
- *   1. staging scratch for the machinery that manages the region itself --
- *      TFS shadow slots, the RP2350 multi-sector mirror rebuild, and the
- *      planned extent-header rewrite;
- *   2. headroom for a whole module image (32 KB == TIKU_MODULE_CARVE_SIZE), so
- *      a Tier-3 module arriving over a link could be staged in full before it
- *      is committed.  NOTE: no code does this today -- a module image is a
- *      store file (mod.bin) that the store itself streams, and each install
- *      backend stages privately (Nordic/MSP430 store straight through, Ambiq
- *      via a 256 B buffer, RP2350 via its own 4 KB static).  This is why the
- *      size was chosen, not a use that exists;
- *   3. the portable <= 32 KB allocation promise above.
- * It is NOT a durable heap for applications: an anonymous NVM allocation has
- * no name and no validity gate, so nothing can recover it after a reset.  Data
- * that must survive with its identity intact belongs in a FILE (/data) or in a
- * named TIKU_PERSIST_CELL -- both of which carry the gate discipline the raw
- * tier cannot.
- */
-/*
- * Unconditional: this is the SIZE of the tier extent, not a claim that the
- * board has one.  Whether a region exists is answered at run time by
- * tiku_nvm_backend_get(), so the constant needs no platform list -- it is only
- * ever consulted on the path where a backend was already found.
+ * The layout service's nvm.tier knob overrides it; /data takes the rest.  On
+ * MSP430 the tier and /data are separate FRAM arrays.  Tier memory has no
+ * recovery identity, so named durable data belongs in a file or a cell.
  */
 #define TIKU_NVM_TIER_BYTES  (32u * 1024u)
 
 /*
- * REGION SIZE -- the compile-time mirror of what arch/common/tiku_nvm_layout.ld
- * carves at link time:
+ * Expected size of the carved region, per part, as the device scripts carve
+ * it through arch/common/tiku_nvm_layout.ld:
  *
  *     region = layout_top - layout_code_cap - layout_persist_size
  *
- * The C side needs this as a constant because the file store's geometry (its
- * slot count, and on MSP430 its backing array) is fixed at compile time.  Keep
- * the two in step: if a device script changes one of the three inputs, change
- * the matching line here.  A mismatch is caught -- `df` prints the region size
- * the linker actually produced next to this expectation, and both the tier and
- * the /data mount refuse a region smaller than the two extents need.
+ * No code reads these figures: the NVM tier and /data split the size the
+ * backend reports (tiku_nvm_backend_get()->size), which `df` prints.  Keep
+ * them in step with the device scripts.
  *
- * The code window is 0x60000 -- 384 KB -- on every part.  That is the point: a
- * code window is a contract about how much program a TikuOS image may be, not a
- * per-platform negotiation.  Measured largest images: 130.3 KB (apollo510b +
- * BLE), 121.6 KB (apollo4l/p), 122.6 KB (l15), 126.8 KB (lm20b + Axon driver),
- * 60.4 KB (rp2350) -- roughly 3x headroom everywhere.  Model weights and radio
- * firmware are store files, never .rodata, which is what keeps the window from
- * having to grow to fit a blob.  The Tier-3 module slot is INSIDE that window
- * (its top 32 KB, reserved only in loader builds), not an estate of its own,
- * so it appears in none of the arithmetic here.
+ * On these parts the code window is 0x60000 (384 KB) and bounds the image, so
+ * model weights and radio firmware go in store files, not .rodata.  Where a
+ * part has a loadable-module slot, it is the window's top 32 KB in loader
+ * builds, so it appears in none of the arithmetic here.
  *
  *   apollo510  0x800000 - 0x470000 - 0x4000 = 0x38C000  3632 KB
  *   apollo4l/p 0x200000 - 0x078000 - 0x4000 = 0x184000  1552 KB
@@ -112,6 +50,7 @@
  *   l15        0x17D000 - 0x060000 - 0x04000 = 0x119000  1124 KB
  *   ra8p1      0x100000 - 0x060000 - 0x04000 = 0x09C000   624 KB
  */
+/** @brief Expected carved-region size (documentation); 0 where not listed. */
 #if defined(AM_PART_APOLLO510)
 #define TIKU_NVM_REGION_BYTES  (3632u * 1024u)
 #elif defined(PLATFORM_AMBIQ)
@@ -125,43 +64,34 @@
 #elif defined(PLATFORM_RA8P1)
 #define TIKU_NVM_REGION_BYTES  (624u * 1024u)
 #elif defined(PLATFORM_STM32N6)
-/* Not linker-carved: the region is a span of the external NOR, so this mirrors
- * TIKU_XSPI_REGION_ADDR/BYTES in arch/stm32n6/tiku_xspi_arch.h rather than a
- * device script.  8 MB is what TIKU_TFS_MAX_SLOTS can address at a 4 KB slot. */
+/* Not linker-carved: the region is a span of the external NOR, so this
+ * follows TIKU_XSPI_REGION_BYTES in arch/stm32n6/tiku_xspi_arch.h.  8 MB is
+ * what TIKU_TFS_MAX_SLOTS can address at a 4 KB slot. */
 #define TIKU_NVM_REGION_BYTES  (8192u * 1024u)
+#elif defined(PLATFORM_ESP32C61)
+/* Not linker-carved: the region is a span of the external flash, so this
+ * follows TIKU_FLASH_REGION_BYTES in arch/esp32c61/tiku_flash_arch.h. */
+#define TIKU_NVM_REGION_BYTES  (5120u * 1024u)
 #else
 #define TIKU_NVM_REGION_BYTES  0u
 #endif
 
 /*
- * FILE-STORE (TFS) EXTENT -- the remainder, by construction.
- *
- * Everything in the region above the tier extent.  0 where the file store rides
- * its own backing (msp430 FRAM / host).  Resulting sizes:
- *
- *   apollo510  3632 - 32 = 3600 KB      lm20   1636 - 32 = 1604 KB
- *   apollo4l/p 1552 - 32 = 1520 KB      l15    1124 - 32 = 1092 KB
- *   rp2350     3708 - 32 = 3676 KB      ra8p1   624 - 32 =  592 KB
- *
- * The store DERIVES its capacity from whichever of these the linker actually
- * carved -- there is no per-platform file count to keep in step any more, and
- * the /data mount takes rgn->size - tier rather than a constant, so a carve that
- * disagrees with the figures above yields more or fewer files instead of
- * silently losing the difference.  These numbers are documentation now.
+ * Every target carves a region except MSP430, whose FRAM is unified with the
+ * code estate, and host builds, which have no NVM; a new port gets 1.
+ * Consumers also call tiku_nvm_backend_get() at run time: with no backend the
+ * NVM tier is absent and /data does not mount.
  */
 /**
- * @brief 1 on parts with a carved NVM region, 0 otherwise.  ALWAYS defined.
+ * @brief 1 on parts with a carved NVM region, 0 otherwise.
  *
- * Read this, never `TIKU_NVM_REGION_BYTES > 0`: an undefined identifier is 0 in
- * a preprocessor conditional, so the old spelling silently took the no-region
- * branch in any unit that forgot the include, and that branch is never an error.
+ * Defined on every target once this header is included.  TIKU_NVM_REGION_BYTES
+ * is 0 on a port its table does not list, so it does not say whether a region
+ * exists.
+ *
+ * @note An undefined name reads as 0 in #if, so a unit that could miss the
+ *       include checks #ifndef first (as tiku_basic_config.h does).
  */
-/* Names the EXCEPTIONS, not the members.  MSP430's FRAM is unified with the
- * code estate and host builds have no NVM at all; every other target carves a
- * region, so a new port is included by default rather than by being added
- * here.  A port with no backend yet still behaves: every consumer checks
- * tiku_nvm_backend_get() at run time, so being wrong here costs an error
- * rather than silent RAM. */
 #if defined(PLATFORM_MSP430) || defined(TIKU_TEST_HOST)
 #define TIKU_NVM_HAS_REGION  0
 #else
@@ -169,14 +99,17 @@
 #endif
 
 /*
- * FS extent, for the few callers that still want a compile-time figure.
+ * Expected file-store extent: the region less the default tier.
  *
- * The /data mount and the NVM tier do NOT use this: they take the region size
- * the linker actually carved (rgn->size) and split it at the tier boundary, so
- * a carve that disagrees with the constants above cannot silently lose the
- * difference.  This remains for documentation and for sizing decisions that
- * genuinely must happen at compile time.
+ *   apollo510  3632 - 32 = 3600 KB      lm20     1636 - 32 = 1604 KB
+ *   apollo4l/p 1552 - 32 = 1520 KB      l15      1124 - 32 = 1092 KB
+ *   rp2350     3708 - 32 = 3676 KB      ra8p1     624 - 32 =  592 KB
+ *   stm32n6    8192 - 32 = 8160 KB      esp32c61 5120 - 32 = 5088 KB
+ *
+ * No code reads it: /data takes the carved size less the layout service's
+ * tier, and the store derives its slot count from that at mount.
  */
+/** @brief Expected file-store extent (documentation); 0 without a region. */
 #if TIKU_NVM_HAS_REGION
 #define TIKU_NVMFS_FS_BYTES  (TIKU_NVM_REGION_BYTES - TIKU_NVM_TIER_BYTES)
 #else
@@ -186,8 +119,8 @@
 /**
  * @brief Return the board's carved NVM region backend, or NULL if none.
  *
- * The returned backend is owned by the region layer (do not free).  Reads use
- * be->base directly; writes go through be->write inside an NVM unlock window.
+ * The backend is a static object of the arch layer.  Reads use be->base
+ * directly; writes go through be->write inside an NVM unlock window.
  *
  * @return Pointer to the region backend, or NULL on parts without one.
  */

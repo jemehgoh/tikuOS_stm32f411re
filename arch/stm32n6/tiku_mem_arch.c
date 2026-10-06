@@ -8,7 +8,8 @@
  * tiku_mem_arch.c - STM32N6 memory helpers and the durable mirror.
  *
  * Durable state is an SRAM working copy mirrored to four NOR sectors:
- * restored at boot if the CRC agrees, rewritten at each explicit flush.
+ * restored at boot if the CRC agrees, rewritten by each flush that finds it
+ * changed.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -20,9 +21,8 @@
 #include "tiku_xspi_arch.h"
 #include <kernel/memory/tiku_nvm_mirror.h>
 
-/* The durable region is the .uninit span the linker script carves; the mirror
- * holds a 16-byte header and then as much of it as fits the four mirror
- * sectors. */
+/* The durable region is the .uninit span of the linker script; the mirror
+ * holds a 16-byte header followed by the region's image. */
 extern uint32_t __uninit_start;
 extern uint32_t __uninit_end;
 
@@ -38,7 +38,7 @@ static uint8_t mem_restore_status = TIKU_NVM_RESTORE_VIRGIN;
 /** @brief Erase/program cycles spent this boot. */
 static uint32_t mem_program_count;
 
-/** @brief Byte length of the durable region. */
+/** @brief Byte length of the durable region, capped at the mirror's room. */
 static size_t mem_uninit_size(void) {
     size_t n = (size_t)((uintptr_t)&__uninit_end - (uintptr_t)&__uninit_start);
     return (n > MIRROR_IMAGE_MAX) ? MIRROR_IMAGE_MAX : n;
@@ -69,9 +69,9 @@ void tiku_mem_arch_init(void) {
         return;
     }
 
-    /* A power cut during a flush leaves an image whose CRC cannot agree. The
-     * check runs against flash, so a torn mirror is refused before the live
-     * region is touched and first-boot priming runs instead. */
+    /* The CRC is checked against the flash before the live region is
+     * touched: a torn or corrupted image is refused, and first-boot priming
+     * runs instead. */
     const uint8_t *img = MIRROR_PTR + TIKU_NVM_MIRROR_HDR_BYTES;
     if (tiku_nvm_crc32(img, len) != hdr[TIKU_NVM_MIRROR_W_CRC]) {
         mem_restore_status = TIKU_NVM_RESTORE_CRC_FAIL;
@@ -84,6 +84,22 @@ void tiku_mem_arch_init(void) {
     }
     memcpy(&__uninit_start, img, n);
     mem_restore_status = TIKU_NVM_RESTORE_V2_OK;
+}
+
+/** @brief The mirror's image when it checks out (see tiku_mem_hal.h). */
+const uint8_t *tiku_mem_arch_durable(size_t *len) {
+    *len = 0u;
+    if (!tiku_xspi_ready() || tiku_xspi_mmap_enable() != TIKU_XSPI_OK) {
+        return NULL;
+    }
+    return tiku_nvm_mirror_image((const uint32_t *)(const void *)MIRROR_PTR,
+                                 TIKU_XSPI_MIRROR_BYTES, len);
+}
+
+/** @brief The .uninit window durable variables live in (see tiku_mem_hal.h). */
+uint8_t *tiku_mem_arch_durable_live(size_t *len) {
+    *len = (size_t)((uintptr_t)&__uninit_end - (uintptr_t)&__uninit_start);
+    return (uint8_t *)&__uninit_start;
 }
 
 void tiku_mem_arch_secure_wipe(uint8_t *buf, tiku_mem_arch_size_t len) {
@@ -121,29 +137,31 @@ void tiku_mem_arch_nvm_write(uint8_t *dst, const uint8_t *src,
     __asm__ volatile ("dsb" ::: "memory");
 }
 
-void tiku_mem_arch_nvm_flush(void) {
+int tiku_mem_arch_nvm_flush_status(void) {
     if (!tiku_xspi_ready()) {
-        return;
+        return -1;
     }
 
-    size_t   len = mem_uninit_size();
+    size_t len = (size_t)((uintptr_t)&__uninit_end - (uintptr_t)&__uninit_start);
+    if (len > MIRROR_IMAGE_MAX) {
+        return -1;
+    }
     uint32_t crc = tiku_nvm_crc32(&__uninit_start, len);
 
-    /* Skip a mirror that already matches: an erase costs one cycle of a finite
-     * per-sector budget and tens of milliseconds, for no change. */
+    /* A mirror that already matches is left alone; each erase spends one
+     * cycle of the sector's endurance. */
     if (tiku_xspi_mmap_enable() == TIKU_XSPI_OK) {
         const uint32_t *hdr = (const uint32_t *)(const void *)MIRROR_PTR;
         if (hdr[TIKU_NVM_MIRROR_W_MAGIC] == TIKU_NVM_MIRROR_MAGIC_V2 &&
             hdr[TIKU_NVM_MIRROR_W_LEN]   == (uint32_t)len &&
             hdr[TIKU_NVM_MIRROR_W_CRC]   == crc) {
-            return;
+            return 0;
         }
     }
 
-    /* Header last: the sectors are erased and the image programmed first, so
-     * a cut before the header lands leaves an erased magic and the mirror
-     * reads as virgin rather than as a header describing bytes never
-     * written. */
+    /* The header is programmed last: a power cut before it is programmed
+     * leaves the magic erased, and the next boot restores nothing
+     * (TIKU_NVM_RESTORE_VIRGIN). */
     uint32_t hdr_out[4];
     hdr_out[TIKU_NVM_MIRROR_W_MAGIC] = TIKU_NVM_MIRROR_MAGIC_V2;
     hdr_out[TIKU_NVM_MIRROR_W_CRC]   = crc;
@@ -153,19 +171,32 @@ void tiku_mem_arch_nvm_flush(void) {
     for (unsigned i = 0U; i < TIKU_XSPI_MIRROR_SECTORS; i++) {
         if (tiku_xspi_erase_sector(TIKU_XSPI_MIRROR_ADDR +
                                    (i * TIKU_XSPI_SECTOR_SIZE)) != TIKU_XSPI_OK) {
-            return;
+            goto failed;
         }
     }
     if (tiku_xspi_program(TIKU_XSPI_MIRROR_ADDR + TIKU_NVM_MIRROR_HDR_BYTES,
                           &__uninit_start, (uint32_t)len) != TIKU_XSPI_OK) {
-        return;
+        goto failed;
     }
     if (tiku_xspi_program(TIKU_XSPI_MIRROR_ADDR, hdr_out,
                           sizeof(hdr_out)) != TIKU_XSPI_OK) {
-        return;
+        goto failed;
+    }
+    if (tiku_xspi_mmap_enable() != TIKU_XSPI_OK) {
+        return -1;
     }
     mem_program_count++;
-    (void)tiku_xspi_mmap_enable();      /* leave reads cheap again */
+    return 0;
+
+failed:
+    (void)tiku_xspi_mmap_enable();
+    return -1;
+}
+
+/** @brief tiku_mem_arch_nvm_flush_status() with its result discarded. */
+void tiku_mem_arch_nvm_flush(void)
+{
+    (void)tiku_mem_arch_nvm_flush_status();
 }
 
 int tiku_mem_arch_nvm_restore_status(void) {

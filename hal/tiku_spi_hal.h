@@ -5,11 +5,11 @@
  *
  * Authors: Ambuj Varshney <ambuj@tiku-os.org>
  *
- * tiku_spi_hal.h - Platform-routing header for SPI bus
+ * tiku_spi_hal.h - platform routing for the SPI bus driver.
  *
- * Routes to the correct architecture-specific SPI header based on the
- * selected platform. This is the single point where the arch SPI header
- * enters the include chain for the platform-independent bus layer.
+ * Includes arch/<platform>/tiku_spi_arch.h for the PLATFORM_* macro the build
+ * defines. Code outside arch/ includes the SPI arch header only through this
+ * file.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -29,6 +29,8 @@
 #include <arch/stm32n6/tiku_spi_arch.h>
 #elif defined(PLATFORM_RA8P1)
 #include <arch/ra8p1/tiku_spi_arch.h>
+#elif defined(PLATFORM_ESP32C61)
+#include <arch/esp32c61/tiku_spi_arch.h>
 #endif
 
 #endif /* TIKU_SPI_HAL_H_ */

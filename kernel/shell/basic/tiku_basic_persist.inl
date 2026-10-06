@@ -7,9 +7,9 @@
  *
  * tiku_basic_persist.inl - default-slot SAVE and LOAD.
  *
- * Two backends: on region-backed parts the program is the store file prog.bas,
+ * Two backends: on region parts the program is the /data file prog.bas,
  * streamed out in bounded chunks and parsed in place on load, so neither
- * direction stages a whole program in RAM; MSP430 and host use the persist store.
+ * direction stages a whole program in RAM; MSP430 and host use tiku_persist.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -21,67 +21,29 @@
 /* FORWARD DECLARATIONS                                                      */
 /*---------------------------------------------------------------------------*/
 
-/* Program-table helpers and the REPL line dispatcher are defined
- * further down in the orchestrator. */
+/* Defined in tiku_basic_program.inl and tiku_basic_repl.inl, which
+ * tiku_basic.c includes after this file. */
 static void prog_clear(void);
 static int  prog_next_index(uint16_t lineno);
 static void process_line(const char *raw);
 
 /*---------------------------------------------------------------------------*/
-/* PROGRAM-BLOB STORAGE (durable backend for the default "prog" slot)        */
+/* PROGRAM STORAGE                                                           */
 /*---------------------------------------------------------------------------*/
 /*
- * SAVE / LOAD and the /data/basic bridge all go through basic_prog_store() /
- * basic_prog_fetch() so they stay consistent. On the region-backed parts
- * (BASIC_NVM_ON_REGION: Ambiq MRAM, RP2350 flash) the program lives at the
- * BASE of the carved NVM region's reserved tail ([magic][len][text], gate-last
- * through the backend's program op); elsewhere it rides the tiku_persist store
- * over the BASIC_NVM_PERSISTENT save buffer.  The F1 run-state checkpoint is
- * the tail's second tenant, at the TOP -- see tiku_basic_ckpt.inl, which also
- * asserts the two slots fit the tail together.
+ * The default program slot.  On region parts (BASIC_NVM_ON_REGION) it is the
+ * /data file BASIC_PROG_FILE, written through the store's streamed writer:
+ * begin reserves a run, append adds bounded chunks, commit flips the directory
+ * entry in one word, so a cut mid-SAVE leaves the previous program.  On MSP430
+ * and host it is the BASIC_PERSIST_KEY entry of the tiku_persist store, held
+ * in basic_save_buf.
  */
 
 #if BASIC_NVM_ON_REGION
 /*
- * The reserved tail is GONE from BASIC's view.  Its two tenants are now store
- * files -- prog.bas here, prog.ckpt in tiku_basic_ckpt.inl -- so the tail base
- * locator, its 'BASP' magic and the fit-in-the-tail assertion have no callers
- * left.  The replacement guards live next to the checkpoint's sizing, where
- * both objects can be checked against the STORE together
- * (TIKU_TFS_SPAN_FOR-based, in tiku_basic_ckpt.inl).
- *
- * With no tenants, the tail itself was deleted -- which was the point of the
- * exercise: a core memory header should never have been sized by a shell
- * feature's line capacity.  Its bytes are file store now.
- */
-
-/*
- * PROGRAM SLOT -- an ordinary /data file, not a carve.
- *
- * Owning the BASE of a reserved tail would force a core memory header to know
- * BASIC's line capacity (see the layering note in tiku_nvm_region.h).  The
- * program is instead the store file BASIC_PROG_FILE, competing for space with
- * everything else rather than being handed a per-platform reservation, so a
- * build without BASIC costs the store nothing.
- *
- * The three primitives map onto the store's streamed write, which exists for
- * exactly this shape of producer: begin (reserve a run), append (bounded
- * chunks, so RAM stays independent of program size), commit (one atomic word).
- *
- * The crash rule improves.  The old order was gate-clear -> text -> len ->
- * magic: invalidate first, so a cut mid-SAVE left NO saved program.  A store
- * replace stages into a fresh run and flips the directory last, so a cut
- * mid-SAVE leaves the PREVIOUS program intact.  Same one-word commit, strictly
- * better outcome.
- */
-/*
- * Deliberately NOT "basic/prog": /data already has a static VFS node named
- * "basic" (the program bridge, data_basic_read/write in tiku_vfs_tree_data.c),
- * and a store file under a "basic/" prefix makes `ls /data` show both an "rw
- * basic" file and a "d basic/" folder while `ls /data/basic` resolves to the
- * node and fails.  A flat name keeps the two distinguishable: "prog.bas" is
- * the program itself, "basic" stays a view of it (that bridge now reads
- * through this very file).
+ * The name must not start with "basic/": /data has a static node named
+ * "basic" (the program bridge in tiku_vfs_tree_data.c, which reads through
+ * this file), and `ls /data/basic` resolves to that node, not to a folder.
  */
 #define BASIC_PROG_FILE  "prog.bas"
 
@@ -97,9 +59,10 @@ basic_prog_fs(void)
 /**
  * @brief Begin replacing the saved program, reserving @p max bytes.
  *
- * @p max is the platform's committed capacity rather than the actual length,
- * so every SAVE reserves the same run length and replacement ping-pongs
- * between two equal runs instead of leaving ragged holes in the store.
+ * @p max is the size of this save, measured by the caller; the store needs
+ * only that much contiguous room.  A writer left open is released first.
+ *
+ * @return 0, or -1 with no store mounted or no room
  */
 static int
 basic_prog_begin(size_t max)
@@ -116,6 +79,7 @@ basic_prog_begin(size_t max)
            ? 0 : -1;
 }
 
+/** @brief Append @p n bytes to the open SAVE.  @return 0 or -1. */
 static int
 basic_prog_append(const void *p, size_t n)
 {
@@ -125,6 +89,11 @@ basic_prog_append(const void *p, size_t n)
     return (tiku_tfs_write_chunk(&basic_prog_wr, p, n) == TFS_OK) ? 0 : -1;
 }
 
+/**
+ * @brief Commit the open SAVE; on failure release it, keeping the previous
+ *        program.
+ * @return 0 or -1
+ */
 static int
 basic_prog_commit(void)
 {
@@ -135,6 +104,7 @@ basic_prog_commit(void)
     return 0;
 }
 
+/** @brief Abandon the open SAVE; the previous program stands. */
 static void
 basic_prog_discard(void)
 {
@@ -144,9 +114,8 @@ basic_prog_discard(void)
 /**
  * @brief Zero-copy view of the saved program text.
  *
- * Read in place: the store hands back a pointer straight into memory-mapped
- * NVM, and because a file's slots are contiguous that stays one pointer even
- * for a program spanning many.  LOAD therefore copies nothing.
+ * The store maps the file in place, and a file's slots are contiguous, so one
+ * pointer covers a program of any length.
  *
  * @param len_out  Receives the stored text length on success.
  * @return Pointer to the text inside the store, or NULL when none is saved.
@@ -167,7 +136,7 @@ basic_region_text(size_t *len_out)
 }
 #else
 /**
- * @brief Lazily register the save buffer with the persist store (non-Ambiq).
+ * @brief Lazily register the save buffer with the persist store (MSP430/host).
  * @return 0 on success, -1 on persist-store failure.
  */
 static int
@@ -200,14 +169,12 @@ static int
 basic_prog_store(const char *text, size_t len)
 {
 #if BASIC_NVM_ON_REGION
-    /* Bound by the platform's committed program capacity, which is also the
-     * reservation every SAVE takes (see basic_prog_begin). */
     if (len > TIKU_BASIC_SAVE_BUF_BYTES) {
         return -1;
     }
-    /* Whole-blob path, kept for the /data/basic VFS bridge, which supplies a
-     * complete image.  SAVE itself streams -- see basic_save_to_persist. */
-    if (basic_prog_begin(TIKU_BASIC_SAVE_BUF_BYTES) != 0 ||
+    /* Whole-image path for the /data/basic bridge, which supplies a complete
+     * image; SAVE streams instead (basic_save_to_persist). */
+    if (basic_prog_begin(len) != 0 ||
         basic_prog_append(text, len) != 0) {
         basic_prog_discard();
         return -1;
@@ -268,31 +235,15 @@ basic_prog_fetch(char *buf, size_t max, size_t *out_len)
 /*---------------------------------------------------------------------------*/
 
 /*
- * SERIALIZATION SCRATCH -- BOUNDED, not program-sized.
+ * Serialization scratch.  On region parts it is a 4 KB chunk: LOAD parses
+ * the saved text in place in the memory-mapped region, and SAVE serializes
+ * into the chunk and appends it to the file whenever it cannot hold another
+ * maximum-length line.  4 KB is one RP2350 flash sector, the unit that
+ * part's backend erases and reprograms per write.  The size also bounds the
+ * largest file IMPORT and the named SAVE/LOAD handle.
  *
- * A whole worst-case program image would be PROGRAM_LINES*(LINE_MAX+8) bytes of
- * always-resident RAM: 155,649 B on the nRF54LM20 (63% of its primary SRAM
- * bank) and 258,401 B on the Apollo510, reserved at link time whether or not
- * SAVE or LOAD is ever used, and duplicating the arena's own prog[] line table
- * almost exactly -- 2.07 bytes of live SRAM per byte of program capacity.
- *
- * On the region-backed parts neither direction actually needs it:
- *   - LOAD reads the program in place.  The region is memory-mapped, so the
- *     saved text is already addressable; there is nothing to copy in.
- *   - SAVE streams.  It serializes into this fixed chunk and flushes to the
- *     slot whenever the chunk cannot hold another maximum-length line, so RAM
- *     is independent of program size.
- *
- * 4 KB is chosen, not arbitrary: it is one RP2350 flash sector (the granule
- * region_write() erases and reprograms per call, so a smaller chunk would
- * multiply sector operations) and simultaneously one /data file, which is the
- * largest thing IMPORT can be handed.  Sizes below one max-length line are a
- * build error.
- *
- * MSP430 and host keep the whole-program buffer: MSP430's saved program lives
- * in the tiku_persist store rather than a mapped region, so there is no
- * in-place text to parse, and at 96 lines the buffer is 14.6 KB in upper FRAM
- * -- not SRAM, and not the problem this solves.
+ * MSP430 and host hold a whole program here: their saved program lives in
+ * the tiku_persist store, which offers no in-place view.
  */
 #if BASIC_NVM_ON_REGION
 #define BASIC_SCRATCH_BYTES  4096u
@@ -304,51 +255,31 @@ _Static_assert(BASIC_SCRATCH_BYTES >= (unsigned)TIKU_BASIC_LINE_MAX + 16u,
 static BASIC_SCRATCH char basic_persist_scratch[BASIC_SCRATCH_BYTES];
 
 #if BASIC_NVM_ON_REGION
-/* One line at a time, for LOAD.  Deliberately NOT the scratch above: a saved
- * line is dispatched through process_line() while a pointer is still held into
- * the buffer, and process_line() can reach commands that use the scratch
- * themselves (IMPORT).  160 bytes buys that aliasing hazard away. */
+/* One saved line at a time, for LOAD and named LOAD.  It is separate from
+ * the scratch: process_line() can reach IMPORT, which overwrites the scratch,
+ * while it still reads the line. */
 static char basic_load_line[TIKU_BASIC_LINE_MAX + 16];
 #endif
 
+#if BASIC_NVM_ON_REGION
 /**
- * @brief Serialise the in-memory program in ascending order and
- *        commit it to FRAM under BASIC_PERSIST_KEY.
+ * @brief One pass over the program in LIST order through the bounded chunk.
  *
- * @return 0 on success, -1 on persist failure or buffer overflow.
+ * With @p emit the chunk goes to the open SAVE whenever it could not hold
+ * another maximum-length line; without, the bytes are only counted.
+ * @return 0, -1 on a write or format failure, -2 when the program would
+ *         exceed TIKU_BASIC_SAVE_BUF_BYTES.  @p total_out gets the byte count.
  */
 static int
-basic_save_to_persist(void)
+basic_save_pass(int emit, size_t *total_out)
 {
-#if BASIC_NVM_ON_REGION
-    /*
-     * Streaming save.  Serialize ascending-ordered lines (the shape LIST
-     * prints) into the bounded chunk and flush to the slot whenever the chunk
-     * could not hold another maximum-length line, so RAM cost is independent
-     * of program length.
-     *
-     * The commit rule got BETTER when the program became a store file: the
-     * text streams into a fresh run and the directory flips to it last, so a
-     * cut mid-SAVE leaves the PREVIOUS saved program intact.  The old carve
-     * could not do that -- it cleared its magic before the first byte, because
-     * a shadow needed a second slot and the reserved tail held only one.
-     *
-     * The size bound is still TIKU_BASIC_SAVE_BUF_BYTES: it is the platform's
-     * committed capacity and the reservation each SAVE takes, so a program
-     * cannot grow past what the checkpoint's sizing assumed.
-     */
     char *const  chunk   = basic_persist_scratch;
     const size_t cap     = sizeof basic_persist_scratch;
     const size_t line_hw = (size_t)TIKU_BASIC_LINE_MAX + 16u;  /* worst line */
     size_t       fill    = 0;   /* serialized, not yet written to NVM */
-    size_t       total   = 0;   /* already written to the slot        */
+    size_t       total   = 0;   /* already appended to the file       */
     uint16_t     cur     = 0;
-    int          err     = 0;
 
-    if (basic_prog_begin(TIKU_BASIC_SAVE_BUF_BYTES) != 0) {
-        basic_report(TIKU_BASIC_ERR_IO, "save failed");
-        return -1;
-    }
     for (;;) {
         int idx = prog_next_index(cur);
         int n;
@@ -356,36 +287,27 @@ basic_save_to_persist(void)
         if (idx < 0) {
             break;
         }
-        if (cap - fill < line_hw) {              /* flush before it cannot fit */
-            if (basic_prog_append(chunk, fill) != 0) {
-                err = 1;
-                break;
+        if (cap - fill < line_hw) {              /* flush before it overflows */
+            if (emit && basic_prog_append(chunk, fill) != 0) {
+                return -1;
             }
             total += fill;
             fill   = 0;
         }
         if (total + fill + line_hw > TIKU_BASIC_SAVE_BUF_BYTES) {
-            /* Release the staged run before bailing: the writer holds a
-             * reservation in the store's RAM allocation map, so returning
-             * without it strands those slots until the next mount -- and every
-             * later SAVE this boot then fails for space. */
-            basic_prog_discard();
-            basic_report(TIKU_BASIC_ERR_IO, "save: program too large for slot");
-            return -1;
+            return -2;
         }
-        /* Number, then the DETOKENIZED body: the on-media format stays
-         * plain text, so pre-A2 saves load unchanged and LOAD re-crunches. */
+        /* Number, then the detokenized body: the saved format is plain
+         * text, which LOAD crunches again. */
         n = snprintf(chunk + fill, cap - fill, "%u ",
                      (unsigned)prog[idx].number);
         if (n < 0 || (size_t)n >= cap - fill) {
-            err = 1;
-            break;
+            return -1;
         }
         fill += (size_t)n;
         n = basic_detok(chunk + fill, cap - fill, prog[idx].text);
         if (n < 0 || (size_t)n + 1u >= cap - fill) {
-            err = 1;
-            break;
+            return -1;
         }
         fill += (size_t)n;
         chunk[fill++] = '\n';
@@ -394,21 +316,49 @@ basic_save_to_persist(void)
         }
         cur = (uint16_t)(prog[idx].number + 1);
     }
-    if (!err && fill > 0u) {
-        if (basic_prog_append(chunk, fill) != 0) {
-            err = 1;
-        } else {
-            total += fill;
-        }
-    }
-    if (err) {
-        basic_prog_discard();        /* previous saved program survives */
-        basic_report(TIKU_BASIC_ERR_IO, "save failed");
+    if (fill > 0u && emit && basic_prog_append(chunk, fill) != 0) {
         return -1;
     }
-    if (basic_prog_commit() != 0) {
-        /* tiku_tfs_commit() leaves the writer active on its error returns, so
-         * the reservation needs releasing here too. */
+    *total_out = total + fill;
+    return 0;
+}
+#endif
+
+/**
+ * @brief Serialize the program in line order into the default slot: prog.bas
+ *        on region parts, BASIC_PERSIST_KEY on MSP430/host.
+ *
+ * @return 0 on success, -1 on a write failure or a program too large.
+ */
+static int
+basic_save_to_persist(void)
+{
+#if BASIC_NVM_ON_REGION
+    /*
+     * Streaming save, in LIST order, through the bounded chunk.  The text
+     * goes into a fresh run and the directory flips to it at commit, so a cut
+     * mid-SAVE leaves the previous program.  The pass runs twice: once to
+     * measure, so the store reserves only what this save writes, then to
+     * write.  TIKU_BASIC_SAVE_BUF_BYTES bounds the program, as the store-fit
+     * assertion in tiku_basic_ckpt.inl assumes.
+     */
+    size_t total = 0;
+    int    rc    = basic_save_pass(0, &total);
+
+    if (rc == 0) {
+        rc = (basic_prog_begin(total) == 0) ? basic_save_pass(1, &total) : -1;
+        if (rc != 0) {
+            basic_prog_discard();        /* previous saved program survives */
+        }
+    }
+    if (rc == -2) {
+        basic_report(TIKU_BASIC_ERR_IO, "save: program too large for slot");
+        return -1;
+    }
+    if (rc != 0 || basic_prog_commit() != 0) {
+        /* basic_prog_commit() and the failed pass above have already
+         * released the writer; tiku_tfs_abort() on a released writer does
+         * nothing. */
         basic_prog_discard();
         basic_report(TIKU_BASIC_ERR_IO, "save failed");
         return -1;
@@ -416,11 +366,9 @@ basic_save_to_persist(void)
     SHELL_PRINTF(SH_GREEN "saved %u bytes" SH_RST "\n", (unsigned)total);
     return 0;
 #else
-    /* Serialize ascending-ordered program lines (the shape LIST prints) into
-     * the whole-program scratch, then commit it under the default slot via
-     * basic_prog_store().  MSP430/host: the saved program lives in the
-     * tiku_persist store, not a mapped region, so there is nothing to stream
-     * into and the buffer is the transfer medium. */
+    /* Serialize the program in LIST order into the whole-program scratch,
+     * then commit it through basic_prog_store(): the tiku_persist store takes
+     * the image in one write. */
     char *const  tmp     = basic_persist_scratch;
     const size_t tmp_cap = TIKU_BASIC_SAVE_BUF_BYTES;
     size_t      pos = 0;
@@ -432,8 +380,8 @@ basic_save_to_persist(void)
         if (idx < 0) {
             break;
         }
-        /* Number, then the DETOKENIZED body: the on-media format stays
-         * plain text, so pre-A2 saves load unchanged and LOAD re-crunches. */
+        /* Number, then the detokenized body: the saved format is plain
+         * text, which LOAD crunches again. */
         n = snprintf(tmp + pos, tmp_cap - pos, "%u ",
                      (unsigned)prog[idx].number);
         if (n < 0 || (size_t)n >= tmp_cap - pos) {
@@ -465,23 +413,17 @@ basic_save_to_persist(void)
 }
 
 /**
- * @brief Read the FRAM-backed program text and replay it through
- *        process_line() to repopulate the in-memory line table.
+ * @brief Replay the saved program text through process_line() to rebuild
+ *        the in-memory line table.
  *
- * @return 0 on success, -1 if no saved program exists or persist
- *         read fails.
+ * @return 0 on success, -1 if nothing is saved or the read fails.
  */
 static int
 basic_load_from_persist(void)
 {
 #if BASIC_NVM_ON_REGION
-    /*
-     * Read the program in place.  The region is memory-mapped, so the saved
-     * text is already addressable and nothing has to be copied into RAM first
-     * -- only the single line being dispatched is copied out, into a 160-byte
-     * buffer.  This is what let the serialization scratch stop being
-     * program-sized.
-     */
+    /* Read the program in place: the region is memory-mapped, so only the
+     * line being dispatched is copied out, into basic_load_line. */
     size_t      len  = 0;
     const char *text = basic_region_text(&len);
     size_t      i, ls = 0;
@@ -492,15 +434,15 @@ basic_load_from_persist(void)
         return -1;
     }
 
-    /* Wipe the in-memory program AND variables before loading, so the saved
-     * version is what the user actually gets: not merged onto stale lines, and
-     * not tripping "array already DIMmed" against a prior session's arrays. */
+    /* Clear the in-memory program and variables first: the saved lines must
+     * not merge onto stale ones, and an array left by an earlier RUN would
+     * fail a DIM of the same name. */
     prog_clear();
     basic_clear_vars();
 
     /* Walk the stored text a line at a time.  i == len feeds a synthetic
-     * terminator so a final line without a newline is still dispatched; a
-     * trailing newline just yields an empty line, which is skipped. */
+     * terminator, which dispatches a final line without a newline; a
+     * trailing newline yields an empty line, which is skipped. */
     for (i = 0; i <= len; i++) {
         char c = (i < len) ? text[i] : '\n';
 
@@ -514,7 +456,7 @@ basic_load_from_persist(void)
                 basic_load_line[n] = '\0';
                 process_line(basic_load_line);
             } else {
-                toolong = 1;      /* only reachable on a corrupt slot */
+                toolong = 1;      /* SAVE never writes one this long */
             }
         }
         ls = i + 1;
@@ -541,15 +483,14 @@ basic_load_from_persist(void)
     }
     tmp[n_read] = '\0';
 
-    /* Wipe the in-memory program AND variables before loading, so the saved
-     * version is what the user actually gets: not merged onto stale lines, and
-     * not tripping "array already DIMmed" against a prior session's arrays. */
+    /* Clear the in-memory program and variables first: the saved lines must
+     * not merge onto stale ones, and an array left by an earlier RUN would
+     * fail a DIM of the same name. */
     prog_clear();
     basic_clear_vars();
 
-    /* Walk the buffer one line at a time, dispatching through
-     * process_line.  Each line is a numbered statement, so each
-     * call just stores it. */
+    /* Walk the buffer one line at a time through process_line(), which
+     * stores each numbered line. */
     line_start = tmp;
     for (p = tmp; *p != '\0'; p++) {
         if (*p == '\n' || *p == '\r') {
