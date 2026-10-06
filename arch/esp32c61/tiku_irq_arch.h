@@ -1,0 +1,108 @@
+/*
+ * Tiku Operating System v0.06
+ * Simple. Ubiquitous. Intelligence, Everywhere.
+ * http://tiku-os.org
+ *
+ * Authors: Ambuj Varshney <ambuj@tiku-os.org>
+ *
+ * tiku_irq_arch.h - ESP32-C61 interrupt lines over the matrix and the CLIC.
+ *
+ * A peripheral source reaches the core on one of 32 CPU lines; each line has
+ * a handler, a level and an enable.  The lines in use are fixed here.
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+#ifndef TIKU_ESP32C61_IRQ_ARCH_H_
+#define TIKU_ESP32C61_IRQ_ARCH_H_
+
+#include <stdint.h>
+
+#include "tiku_esp32c61_regs.h"
+
+/* The map, whole: every line this port claims. */
+#define TIKU_ESP32C61_LINE_TICK     10U
+#define TIKU_ESP32C61_LINE_HTIMER   11U
+#define TIKU_ESP32C61_LINE_GPIO     12U
+#define TIKU_ESP32C61_LINE_UART0    13U
+#define TIKU_ESP32C61_LINE_SWITCH   14U     /* worker threads' context switch */
+#define TIKU_ESP32C61_LINE_DMA      15U     /* AHB DMA channel 0, copy done */
+/* The radio's LINES_RADIO lines from LINE_RADIO: the first for its timer,
+ * the rest for what its libraries ask for. */
+#define TIKU_ESP32C61_LINE_RADIO    16U
+#define TIKU_ESP32C61_LINES_RADIO   4U
+
+/* Levels run 1..7: the timers take the highest and the context switch the
+ * lowest, so a switch waits for every other pending handler. */
+#define TIKU_ESP32C61_LEVEL_TIMER   7U
+#define TIKU_ESP32C61_LEVEL_DEFAULT 3U
+#define TIKU_ESP32C61_LEVEL_SWITCH  1U
+
+/** @brief A line's handler; it clears its source before returning, since
+ *         every line is level-triggered. */
+typedef void (*tiku_esp32c61_isr_t)(void);
+
+/** @brief A switching handler: given the saved frame, the frame to resume. */
+typedef uint32_t *(*tiku_esp32c61_switch_t)(uint32_t *frame);
+
+/** @brief mstatus.MIE off. @return Its previous state, for _mie_restore() */
+static inline uint32_t tiku_esp32c61_mie_off(void) {
+    uint32_t s;
+
+    __asm__ volatile ("csrrc %0, mstatus, %1"
+                      : "=r" (s) : "r" (ESP32C61_MSTATUS_MIE) : "memory");
+    return s & ESP32C61_MSTATUS_MIE;
+}
+
+/** @brief Put back the state _mie_off() returned. @param s  That state */
+static inline void tiku_esp32c61_mie_restore(uint32_t s) {
+    if (s != 0UL) {
+        __asm__ volatile ("csrs mstatus, %0" :: "r" (s) : "memory");
+    }
+}
+
+/** @brief Unroute every source and quiet every line; MIE is left off. */
+void tiku_esp32c61_irq_init(void);
+
+/**
+ * @brief Route @p source to @p line at @p level and give the line @p isr.
+ *
+ * The line is left disabled; level-triggered, which every source here is.
+ */
+void tiku_esp32c61_irq_attach(unsigned line, unsigned source,
+                              unsigned level, tiku_esp32c61_isr_t isr);
+
+/** @brief As _attach(), for the one handler that may resume another frame. */
+void tiku_esp32c61_irq_attach_switch(unsigned line, unsigned source,
+                                     unsigned level, tiku_esp32c61_switch_t fn);
+
+/** @brief Enable one line. @param line  0..31 */
+void tiku_esp32c61_irq_enable(unsigned line);
+
+/** @brief Disable one line; done when this returns. @param line  0..31 */
+void tiku_esp32c61_irq_disable(unsigned line);
+
+/** @brief Lines enabled now, one bit each. @return The set */
+uint32_t tiku_esp32c61_irq_enabled(void);
+
+/** @brief Make exactly @p lines enabled. @param lines  One bit per line */
+void tiku_esp32c61_irq_set_enabled(uint32_t lines);
+
+/** @brief Disable those of @p lines that are on. @return Those, to give
+ *         _release(); lines enabled meanwhile stay as they are. */
+uint32_t tiku_esp32c61_irq_hold(uint32_t lines);
+
+/** @brief Enable again the lines _hold() returned. @param held  That set */
+void tiku_esp32c61_irq_release(uint32_t held);
+
+/** @brief Mark @p line's handler as code in flash: held while a flash
+ *         write suspends the cache.  @param on  Non-zero to mark, 0 to clear */
+void tiku_esp32c61_irq_mark_flash(unsigned line, int on);
+
+/** @brief The lines marked so, one bit each. @return The set */
+uint32_t tiku_esp32c61_irq_flash_lines(void);
+
+/** @brief Interrupts that arrived on a line no handler claimed. */
+uint32_t tiku_esp32c61_irq_spurious(void);
+
+#endif /* TIKU_ESP32C61_IRQ_ARCH_H_ */

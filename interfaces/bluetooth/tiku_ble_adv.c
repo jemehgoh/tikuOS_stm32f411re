@@ -5,11 +5,11 @@
  *
  * Authors: Ambuj Varshney <ambuj@tiku-os.org>
  *
- * tiku_ble_adv.c - BLE broadcaster/observer facade, nRF54L15 backend.
+ * tiku_ble_adv.c - BLE broadcaster/observer facade, nRF54L backend.
  *
- * Implements tiku_ble_adv.h on the on-die 2.4 GHz RADIO, compiled only where the
- * build maps a broadcast-capable radio to TIKU_HAS_BLE_ADV.  The background beacon
- * is a callback timer in the arming process's context, so nothing preempts.
+ * Implements tiku_ble_adv.h on the on-die 2.4 GHz RADIO, compiled only where
+ * the build maps a broadcast-capable radio to TIKU_HAS_BLE_ADV.  The beacon is
+ * a callback timer in the arming process's context, or runs on the FLPR.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -20,7 +20,7 @@
 
 #include <arch/nordic/tiku_radio_arch.h>
 #if (TIKU_FLPR_ENABLE + 0)
-#include <arch/nordic/tiku_flpr_arch.h>    /* F4: beacon offload           */
+#include <arch/nordic/tiku_flpr_arch.h>    /* beacon offload               */
 #endif
 #include <arch/nordic/tiku_timer_arch.h>   /* TIKU_CLOCK_ARCH_SECOND        */
 #include <kernel/timers/tiku_clock.h>
@@ -34,7 +34,7 @@
 #define BLE_ADV_INTERVAL_DFLT_MS  1000u
 
 /*---------------------------------------------------------------------------*/
-/* Beacon state                                                              */
+/* BEACON STATE                                                              */
 /*---------------------------------------------------------------------------*/
 
 static uint8_t  adv_pdu[48] __attribute__((aligned(4))); /* radio DMA source */
@@ -47,16 +47,15 @@ static uint16_t adv_interval_ms;
 static uint8_t  adv_on;
 static uint32_t adv_burst_count;
 static uint8_t  radio_inited;
-static uint8_t  adv_offloaded;      /* beacon runs on the FLPR (F4)        */
+static uint8_t  adv_offloaded;      /* beacon runs on the FLPR             */
 
 /* Last-scan summary for /sys/radio observability. */
 static uint8_t               scan_last_count;
 static tiku_ble_adv_report_t scan_last_best;
 static uint8_t               scan_have_best;
 
-/* Ownership arbiter (R7): one radio, one owner; deny, never queue.
- * Replaces the scattered adv_offloaded checks as THE gate -- the
- * adv_offloaded flag survives below purely as FLPR mechanics. */
+/* Ownership arbiter: claims are denied, never queued.  radio_owner is the
+ * gate; adv_offloaded only tracks the FLPR hand-off. */
 static uint8_t radio_owner;             /* tiku_ble_adv_owner_t            */
 
 tiku_ble_adv_owner_t tiku_ble_adv_owner(void)
@@ -73,7 +72,7 @@ const char *tiku_ble_adv_owner_str(void)
     return names[radio_owner];
 }
 
-/* L6 R7: the FLPR serial link claims the whole radio (NonSecure, on the
+/* The FLPR serial link claims the whole radio (NonSecure, on the
  * coprocessor) for the connection's lifetime -- no time-division with a
  * beacon/observer.  Claim only from IDLE; the beacon/observe starts refuse
  * while CONN is held (below). */
@@ -93,9 +92,9 @@ void tiku_ble_adv_conn_release(void)
     }
 }
 
-/* N-track R7: 802.15.4 mode-switches the shared RADIO wholesale, so it takes
- * the same exclusive claim -- refusing while a beacon/observer/connection
- * holds it, and blocking them while it runs (same IDLE gate below). */
+/* 802.15.4 mode-switches the shared RADIO wholesale, so it takes the same
+ * exclusive claim -- refusing while a beacon/observer/connection holds it,
+ * and blocking them while it runs (same IDLE gate below). */
 int tiku_ble_adv_154_claim(void)
 {
     if (radio_owner != TIKU_BLE_ADV_OWNER_IDLE) {
@@ -112,6 +111,7 @@ void tiku_ble_adv_154_release(void)
     }
 }
 
+/** @brief Initialise the radio on first use. */
 static void adv_radio_init_once(void)
 {
     if (!radio_inited) {
@@ -120,20 +120,23 @@ static void adv_radio_init_once(void)
     }
 }
 
-/* Random static device address (Core spec: two MSBs = 11), derived from the
- * FICR device ID so every board is distinct yet stable across boots. */
+/**
+ * @brief Random static device address (Core spec: two MSBs = 11), derived from
+ *        the FICR device ID so every board is distinct yet stable across boots.
+ */
 static void adv_random_addr(uint8_t addr[6])
 {
     tiku_common_unique_id(addr, 6u);
     addr[5] |= 0xC0u;
 }
 
-/* One 3-channel burst.  In combined mode (R7.5) the beacon time-divides
- * the radio with a running observer: borrow it (disarm RX), burst, hand
- * it back (re-arm RX, ring intact).  The ~1.3 ms RX blackout per beacon
- * interval is the whole cost -- 0.13% at a 1 s cadence.  Cooperative
- * dispatch means this callback and the observer's service tick never
- * overlap, so the borrow needs no locking. */
+/**
+ * @brief Send one 3-channel burst.
+ *
+ * In combined mode it borrows the radio from a running observer (disarm RX),
+ * bursts and hands it back (re-arm RX, ring intact); cooperative dispatch
+ * never runs it inside the observer's tick, so the borrow needs no lock.
+ */
 static void beacon_burst(void)
 {
     if (radio_owner == TIKU_BLE_ADV_OWNER_BEACON_OBSERVE) {
@@ -146,9 +149,11 @@ static void beacon_burst(void)
     adv_burst_count++;
 }
 
-/* Timer callback in the arming process's context; re-arms drift-free.
- * The per-burst HF clock request that makes a post-sleep burst decodable
- * lives in the arch send path. */
+/**
+ * @brief Beacon timer callback, in the arming process's context; re-arms
+ *        drift-free.  The per-burst HF clock request that keeps a post-sleep
+ *        burst decodable lives in the arch send path.
+ */
 static void adv_burst_cb(void *ptr)
 {
     (void)ptr;
@@ -173,18 +178,18 @@ int tiku_ble_adv_beacon_data(const char *name, uint16_t interval_ms,
     uint8_t ad[31], addr[6];
     uint8_t adlen = 0u, nlen;
     tiku_clock_time_t ticks;
-    /* Arbiter (R7.5): a beacon and the background observer time-divide
-     * one radio, so starting a beacon while OBSERVE is allowed and
+    /* Arbiter: a beacon and the background observer time-divide one
+     * radio, so starting a beacon while OBSERVE is allowed and
      * transitions to the combined owner.  obs_active also forces the
      * M33-timer path below -- the FLPR beacon drives the radio
      * NonSecure continuously and cannot coexist with an M33 observer. */
     uint8_t obs_active = (radio_owner == TIKU_BLE_ADV_OWNER_OBSERVE ||
                           radio_owner == TIKU_BLE_ADV_OWNER_BEACON_OBSERVE);
 
-    /* A blocking scan owns the CPU synchronously (nothing else runs), so
-     * SCAN is denied defensively.  A live serial connection (L6) drives the
-     * radio NonSecure on the FLPR for its whole lifetime; 802.15.4 has the
-     * RADIO in a different MODE entirely -- deny both. */
+    /* SCAN, CONN and 802.15.4 are refused: a blocking scan holds the radio
+     * until it returns, a serial connection drives the radio NonSecure on
+     * the FLPR for its whole lifetime, and 802.15.4 has the RADIO in
+     * another MODE. */
     if (radio_owner == TIKU_BLE_ADV_OWNER_SCAN ||
         radio_owner == TIKU_BLE_ADV_OWNER_CONN ||
         radio_owner == TIKU_BLE_ADV_OWNER_154) {
@@ -221,7 +226,7 @@ int tiku_ble_adv_beacon_data(const char *name, uint16_t interval_ms,
 
     /* AD: Flags (LE general discoverable, no BR/EDR) + Complete Local Name
      * + manufacturer data: company id 0x4B54 ('TK' little-endian) followed
-     * by the telemetry payload -- the `ADC -> beacon -> any phone` path. */
+     * by the telemetry payload. */
     ad[adlen++] = 0x02u; ad[adlen++] = 0x01u; ad[adlen++] = 0x06u;
     ad[adlen++] = (uint8_t)(1u + nlen);
     ad[adlen++] = 0x09u;
@@ -252,46 +257,44 @@ int tiku_ble_adv_beacon_data(const char *name, uint16_t interval_ms,
         ticks = 1u;
     }
 
-    /* Erratum-20 discipline: hold Constant Latency across the whole beacon
-     * session so the tickless sleeps between bursts happen in that mode.
-     * (The decodability of post-sleep bursts itself comes from the per-
-     * burst HF clock kick in the arch send path.) */
+    /* Constant Latency is held for the whole beacon session (nRF54L
+     * erratum 20), so the tickless sleeps between bursts run in that mode.
+     * A burst after a sleep stays decodable through the HF clock request
+     * in the arch send path. */
     tiku_radio_arch_constlat_hold(1);
 
 #if (TIKU_FLPR_ENABLE + 0)
-    /* F4: when the coprocessor firmware is alive AND no M33 observer is
-     * running, the whole beacon runs THERE -- no kernel timer is armed,
-     * so the M33 never wakes for a burst.  The link config was just
-     * programmed by init (radio still secure at that point); the arch
-     * call flips RADIO+UARTE21 to the FLPR and ships the PDU.  Skipped
-     * under a live observer: the offload would seize the radio NonSecure
-     * out from under the M33 RX engine. */
+    /* With the coprocessor firmware alive and no M33 observer running, the
+     * whole beacon runs on the FLPR and no kernel timer is armed, so the
+     * M33 does not wake for a burst.  The arch call hands RADIO and
+     * UARTE21 to the FLPR (NonSecure) and passes it the PDU.  A live
+     * observer keeps the beacon on the M33: the hand-off would take the
+     * radio from the M33 RX engine. */
     if (!obs_active && tiku_flpr_arch_alive() &&
         tiku_flpr_arch_beacon(adv_pdu, adv_pdu_len, interval_ms) == 0) {
-        /* Retune from an M33-timer beacon: the timer MUST die with the
-         * hand-off -- its next burst would touch RADIO/UARTE21 through
-         * the secure alias after the offload flipped them NonSecure
-         * (precise bus fault, BFAR=UARTE21_S; measured). */
+        /* Stop the M33 timer at the hand-off: its next burst would touch
+         * RADIO/UARTE21 through the secure alias after the offload flipped
+         * them NonSecure, a precise bus fault (BFAR=UARTE21_S). */
         tiku_timer_stop(&adv_timer);
         adv_offloaded = 1u;
         adv_on = 1u;
         radio_owner = TIKU_BLE_ADV_OWNER_BEACON_FLPR;
         return 0;
     }
-    /* Retune fell back to the M33 path while offloaded (coprocessor died
-     * or refused): reclaim the peripherals for the secure alias first --
-     * beacon_stop flips RADIO+UARTE21 back even if the FLPR never
-     * answers. */
+    /* A retune that falls back to the M33 path while offloaded (the
+     * coprocessor died or refused) reclaims the peripherals for the secure
+     * alias first: tiku_flpr_arch_beacon_stop() returns RADIO and UARTE21
+     * even if the FLPR does not answer. */
     if (adv_offloaded) {
         tiku_flpr_arch_beacon_stop();
         adv_offloaded = 0u;
     }
 #endif
 
-    /* Combined owner FIRST, so beacon_burst() below takes the borrow
-     * path when an observer is live.  First burst now (a beacon should
-     * be instantly visible), then the timer paces the rest; set_callback
-     * re-sets an already-active timer. */
+    /* The combined owner is set before the first burst, so beacon_burst()
+     * takes the borrow path when an observer is live.  The first burst
+     * goes out at once and the timer paces the rest;
+     * tiku_timer_set_callback() re-arms an already-active timer. */
     radio_owner = obs_active ? TIKU_BLE_ADV_OWNER_BEACON_OBSERVE
                              : TIKU_BLE_ADV_OWNER_BEACON;
     beacon_burst();
@@ -317,9 +320,9 @@ void tiku_ble_adv_stop(void)
         adv_data_len = 0u;
         adv_interval_ms = 0u;
         if (was_combined) {
-            /* R7.5: hand the radio back to the still-running observer --
-             * its RX is armed (the last burst resumed it) and its timer
-             * is live; keep the CONSTLAT hold, it is still active. */
+            /* The radio goes back to the observer: its RX is armed (the
+             * last burst resumed it), its timer is live, and it keeps the
+             * CONSTLAT hold. */
             radio_owner = TIKU_BLE_ADV_OWNER_OBSERVE;
         } else {
             tiku_radio_arch_constlat_hold(0);
@@ -357,11 +360,11 @@ int tiku_ble_adv_set_txpower(int8_t dbm)
     if (adv_offloaded) {
         /* The RADIO answers only on its NonSecure alias while the FLPR
          * owns it -- a TXPOWER write through the secure alias is a
-         * precise bus fault (the F4 retune lesson).  Reclaim, set, then
-         * re-arm through beacon_data so the proven offload/fallback
-         * interlocks (timer kill, SPU flip-back on a dead coprocessor)
-         * all apply.  Copies because beacon_data writes the same
-         * statics it reads. */
+         * precise bus fault.  The radio is reclaimed, the power set and the
+         * beacon re-armed through tiku_ble_adv_beacon_data(), which applies
+         * its offload and fallback steps (timer stop, SPU hand-back on a
+         * dead coprocessor).  Name and data are copied first because that
+         * call writes the statics it reads. */
         char    nm[TIKU_BLE_ADV_NAME_CAP + 1];
         uint8_t d[TIKU_BLE_ADV_DATA_CAP];
         uint8_t dl;
@@ -381,8 +384,8 @@ int tiku_ble_adv_set_txpower(int8_t dbm)
     }
 #endif
     /* Idle or M33-timer beacon: the register write lands between bursts
-     * and is latched at the next ramp-up.  Pre-init calls just store the
-     * value; init applies it. */
+     * and is latched at the next ramp-up.  A call before radio init stores
+     * the value, and init applies it. */
     return tiku_radio_arch_set_txpower(dbm);
 }
 
@@ -402,7 +405,7 @@ uint32_t tiku_ble_adv_bursts(void)
 }
 
 /*---------------------------------------------------------------------------*/
-/* Observer (passive scan)                                                   */
+/* OBSERVER (PASSIVE SCAN)                                                   */
 /*---------------------------------------------------------------------------*/
 
 struct scan_ctx {
@@ -413,8 +416,10 @@ struct scan_ctx {
     uint8_t plen;
 };
 
-/* Extract the Local Name (complete 0x09 preferred over shortened 0x08)
- * from the AD structures. */
+/**
+ * @brief Extract the Local Name (complete 0x09 preferred over shortened 0x08)
+ *        from the AD structures.
+ */
 static void scan_parse_name(const uint8_t *ad, uint8_t ad_len, char *out)
 {
     uint8_t i = 0u;
@@ -439,15 +444,14 @@ static void scan_parse_name(const uint8_t *ad, uint8_t ad_len, char *out)
     }
 }
 
-/* 'TK'-manufacturer-data fallback name, used only while a filter is
- * armed: a BlueZ host CANNOT put its Local Name in a legacy ADV payload
- * (instances append the name to the SCAN RESPONSE -- kernel
- * MGMT_ADV_FLAG_LOCAL_NAME semantics; hardware-measured: the host showed
- * up as a strong nameless ADV_SCAN_IND), so the reverse-nonce oracle
- * ships its nonce as ASCII after the 'TK' company id (0x4B54, the tikuOS
- * beacon marker) -- manufacturer data DOES ride in the ADV payload.
- * Restricted to the TK id so ambient vendor blobs (Apple beacons etc.)
- * can never masquerade as a name. */
+/**
+ * @brief 'TK' manufacturer-data fallback name, used only while a filter is
+ *        armed.
+ *
+ * A BlueZ host puts its Local Name only in the scan response, so a host to be
+ * found by name sends it as ASCII after the 'TK' company id (0x4B54) in the
+ * ADV payload.  No other company id is read as a name.
+ */
 static void scan_parse_mfr_tk(const uint8_t *ad, uint8_t ad_len, char *out)
 {
     uint8_t i = 0u;
@@ -471,12 +475,30 @@ static void scan_parse_mfr_tk(const uint8_t *ad, uint8_t ad_len, char *out)
     }
 }
 
-/* Per-CRC-OK-packet: dedup by AdvA, keep strongest RSSI + first name.
- * With a prefix filter armed, the name gates SLOT ALLOCATION: in a busy
- * environment the small report table would otherwise fill with ambient
- * advertisers before the sought device is heard (the reason the TikuBench
- * reverse-nonce oracle needs this).  Nameless PDUs (incl. ADV_DIRECT_IND,
- * whose payload carries TargetA, not AD) are dropped while filtering. */
+/** @brief The largest payload a legacy advertising PDU carries. */
+#define SCAN_PDU_MAX 37u
+
+/* Where scan reports went, counted since boot: no table, an unread PDU
+ * kind or length, refused by the name filter, or kept as a new device. */
+static uint32_t scan_drop_ctx, scan_drop_kind, scan_drop_name, scan_kept;
+
+void tiku_ble_adv_scan_drops(uint32_t *ctx_bad, uint32_t *kind, uint32_t *named,
+                             uint32_t *kept)
+{
+    if (ctx_bad != (uint32_t *)0) { *ctx_bad = scan_drop_ctx; }
+    if (kind != (uint32_t *)0)    { *kind = scan_drop_kind; }
+    if (named != (uint32_t *)0)   { *named = scan_drop_name; }
+    if (kept != (uint32_t *)0)    { *kept = scan_kept; }
+}
+
+/**
+ * @brief Per CRC-OK packet: dedup by AdvA, keep the strongest RSSI and the
+ *        first name.
+ *
+ * With a prefix filter armed the name gates slot allocation, so ambient
+ * advertisers cannot fill the small table before the sought device is heard;
+ * nameless PDUs (ADV_DIRECT_IND carries TargetA, not AD) are dropped then.
+ */
 static void scan_cb(const uint8_t *buf, uint8_t len, int8_t rssi, void *ud)
 {
     struct scan_ctx *ctx = (struct scan_ctx *)ud;
@@ -486,13 +508,30 @@ static void scan_cb(const uint8_t *buf, uint8_t len, int8_t rssi, void *ud)
     char name[TIKU_BLE_ADV_NAME_CAP + 1];
     uint8_t i;
 
+    /* A drain runs from a timer callback and from teardown, and either may
+     * pass a context with no table: without this check the slot store
+     * below writes through a null base and faults. */
+    if (ctx == (struct scan_ctx *)0 ||
+        ctx->out == (tiku_ble_adv_report_t *)0 || ctx->max == 0u) {
+        scan_drop_ctx++;
+        return;
+    }
+
     /* Only PDUs whose payload begins with AdvA: ADV_IND(0),
      * ADV_DIRECT_IND(1), ADV_NONCONN_IND(2), SCAN_RSP(4), ADV_SCAN_IND(6);
      * and a plausible length. */
     if (len < 6u ||
         !(type == 0u || type == 1u || type == 2u || type == 4u ||
           type == 6u)) {
+        scan_drop_kind++;
         return;
+    }
+    /* A legacy advertising payload is at most 37 bytes.  The AD walk below
+     * runs to len-6, so a larger LENGTH, which no producer's buffer holds,
+     * would read past the packet: the sighting is kept and the walk
+     * bounded. */
+    if (len > SCAN_PDU_MAX) {
+        len = SCAN_PDU_MAX;
     }
 
     /* Parse the Local Name up front: the insert-time filter needs it, and
@@ -501,14 +540,14 @@ static void scan_cb(const uint8_t *buf, uint8_t len, int8_t rssi, void *ud)
     name[0] = '\0';
     if (type != 1u && len > 6u) {
         scan_parse_name(&buf[9], (uint8_t)(len - 6u), name);
-        /* Filter armed + no Local Name: accept the 'TK' manufacturer
-         * ASCII as the name (see scan_parse_mfr_tk -- the only legacy
-         * ADV slot a BlueZ oracle can actually reach). */
+        /* With a filter armed and no Local Name, the 'TK' manufacturer
+         * ASCII serves as the name (see scan_parse_mfr_tk()). */
         if (name[0] == '\0' && ctx->plen != 0u) {
             scan_parse_mfr_tk(&buf[9], (uint8_t)(len - 6u), name);
         }
     }
     if (ctx->plen != 0u && strncmp(name, ctx->prefix, ctx->plen) != 0) {
+        scan_drop_name++;
         return;
     }
 
@@ -523,6 +562,7 @@ static void scan_cb(const uint8_t *buf, uint8_t len, int8_t rssi, void *ud)
             return;
         }
         slot = &ctx->out[ctx->count++];
+        scan_kept++;
         memcpy(slot->addr, adva, 6u);
         slot->rssi = rssi;
         slot->adv_type = type;
@@ -559,13 +599,14 @@ int tiku_ble_adv_scan_filter(tiku_ble_adv_report_t *out, uint8_t max,
                    ? (uint8_t)(TIKU_BLE_ADV_NAME_CAP + 1u)   /* matches none */
                    : (uint8_t)plen;
 
-    /* Arbiter: the engine is busy while observing, and the RADIO answers
-     * only on the NS alias while FLPR-offloaded.  An M33-timer beacon
-     * keeps its historical coexistence (cooperative scheduling: its
-     * bursts queue behind this blocking call), so claim SCAN and restore
-     * the prior owner afterwards. */
-    if (radio_owner == TIKU_BLE_ADV_OWNER_OBSERVE ||
-        radio_owner == TIKU_BLE_ADV_OWNER_BEACON_FLPR) {
+    /* Arbiter: only an idle radio or an M33-timer beacon admits a scan.  The
+     * beacon coexists (cooperative scheduling: its bursts queue behind this
+     * blocking call), so the scan claims SCAN and restores the prior owner
+     * after.  The others are refused: the scan arms and disarms the
+     * observer's engine, an FLPR beacon or a connection drives the RADIO on
+     * the NS alias, and 802.15.4 has it in another mode. */
+    if (radio_owner != TIKU_BLE_ADV_OWNER_IDLE &&
+        radio_owner != TIKU_BLE_ADV_OWNER_BEACON) {
         return -1;
     }
     {
@@ -589,22 +630,23 @@ int tiku_ble_adv_scan_filter(tiku_ble_adv_report_t *out, uint8_t max,
 }
 
 /*---------------------------------------------------------------------------*/
-/* Background observer (R7)                                                  */
+/* BACKGROUND OBSERVER                                                       */
 /*---------------------------------------------------------------------------*/
 /*
  * The non-blocking half of the observer: the arch engine (IRQ + hardware
  * windows) runs while the shell stays interactive, and a CALLBACK kernel
- * timer drains the packet ring every 2 ticks into a persistent dedup
- * table.  Results are live in the last-scan summary (and therefore
- * `cat /sys/radio/scan`); every service pass that delivered packets
- * fires the scan-notify hook, which the VFS tree maps to
- * tiku_vfs_notify(/sys/radio/scan) -- `watch` and the rules engine ride
- * the namespace event bus from there.
+ * timer drains the packet ring every 2 ticks into a dedup table that is
+ * kept after the observer stops.  Results are live in the last-scan summary
+ * (and so in `cat /sys/radio/scan`); every service pass that delivered
+ * packets fires the scan-notify hook, which the VFS tree maps to
+ * tiku_vfs_notify(/sys/radio/scan), the event `watch` and the rules engine
+ * subscribe to.
  */
 
 #define OBSERVE_MAX_REPORTS  12u
 static tiku_ble_adv_report_t bg_reports[OBSERVE_MAX_REPORTS];
 static struct scan_ctx       bg_ctx;
+
 static struct tiku_timer     observe_timer;
 static tiku_clock_time_t     observe_deadline;
 static uint8_t               observe_forever;
@@ -615,7 +657,7 @@ void tiku_ble_adv_set_scan_notify(void (*fn)(void))
     scan_notify_fn = fn;
 }
 
-/* Refresh the /sys/radio-visible summary from the observer's table. */
+/** @brief Refresh the /sys/radio-visible summary from the observer's table. */
 static void observe_update_summary(void)
 {
     uint8_t i;
@@ -630,6 +672,10 @@ static void observe_update_summary(void)
     }
 }
 
+/**
+ * @brief Observer timer callback: drain the packet ring, refresh the summary,
+ *        call the scan-notify hook and stop at the deadline.
+ */
 static void observe_tick_cb(void *ptr)
 {
     uint8_t n;
@@ -658,10 +704,10 @@ int tiku_ble_adv_observe_start(uint16_t secs)
 {
     uint8_t combined;
 
-    /* R7.5: starting the observer while a (non-offloaded) beacon runs
-     * time-divides the radio -> combined owner.  Deny FLPR-offloaded
-     * beacon (radio NonSecure), a blocking scan, or an observer already
-     * running. */
+    /* Starting the observer while a (non-offloaded) beacon runs
+     * time-divides the radio -> combined owner.  Deny every other owner:
+     * an FLPR-offloaded beacon (radio NonSecure), a blocking scan, a
+     * running observer, a connection or 802.15.4. */
     if (radio_owner != TIKU_BLE_ADV_OWNER_IDLE &&
         radio_owner != TIKU_BLE_ADV_OWNER_BEACON) {
         return -1;
@@ -676,14 +722,13 @@ int tiku_ble_adv_observe_start(uint16_t secs)
     bg_ctx.plen = 0u;
     scan_last_count = 0u;
     scan_have_best = 0u;
-    /* Unified Constant Latency invariant (R7.5): held while ANY radio
-     * owner is active, released only at IDLE.  A beacon already holds
-     * it; this makes observe hold it too, so the combined session and
-     * either single survivor all stay in CONSTLAT (erratum 20). */
+    /* Constant Latency is held while any radio owner is active and
+     * released only at IDLE.  A beacon already holds it; this makes
+     * observe hold it too, so the combined session and either single
+     * survivor all stay in CONSTLAT (erratum 20). */
     tiku_radio_arch_constlat_hold(1);
-    /* Owner BEFORE arming, so a beacon burst dispatched right after
-     * takes the borrow path (cooperative dispatch means it cannot
-     * actually fire until this returns, but keep the states honest). */
+    /* Set the owner before arming so a beacon burst dispatched next takes
+     * the borrow path. */
     radio_owner = combined ? TIKU_BLE_ADV_OWNER_BEACON_OBSERVE
                            : TIKU_BLE_ADV_OWNER_OBSERVE;
     tiku_radio_arch_scan_start();
@@ -706,7 +751,8 @@ void tiku_ble_adv_observe_stop(void)
     tiku_timer_stop(&observe_timer);
     tiku_radio_arch_scan_stop();    /* disarm RX; constlat_exit suppressed
                                      * while held (below)                  */
-    /* Teardown stragglers, then one final summary refresh + ring. */
+    /* Drain packets that arrived during teardown; when the table changed,
+     * refresh the summary and call the scan-notify hook. */
     if (tiku_radio_arch_scan_service(scan_cb, &bg_ctx) != 0u ||
         bg_ctx.count != scan_last_count) {
         observe_update_summary();

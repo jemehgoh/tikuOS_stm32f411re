@@ -7,8 +7,8 @@
  *
  * tiku_crit.c - critical execution window implementation.
  *
- * Two flavours: defer-only, which masks nothing, and masked, which delegates the
- * IE save/clear/restore to hal/tiku_crit_hal.h.  Everything here is
+ * Two flavours: defer-only, which masks nothing, and masked, which delegates
+ * the IE save/clear/restore to hal/tiku_crit_hal.h.  Everything here is
  * platform-agnostic: held flag, mode, accounting and the post-window drain.
  *
  * SPDX-License-Identifier: Apache-2.0
@@ -48,10 +48,11 @@ static uint8_t             crit_mode;
 /* INTERNAL HELPERS                                                          */
 /*---------------------------------------------------------------------------*/
 
-/*
- * Convert microseconds to htimer ticks at a compile-time-known rate.  The
- * two-step division avoids 32-bit overflow at 1 MHz x 65535 us, and requires
- * an htimer of at least 1 kHz -- true for every preset.
+/**
+ * @brief Convert microseconds to htimer ticks at a compile-time-known rate.
+ *
+ * From 1 kHz up, the two-step division avoids 32-bit overflow at 1 MHz x
+ * 65535 us; slower rates take the direct form.
  */
 static inline tiku_htimer_clock_t
 crit_us_to_ticks(uint16_t us)
@@ -80,9 +81,9 @@ int tiku_crit_begin(uint16_t max_us, uint8_t preserve_mask)
     crit_enters++;
 
     /*
-     * Mask first, then set the held flag. The reverse order would
-     * leave a few cycles where tiku_crit_active() returns true
-     * but the not-yet-masked ISRs can still fire and inject jitter.
+     * Interrupts are masked before the held flag is set, so while
+     * tiku_crit_active() reports a window, its sources are already
+     * masked.
      */
     tiku_crit_arch_mask_irqs(preserve_mask);
     crit_mode      = CRIT_MODE_MASKED;
@@ -102,7 +103,8 @@ int tiku_crit_begin_defer(uint16_t max_us)
     crit_max_us      = max_us;
     crit_enters++;
 
-    /* No IE-bit changes; just flip the dispatcher-defer flag. */
+    /* No IE bit changes: only the held flag, which defers the timer
+     * dispatcher. */
     crit_mode      = CRIT_MODE_DEFER;
     tiku_crit_held = 1;
     return TIKU_CRIT_OK;

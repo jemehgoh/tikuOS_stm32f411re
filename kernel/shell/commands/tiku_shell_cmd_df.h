@@ -5,10 +5,10 @@
  *
  * Authors: Ambuj Varshney <ambuj@tiku-os.org>
  *
- * tiku_shell_cmd_df.h - "df" command (file-store disk free).
+ * tiku_shell_cmd_df.h - "df" and "mkfs": the /data store's usage and format.
  *
- * Reports capacity, usage and backing medium for the /data store.  Companion to
- * "free": df is the storage view, free is the memory-tier view.
+ * df reports capacity, usage and backing medium, or why the store is absent;
+ * mkfs formats it on request.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -25,5 +25,16 @@
  * @param argv Argument vector (unused)
  */
 void tiku_shell_cmd_df(uint8_t argc, const char *argv[]);
+
+/**
+ * @brief "mkfs" command handler -- format /data on request.
+ *
+ * Prints what the extent holds, then formats it.  An extent that is not blank
+ * is formatted only with --erase-data, since formatting erases every file.
+ *
+ * @param argc Argument count
+ * @param argv Argument vector
+ */
+void tiku_shell_cmd_mkfs(uint8_t argc, const char *argv[]);
 
 #endif /* TIKU_SHELL_CMD_DF_H_ */

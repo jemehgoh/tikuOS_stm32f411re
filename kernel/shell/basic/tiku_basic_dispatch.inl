@@ -7,22 +7,26 @@
  *
  * tiku_basic_dispatch.inl - exec_if and the keyword switch.
  *
- * exec_stmt matches a leading keyword and delegates to the matching handler, or to
- * exec_let for a bare assignment; exec_stmts walks colon-separated compound
- * statements.  exec_if is multi-line aware and truncates THEN at the ELSE keyword.
+ * exec_stmt matches a leading keyword and calls its handler, or treats a bare
+ * assignment as LET; exec_stmts walks colon-separated statements.  exec_if
+ * handles block IFs and cuts a single-line THEN branch at its ELSE.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
 
-/* Scratch buffer for IF/THEN truncation -- when ELSE is present the
- * need to stop the THEN branch's exec_stmt from consuming the ELSE
- * keyword as if it were part of its own arguments. The simplest
- * portable approach is to copy the THEN branch into a buffer with
- * the ELSE position turned into a NUL. The buffer lives at file
- * scope rather than on the stack so deep IF nesting (which can
- * happen via GOSUB) won't blow the limited MSP430 stack. */
+/* The THEN branch of a single-line IF with an ELSE, copied with the ELSE
+ * position turned into a NUL so the branch's statements cannot consume the
+ * ELSE keyword as an argument.  File scope keeps the line-sized buffer off
+ * the stack. */
 static char if_then_scratch[TIKU_BASIC_LINE_MAX];
 
+/**
+ * @brief IF cond THEN ... [ELSE ...], single-line or block form.
+ *
+ * Inside RUN, a THEN with nothing after it opens a block IF whose ELSEIF /
+ * ELSE / END IF sit on later lines.  A bare line number after THEN or ELSE
+ * is a GOTO.
+ */
 static void
 exec_if(const char **p)
 {
@@ -45,16 +49,15 @@ exec_if(const char **p)
      * immediate mode there are no subsequent lines to scan. */
     if (basic_running && (cur_peek(p) == '\0' || cur_peek(p) == ':')) {
         if (cond) {
-            /* TRUE: fall through to the next line. The runner advances
-             * basic_pc normally. When ELSE is eventually reached during
-             * sequential execution, that handler skips past END IF. */
+            /* Condition true: fall through to the next line.  The runner
+             * advances basic_pc normally; when sequential execution reaches
+             * the ELSE, that handler skips past END IF. */
             while (cur_peek(p)) cur_advance(p);
             return;
         } else {
-            /* FALSE: walk the ELSEIF/ELSE chain -- enter the first ELSEIF
-             * whose condition holds, else the ELSE body, else fall past
-             * END IF.  (find_if_else_or_endif's plain-ELSE-only path is now
-             * subsumed by this chain walker.) */
+            /* Condition false: walk the ELSEIF/ELSE chain -- enter the
+             * first ELSEIF whose condition holds, else the ELSE body, else
+             * fall past END IF. */
             multi_if_take_false(basic_pc, p);
             return;
         }
@@ -88,12 +91,14 @@ exec_if(const char **p)
         }
         if (else_pos != NULL) {
             /* Copy THEN branch into scratch with ELSE chopped off
-             * so exec_stmts's parsers won't see the ELSE keyword. */
+             * so exec_stmts's parsers won't see the ELSE keyword.  An IF
+             * nested in an outer IF's THEN branch already runs from
+             * if_then_scratch, so the two ranges can overlap. */
             size_t len = (size_t)(else_pos - *p);
             if (len >= sizeof(if_then_scratch)) {
                 len = sizeof(if_then_scratch) - 1;
             }
-            memcpy(if_then_scratch, *p, len);
+            memmove(if_then_scratch, *p, len);
             if_then_scratch[len] = '\0';
             exec_p = if_then_scratch;
             exec_stmts(&exec_p);
@@ -111,10 +116,9 @@ exec_if(const char **p)
 
     /* Condition false. */
     if (else_pos != NULL) {
-        /* Step past the ELSE keyword and run the ELSE body. The
-         * ELSE body can itself be a bare line number (= GOTO) or a
+        /* Step past the ELSE keyword (one byte crunched, four spelled out)
+         * and run the ELSE body: a bare line number (= GOTO) or a
          * colon-separated stmt list. */
-        /* Step past the ELSE keyword: one byte crunched, four spelled out. */
         const char *q = else_pos +
             (((uint8_t)*else_pos == BASIC_TOK_BYTE(ELSE)) ? 1 : 4);
         skip_ws(&q);
@@ -142,19 +146,25 @@ exec_if(const char **p)
     while (cur_peek(p)) cur_advance(p);
 }
 
+/**
+ * @brief Execute one statement.
+ *
+ * A crunched keyword byte goes through the token switch, anything else
+ * through the keyword chain and the registered extension words; what none
+ * of them matches is an implicit LET.
+ */
 static void
 exec_stmt(const char **p)
 {
     skip_ws(p);
     if (cur_peek(p) == '\0') return;
 
-    /* A2: crunched statement dispatch.  Stored program lines lead with a
-     * token byte, so one switch replaces the keyword-compare chain below.
-     * Each case reproduces exactly what `match_kw(kw) + handler` does
-     * (consume the keyword, skip trailing whitespace, call the handler).
-     * Anything not switched -- rarely-stored statements, the MID$-slice
-     * special form, raw immediate-mode text -- falls through to the chain,
-     * which remains the single source of truth for statement semantics. */
+    /* Crunched statement dispatch.  Stored program lines lead with a token
+     * byte, so one switch stands in for the keyword-compare chain below.
+     * Each case does what `match_kw(kw) + handler` does (consume the
+     * keyword, skip trailing whitespace, call the handler).  Anything not
+     * switched -- rarely-stored statements, the MID$-slice special form, raw
+     * immediate-mode text -- falls through to the chain. */
     {
         uint8_t b = cur_peekb(p);
         if (b >= BASIC_TOK_BASE) {
@@ -255,10 +265,8 @@ exec_stmt(const char **p)
     }
 
     if (match_kw(p, "REM") || cur_peek(p) == '\'') {
-        /* Comment: drop the rest of the line, including any colons.
-         * Both the BASIC `REM` keyword and the Apple/GW-BASIC `'`
-         * shorthand are accepted. Without this, "REM hi : PRINT"
-         * would execute the PRINT. */
+        /* Comment (REM or the ' shorthand): drop the rest of the line,
+         * colons included, so "REM hi : PRINT" runs no PRINT. */
         while (cur_peek(p)) cur_advance(p);
         return;
     }
@@ -272,9 +280,8 @@ exec_stmt(const char **p)
     }
     if (match_kw(p, "?"))      { exec_print(p);  return; }   /* alias */
 #if TIKU_BASIC_STRVARS_ENABLE
-    /* MID$ / LEFT$ / RIGHT$ as LHS: detect the keyword followed by
-     * `(` to disambiguate from a numeric expression that just
-     * happens to start with a similar token. */
+    /* MID$ / LEFT$ / RIGHT$ as an assignment target: the keyword followed
+     * by `(`. */
     {
         const char *save = cur_mark(p);
         char        kind = 0;
@@ -287,9 +294,7 @@ exec_stmt(const char **p)
                 exec_strslice_assign(p, kind);
                 return;
             }
-            /* Wasn't a slice-assign; rewind so something else can
-             * try (e.g. it's actually an expression starting with
-             * MID$, though there's no such legal statement form). */
+            /* Not a slice assignment: rewind for the chain below. */
             cur_rewind(p, save);
         }
     }
@@ -420,7 +425,7 @@ exec_stmt(const char **p)
 #if TIKU_BASIC_EXT_MAX > 0
     /* Registered extension statements (tiku_basic_ext.h): after every
      * builtin, before variables -- registered names are reserved words.
-     * Names are never in the A2 token table, so match_kw's raw-text path
+     * Names are never in the token table, so match_kw's raw-text path
      * reaches them from both stored (crunched) lines and immediate input. */
     {
         uint8_t i;
@@ -428,6 +433,7 @@ exec_stmt(const char **p)
             if (basic_ext_tab[i].name[0] != '\0' &&
                 basic_ext_tab[i].kind == 0u &&
                 match_kw(p, basic_ext_tab[i].name)) {
+                BASIC_RECLAIM_EXTERNAL();
                 basic_ext_tab[i].u.stmt(p);
                 return;
             }
@@ -435,10 +441,8 @@ exec_stmt(const char **p)
     }
 #endif
 
-    /* Implicit LET: "A = expr" or "A$ = expr$" or "A(i) = expr".
-     * The save / restore dance backs out cleanly when the
-     * cursor sits on a single letter that isn't actually being
-     * assigned (e.g. a stray `A` line that's just a syntax error). */
+    /* Implicit LET: "A = expr", "A$ = expr$" or "A(i) = expr".  A name not
+     * followed by '=' rewinds to `save` and raises "syntax". */
     {
         const char *save = cur_mark(p);
         char  c = to_upper(cur_peek(p));
@@ -534,16 +538,16 @@ exec_stmt(const char **p)
     basic_throw(TIKU_BASIC_ERR_SYNTAX, "syntax");
 }
 
-/* Walk a colon-separated list of statements, executing each in turn.
- * Stops at end-of-string, on error, when a control-flow op explicitly
- * set the PC (GOTO/GOSUB/RETURN/NEXT-jump/IF-bare-line), or when the
- * program has been ended (END/STOP) within a RUN. The caller's `p`
- * advances to wherever the walk stopped, so the RUN loop / exec_if
- * can resume after the dropped tail without rescanning.
+/**
+ * @brief Execute a colon-separated list of statements in turn.
  *
- * Note on basic_running: it is 1 only inside RUN. In immediate mode
- * it stays 0, so short-circuiting must happen only on a *transition* from
- * 1->0 (END/STOP during RUN), not on the steady-state 0 outside RUN. */
+ * Stops at end of line, on an error, when a statement set the PC (GOTO,
+ * GOSUB, RETURN, a NEXT jump, a bare-line IF), when END/STOP ends a RUN, or
+ * when DELAY/SLEEP parks the machine.  @p p is left where the walk stopped.
+ *
+ * @note basic_running is 1 only inside RUN, so only its 1-to-0 transition
+ *       stops the walk; immediate mode runs with it 0 throughout.
+ */
 static void
 exec_stmts(const char **p)
 {
@@ -563,7 +567,7 @@ exec_stmts(const char **p)
              * line's unconsumed remainder so the step machine can resume
              * it after the deadline. */
             skip_ws(p);
-            if (cur_peek(p) == ':') cur_advance(p);      /* resume past the separator */
+            if (cur_peek(p) == ':') cur_advance(p);  /* resume past the ':' */
             break;
         }
         skip_ws(p);

@@ -1,15 +1,14 @@
 /*
  * Tiku Operating System v0.06
  * Simple. Ubiquitous. Intelligence, Everywhere.
+ * http://tiku-os.org
  *
  * Authors: Ambuj Varshney <ambuj@tiku-os.org>
  *
- * tiku_fat.c - FAT32 reader.  See tiku_fat.h for why FAT32 and why read-only.
+ * tiku_fat.c - read-only FAT32 reader.
  *
- * No hardware headers.  This compiles on a Linux host against loopback images
- * written by mkfs.vfat, which is how it is regression-tested (tools/fat32).
- * If a hardware include ever appears here, that ability is gone and with it
- * the only cheap way to test a filesystem parser against a real one.
+ * No hardware headers: tools/fat32 builds this file on a Linux host and
+ * regression-tests it against loopback images written by mkfs.vfat.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -17,20 +16,23 @@
 #include "tiku_fat.h"
 
 /*---------------------------------------------------------------------------*/
-/* LITTLE-ENDIAN ACCESSORS -- byte at a time, never a struct overlay          */
+/* LITTLE-ENDIAN ACCESSORS                                                   */
 /*---------------------------------------------------------------------------*/
 /*
- * FAT structures are packed little-endian and misaligned by design: the BPB
- * puts a 32-bit field at offset 0x20, and directory entries put a 16-bit
- * cluster field at offset 0x14.  Casting a pointer into the buffer would be
- * an unaligned access -- undefined, and on some targets a fault.  Reading
- * byte-wise costs nothing measurable and cannot be wrong.
+ * FAT structures are packed little-endian with fields at unaligned offsets:
+ * the BPB's 16-bit fields at 0x0B, 0x11 and 0x13, the 32-bit start and length
+ * of an MBR partition entry, the UTF-16 units of a long-name entry.  An
+ * unaligned pointer access is undefined in C and faults on some targets, so
+ * every field is read a byte at a time.
  */
+
+/** @brief Little-endian u16 at @p p, read a byte at a time. */
 static uint16_t rd16(const uint8_t *p)
 {
     return (uint16_t)((uint16_t)p[0] | ((uint16_t)p[1] << 8));
 }
 
+/** @brief Little-endian u32 at @p p, read a byte at a time. */
 static uint32_t rd32(const uint8_t *p)
 {
     return (uint32_t)p[0] | ((uint32_t)p[1] << 8) |
@@ -57,7 +59,7 @@ const char *tiku_fat_strerror(tiku_fat_err_t e)
 /* MOUNT                                                                     */
 /*---------------------------------------------------------------------------*/
 
-/* Cluster values with meaning rather than a location. */
+/* FAT entry values that mark a state, not a next cluster. */
 #define CLUS_FREE     0x00000000u
 #define CLUS_BAD      0x0FFFFFF7u
 #define CLUS_EOC_MIN  0x0FFFFFF8u
@@ -67,8 +69,8 @@ const char *tiku_fat_strerror(tiku_fat_err_t e)
  * @brief Validate a boot sector as a FAT BPB and fill in the geometry.
  *
  * The FAT width comes from the data cluster count (<4085 FAT12, <65525 FAT16,
- * else FAT32), never from the boot sector's type string, which the spec calls
- * informational.  Anything but FAT32 is refused with a distinct error.
+ * else FAT32); the boot sector's type string, which the spec calls
+ * informational, is not read.  Anything but FAT32 is TIKU_FAT_ERR_NOT_FAT32.
  */
 static tiku_fat_err_t bpb_parse(tiku_fat_t *fs, const uint8_t *sec,
                                 uint32_t base)
@@ -109,10 +111,10 @@ static tiku_fat_err_t bpb_parse(tiku_fat_t *fs, const uint8_t *sec,
     }
     fs->clusters = data_sec / fs->sec_per_clus;
 
-    /* The arithmetic verdict. */
+    /* The FAT width, from the cluster count. */
     if (fs->clusters < 65525u) { return TIKU_FAT_ERR_NOT_FAT32; }
 
-    /* FAT32 additionally requires no fixed root directory. */
+    /* FAT32 also has no fixed root directory and no 16-bit FAT size. */
     if (root_ent != 0u || rd16(&sec[22]) != 0u) {
         return TIKU_FAT_ERR_NOT_FAT32;
     }
@@ -134,6 +136,7 @@ tiku_fat_err_t tiku_fat_mount(tiku_fat_t *fs, tiku_fat_read_fn read, void *ctx)
     uint8_t sec[TIKU_FAT_SECTOR];
     tiku_fat_err_t rc;
     unsigned i;
+    int wrong_width;
 
     if (fs == NULL || read == NULL) { return TIKU_FAT_ERR_ARG; }
     fs->read = read;
@@ -145,14 +148,13 @@ tiku_fat_err_t tiku_fat_mount(tiku_fat_t *fs, tiku_fat_read_fn read, void *ctx)
      * partition table and its BPB sits right here. */
     rc = bpb_parse(fs, sec, 0u);
     if (rc == TIKU_FAT_OK) { return rc; }
+    wrong_width = (rc == TIKU_FAT_ERR_NOT_FAT32);
 
     /*
-     * Otherwise look for an MBR.  Note what is NOT done here: the partition
-     * TYPE byte (0x0B / 0x0C for FAT32) is read but not trusted as the
-     * decision -- it is a hint, and the volume still has to prove itself
-     * through bpb_parse().  A partition mislabelled by a formatter should
-     * mount if it is really FAT32, and a partition labelled 0x0C that is
-     * really FAT16 must still be refused.
+     * Otherwise look for an MBR.  The partition type byte (0x0B / 0x0C for
+     * FAT32) only skips empty entries; every volume has to pass bpb_parse(),
+     * so a partition mislabelled by a formatter mounts if it is really FAT32,
+     * and one labelled 0x0C that is really FAT16 is refused.
      */
     if (rd16(&sec[510]) != 0xAA55u) { return TIKU_FAT_ERR_NOFS; }
 
@@ -167,10 +169,11 @@ tiku_fat_err_t tiku_fat_mount(tiku_fat_t *fs, tiku_fat_read_fn read, void *ctx)
         if (read(start, 1u, part, ctx) != 0) { continue; }
         rc = bpb_parse(fs, part, start);
         if (rc == TIKU_FAT_OK) { return rc; }
+        if (rc == TIKU_FAT_ERR_NOT_FAT32) { wrong_width = 1; }
     }
-    /* Report the most specific reason available: a partition that WAS a FAT of
-     * the wrong width says so rather than "no filesystem". */
-    return (rc == TIKU_FAT_ERR_NOT_FAT32) ? rc : TIKU_FAT_ERR_NOFS;
+    /* A FAT of the wrong width anywhere on the device returns
+     * TIKU_FAT_ERR_NOT_FAT32, whichever candidate was parsed last. */
+    return wrong_width ? TIKU_FAT_ERR_NOT_FAT32 : TIKU_FAT_ERR_NOFS;
 }
 
 /*---------------------------------------------------------------------------*/
@@ -187,8 +190,8 @@ static uint32_t clus_lba(const tiku_fat_t *fs, uint32_t clus)
  * @brief Follow one link of the chain.
  *
  * Classifies every value the FAT can hold: an out-of-range link, a bad cluster
- * and a free cluster inside a chain are all corruption and are reported rather
- * than followed.  Refuses anything it does not recognise.
+ * and a free cluster inside a chain return TIKU_FAT_ERR_CORRUPT.  An
+ * end-of-chain mark sets *next to 0.
  */
 static tiku_fat_err_t fat_next(tiku_fat_t *fs, uint32_t clus, uint32_t *next)
 {
@@ -251,14 +254,13 @@ static void lfn_chars(const uint8_t *e, char *dst)
     unsigned i;
     for (i = 0u; i < 13u; i++) {
         uint16_t u = rd16(&e[off[i]]);
-        /* Non-ASCII is rendered '?' rather than mangled or dropped: the name
-         * stays the right LENGTH so comparisons fail honestly instead of
-         * accidentally matching a different file. */
+        /* Non-ASCII renders as '?', which keeps the name's length. */
         dst[i] = (u == 0u || u == 0xFFFFu) ? '\0'
                : (u < 0x80u ? (char)u : '?');
     }
 }
 
+/** @brief Point @p dir at the first entry of the directory at @p clus. */
 static tiku_fat_err_t dir_start(tiku_fat_t *fs, uint32_t clus,
                                 tiku_fat_dir_t *dir)
 {
@@ -278,6 +280,7 @@ tiku_fat_err_t tiku_fat_readdir(tiku_fat_t *fs, tiku_fat_dir_t *dir,
     char     lfn[TIKU_FAT_NAME_MAX];
     uint8_t  lfn_sum = 0u;
     int      lfn_have = 0;
+    unsigned lfn_next = 0u;            /* ordinal the next piece must carry */
 
     if (fs == NULL || dir == NULL || out == NULL) { return TIKU_FAT_ERR_ARG; }
     lfn[0] = '\0';
@@ -286,11 +289,8 @@ tiku_fat_err_t tiku_fat_readdir(tiku_fat_t *fs, tiku_fat_dir_t *dir,
         const uint8_t *e;
         uint32_t lba;
 
-        /*
-         * BOUNDED.  A directory chain that loops -- through corruption or a
-         * crafted volume -- must terminate the walk, not the system.  The bound
-         * is generous for any real directory and finite regardless.
-         */
+        /* Bounded at 2^20 sector reads, so a directory chain that loops
+         * (corruption or a crafted volume) ends the walk with ERR_CORRUPT. */
         if (dir->steps++ > (1u << 20)) { return TIKU_FAT_ERR_CORRUPT; }
 
         if (dir->sec_in_clus >= fs->sec_per_clus) {
@@ -322,10 +322,18 @@ tiku_fat_err_t tiku_fat_readdir(tiku_fat_t *fs, tiku_fat_dir_t *dir,
                     lfn[0] = '\0';
                     lfn_sum = e[13];
                     lfn_have = 1;
+                    lfn_next = ord;
                 }
-                if (!lfn_have || e[13] != lfn_sum) { lfn_have = 0; continue; }
+                /* Pieces count down to 1 with none missing; a piece out of
+                 * sequence drops the long name, since a gap leaves unwritten
+                 * bytes in it. */
+                if (!lfn_have || e[13] != lfn_sum || ord != lfn_next) {
+                    lfn_have = 0;
+                    continue;
+                }
+                lfn_next = ord - 1u;
                 lfn_chars(e, part);
-                /* Pieces arrive LAST FIRST, so piece `ord` occupies
+                /* Pieces arrive last first, so piece `ord` occupies
                  * characters (ord-1)*13 onward. */
                 for (k = 0u; k < 13u; k++) {
                     unsigned idx = ((ord - 1u) * 13u) + k;
@@ -333,10 +341,10 @@ tiku_fat_err_t tiku_fat_readdir(tiku_fat_t *fs, tiku_fat_dir_t *dir,
                     lfn[idx] = part[k];
                     if (part[k] == '\0') { break; }
                 }
-                if (((ord - 1u) * 13u) < TIKU_FAT_NAME_MAX) {
-                    /* keep the string terminated as it grows */
-                    unsigned end = ((ord - 1u) * 13u) + 13u;
-                    if (end < TIKU_FAT_NAME_MAX) { lfn[end] = lfn[end]; }
+                if ((e[0] & 0x40u) && (ord * 13u) < TIKU_FAT_NAME_MAX) {
+                    /* A name that fills its last piece carries no NUL of
+                     * its own, so the end is marked here. */
+                    lfn[ord * 13u] = '\0';
                 }
                 continue;
             }
@@ -344,13 +352,13 @@ tiku_fat_err_t tiku_fat_readdir(tiku_fat_t *fs, tiku_fat_dir_t *dir,
             if (e[11] & ATTR_VOLID) { lfn_have = 0; lfn[0] = '\0'; continue; }
 
             /*
-             * A short entry ends the run.  The long name is used only if its
-             * checksum matches THIS entry -- an orphaned or mismatched
-             * sequence is discarded and the 8.3 name used instead, because a
-             * name assembled from someone else's entry is worse than a name
-             * that is merely ugly.
+             * A short entry ends the run.  The long name is used only if it
+             * reached piece 1 and its checksum matches this entry; an orphaned,
+             * incomplete or mismatched sequence is discarded and the 8.3 name
+             * used instead.
              */
-            if (lfn_have && lfn_sum == sfn_checksum(e) && lfn[0] != '\0') {
+            if (lfn_have && lfn_next == 0u && lfn_sum == sfn_checksum(e) &&
+                lfn[0] != '\0') {
                 unsigned k;
                 for (k = 0u; k < TIKU_FAT_NAME_MAX - 1u && lfn[k]; k++) {
                     out->name[k] = lfn[k];
@@ -376,7 +384,8 @@ tiku_fat_err_t tiku_fat_readdir(tiku_fat_t *fs, tiku_fat_dir_t *dir,
 /* PATHS                                                                     */
 /*---------------------------------------------------------------------------*/
 
-/** @brief Case-insensitive compare, because FAT names are. */
+/** @brief Whether the first @p n chars of @p a equal all of @p b, ignoring
+ *  ASCII case, as FAT names do. */
 static int name_eq(const char *a, const char *b, unsigned n)
 {
     unsigned i;
@@ -395,6 +404,11 @@ static tiku_fat_err_t path_walk(tiku_fat_t *fs, const char *path,
 {
     uint32_t clus = fs->root_clus;
     const char *p = path;
+    unsigned n;
+
+    for (n = 0u; path[n] != '\0'; n++) {
+        if (n >= TIKU_FAT_PATH_MAX) { return TIKU_FAT_ERR_ARG; }
+    }
 
     out->is_dir     = 1u;
     out->size       = 0u;
@@ -429,8 +443,8 @@ static tiku_fat_err_t path_walk(tiku_fat_t *fs, const char *path,
         if (!found) { return TIKU_FAT_ERR_NOENT; }
 
         *out = e;
-        /* A directory whose first cluster is 0 is the root ("..") -- the
-         * on-disk convention, not a corruption. */
+        /* A directory entry whose first cluster is 0 names the root (".."
+         * in a first-level directory), as the on-disk format specifies. */
         clus = (e.first_clus == 0u) ? fs->root_clus : e.first_clus;
     }
     return TIKU_FAT_OK;
@@ -480,10 +494,13 @@ tiku_fat_err_t tiku_fat_seek(tiku_fat_t *fs, tiku_fat_file_t *f, uint32_t pos)
     if (pos > f->size)           { return TIKU_FAT_ERR_ARG; }
 
     bytes_per_clus = (uint32_t)fs->sec_per_clus * fs->bytes_per_sec;
-    want = pos / bytes_per_clus;
+    /* On a boundary the cursor stays on the cluster ending there, as after a
+     * sequential read: the next read follows the link, and a seek to the end
+     * of a file that ends on a boundary needs no cluster past its last. */
+    want = (pos == 0u) ? 0u : (pos - 1u) / bytes_per_clus;
 
-    /* Walk from the start rather than caching a chain: a chain of N clusters
-     * costs N FAT reads, and the sequential path below never seeks. */
+    /* Each seek walks the chain from the first cluster, one FAT read per
+     * cluster; tiku_fat_read() does not seek. */
     f->clus = f->first_clus;
     for (i = 0u; i < want; i++) {
         uint32_t next;
@@ -515,7 +532,12 @@ int32_t tiku_fat_read(tiku_fat_t *fs, tiku_fat_file_t *f, void *buf,
         uint8_t  sec[TIKU_FAT_SECTOR];
         uint32_t off_in_clus, sec_in_clus, off_in_sec, chunk, i;
 
-        /* Advance to the next cluster when the current one is exhausted. */
+        /*
+         * Advance to the next cluster when the current one is exhausted.  The
+         * read stops at the file size, so it follows no more links than the
+         * size implies.  A chain that loops back within that count is caught
+         * by tiku_fat_verify(), not here.
+         */
         if ((f->pos % bytes_per_clus) == 0u && f->pos != 0u) {
             uint32_t next;
             tiku_fat_err_t rc = fat_next(fs, f->clus, &next);
@@ -523,18 +545,6 @@ int32_t tiku_fat_read(tiku_fat_t *fs, tiku_fat_file_t *f, void *buf,
             if (next == 0u) { return -(int32_t)TIKU_FAT_ERR_CORRUPT; }
             f->clus = next;
             f->clus_idx++;
-            /*
-             * A FILE'S CHAIN CANNOT BE LONGER THAN ITS SIZE.  Without this
-             * bound a chain that loops back returns exactly the right NUMBER
-             * of bytes read from the same clusters -- valid-looking data that
-             * is silently wrong, which is worse than an error.  (A loop that
-             * PRESERVES the length still gets past this; tiku_fat_verify()
-             * exists for that, and says so.)
-             */
-            if (f->clus_idx >=
-                ((f->size + bytes_per_clus - 1u) / bytes_per_clus)) {
-                return -(int32_t)TIKU_FAT_ERR_CORRUPT;
-            }
         }
 
         off_in_clus = f->pos % bytes_per_clus;
@@ -542,17 +552,11 @@ int32_t tiku_fat_read(tiku_fat_t *fs, tiku_fat_file_t *f, void *buf,
         off_in_sec  = off_in_clus % fs->bytes_per_sec;
 
         /*
-         * THE FAST PATH: WHOLE SECTORS, STRAIGHT INTO THE CALLER'S BUFFER.
-         *
-         * One sector per call costs one block command per 512 bytes -- 110 592
-         * of them for a 54 MB file, at ~145 us each.  A sector-aligned caller
-         * wanting at least a sector gets every contiguous sector left in the
-         * cluster in one command, and skips the bounce copy because the
-         * destination is already where the bytes belong.
-         *
-         * Clusters are contiguous BY DEFINITION, so no chain walk is needed
-         * inside a cluster; crossing into the next one goes back around the
-         * loop and through fat_next, which is where fragmentation is handled.
+         * Whole sectors go straight into the caller's buffer: a sector-aligned
+         * read of at least a sector takes its whole sectors, up to the end of
+         * the cluster, in one block command with no bounce copy.  A cluster is
+         * contiguous, so crossing into the next one goes back around the loop
+         * and through fat_next(), which is where fragmentation is handled.
          */
         if (off_in_sec == 0u && (n - got) >= fs->bytes_per_sec) {
             uint32_t want = (n - got) / fs->bytes_per_sec;

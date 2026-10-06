@@ -7,9 +7,9 @@
  *
  * tiku_mem_arch.c - nRF54L memory HAL (RRAM read/write).
  *
- * RRAM is memory-mapped and byte-writable with no erase cycle, so a read is a
- * plain copy and a write opens the RRAMC WEN gate, copies, waits for ready and
- * restores the gate.  Unlock and lock save and restore, so nesting is correct.
+ * RRAM is memory-mapped and byte-writable with no erase cycle: a read is a
+ * plain copy, and a write opens the RRAMC WEN gate, copies, waits for READY
+ * and restores the gate to its previous state.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -21,13 +21,33 @@
 
 #define TIKU_RRAMC_READY_BIT   (1UL << 0)   /* RRAMC.READY: 1 = idle/ready */
 
+/* The persist partition (nrf54l15.ld / nrf54lm20a.ld); .persistent is in it. */
+extern const uint8_t __tiku_nvm_rram_start[];
+extern const uint8_t __tiku_nvm_rram_end[];
+extern uint8_t __persistent_start[];
+extern uint8_t __persistent_end[];
+
 void tiku_mem_arch_init(void)
 {
-    /* Unbuffered writes: each store commits directly to RRAM (no write buffer
-     * to flush), which keeps the nvm_write path simple.  WRITEBUFSIZE = 0. */
+    /* WRITEBUFSIZE = 0: each store commits directly to RRAM and no write
+     * buffer holds data back. */
     uint32_t cfg = NRF_RRAMC_S->CONFIG;
     cfg &= ~(0x3FUL << 8);      /* clear WRITEBUFSIZE (bits 8..13) -> 0       */
     NRF_RRAMC_S->CONFIG = cfg;
+}
+
+/** @brief The persist partition: durable variables live there in place. */
+const uint8_t *tiku_mem_arch_durable(size_t *len)
+{
+    *len = (size_t)(__tiku_nvm_rram_end - __tiku_nvm_rram_start);
+    return __tiku_nvm_rram_start;
+}
+
+/** @brief The .persistent section, at the start of the persist partition. */
+uint8_t *tiku_mem_arch_durable_live(size_t *len)
+{
+    *len = (size_t)(__persistent_end - __persistent_start);
+    return __persistent_start;
 }
 
 void tiku_mem_arch_secure_wipe(uint8_t *buf, tiku_mem_arch_size_t len)
@@ -78,13 +98,19 @@ void tiku_mem_arch_nvm_write(uint8_t *dst, const uint8_t *src,
     tiku_mpu_arch_lock_nvm(gate);           /* restore WEN */
 }
 
-void tiku_mem_arch_nvm_flush(void)
+int tiku_mem_arch_nvm_flush_status(void)
 {
-    /* RRAM writes are unbuffered (WRITEBUFSIZE = 0 in tiku_mem_arch_init) and
-     * nvm_write already spins on RRAMC.READY, so there is no deferred write
-     * buffer to drain -- this exists to satisfy the HAL and simply makes sure
-     * the controller is idle. */
+    /* RRAM writes are unbuffered (WRITEBUFSIZE = 0, set in tiku_mem_arch_init)
+     * and nvm_write waits on RRAMC.READY, so nothing is held back; this waits
+     * for the controller to be idle. */
     while ((NRF_RRAMC_S->READY & TIKU_RRAMC_READY_BIT) == 0UL) {
         /* spin until RRAMC is ready */
     }
+    return 0;
+}
+
+/** @brief Call tiku_mem_arch_nvm_flush_status() and discard its result. */
+void tiku_mem_arch_nvm_flush(void)
+{
+    (void)tiku_mem_arch_nvm_flush_status();
 }

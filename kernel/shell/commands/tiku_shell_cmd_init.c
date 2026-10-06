@@ -7,9 +7,8 @@
  *
  * tiku_shell_cmd_init.c - "init" command implementation
  *
- * Shell interface to the FRAM-backed init table.  Allows listing,
- * adding, removing, enabling/disabling, and re-running boot entries
- * without recompiling.
+ * Lists, adds, removes, enables, disables and runs the boot entries of the
+ * init table in the NVM config region.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -27,7 +26,7 @@
 /* INTERNAL HELPERS                                                          */
 /*---------------------------------------------------------------------------*/
 
-/** Simple string compare (avoids pulling in full strcmp on small targets) */
+/** @brief 1 if strings @p a and @p b are equal, else 0. */
 static uint8_t
 cmd_streq(const char *a, const char *b)
 {
@@ -41,7 +40,27 @@ cmd_streq(const char *a, const char *b)
     return (*a == *b);
 }
 
-/** Parse a decimal uint8 from string, return 0 on success */
+/**
+ * @brief 1 if the init table holds an entry named @p name, else 0.
+ *
+ * Compares the first TIKU_INIT_NAME_SIZE-1 characters, as the table does.
+ */
+static uint8_t
+cmd_init_has(const char *name)
+{
+    uint8_t i;
+
+    for (i = 0; i < tiku_init_count(); i++) {
+        const tiku_init_entry_t *e = tiku_init_get(i);
+        if (e != (const tiku_init_entry_t *)0 &&
+            strncmp(e->name, name, TIKU_INIT_NAME_SIZE - 1) == 0) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/** @brief Parse decimal @p s (0-255) into *out; 0 on success, else 1. */
 static uint8_t
 cmd_parse_u8(const char *s, uint8_t *out)
 {
@@ -64,10 +83,10 @@ cmd_parse_u8(const char *s, uint8_t *out)
 }
 
 /**
- * @brief Concatenate argv[first..argc-1] into buf with spaces.
+ * @brief Join argv[first..argc-1] into @p buf with single spaces.
  *
- * The init command syntax is: init add <seq> <name> <cmd tokens...>
- * The command tokens must be reassembled back into a single string.
+ * Text past @p bufsz - 1 bytes is dropped without an error; @p buf is always
+ * NUL-terminated.
  */
 static void
 cmd_join_args(char *buf, uint8_t bufsz,
@@ -127,6 +146,7 @@ cmd_init_list(void)
 /* SUBCOMMAND: add                                                           */
 /*---------------------------------------------------------------------------*/
 
+/** @brief `init add <seq> <name> <cmd...>`: add or replace an entry. */
 static void
 cmd_init_add(uint8_t argc, const char *argv[])
 {
@@ -148,11 +168,15 @@ cmd_init_add(uint8_t argc, const char *argv[])
         return;
     }
 
-    /* Reassemble the command from remaining args */
     cmd_join_args(cmd_buf, sizeof(cmd_buf), argc, argv, 4);
 
     if (tiku_init_add(seq, argv[3], cmd_buf) < 0) {
-        SHELL_PRINTF("Error: init table full\n");
+        if (!cmd_init_has(argv[3]) &&
+            tiku_init_count() >= TIKU_INIT_MAX_ENTRIES) {
+            SHELL_PRINTF("Error: init table full\n");
+        } else {
+            SHELL_PRINTF("Error: init table not written\n");
+        }
         return;
     }
 
@@ -163,6 +187,7 @@ cmd_init_add(uint8_t argc, const char *argv[])
 /* SUBCOMMAND: rm                                                            */
 /*---------------------------------------------------------------------------*/
 
+/** @brief `init rm <name>`: remove an entry. */
 static void
 cmd_init_rm(uint8_t argc, const char *argv[])
 {
@@ -172,7 +197,11 @@ cmd_init_rm(uint8_t argc, const char *argv[])
     }
 
     if (tiku_init_remove(argv[2]) < 0) {
-        SHELL_PRINTF("Error: '%s' not found\n", argv[2]);
+        if (cmd_init_has(argv[2])) {
+            SHELL_PRINTF("Error: init table not written\n");
+        } else {
+            SHELL_PRINTF("Error: '%s' not found\n", argv[2]);
+        }
         return;
     }
 
@@ -183,6 +212,7 @@ cmd_init_rm(uint8_t argc, const char *argv[])
 /* SUBCOMMAND: enable / disable                                              */
 /*---------------------------------------------------------------------------*/
 
+/** @brief `init enable|disable <name>`: set an entry's enabled flag. */
 static void
 cmd_init_set_enable(uint8_t argc, const char *argv[], uint8_t en)
 {
@@ -193,7 +223,11 @@ cmd_init_set_enable(uint8_t argc, const char *argv[], uint8_t en)
     }
 
     if (tiku_init_enable(argv[2], en) < 0) {
-        SHELL_PRINTF("Error: '%s' not found\n", argv[2]);
+        if (cmd_init_has(argv[2])) {
+            SHELL_PRINTF("Error: init table not written\n");
+        } else {
+            SHELL_PRINTF("Error: '%s' not found\n", argv[2]);
+        }
         return;
     }
 

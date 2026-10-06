@@ -30,23 +30,33 @@
 /**
  * @brief Configure the watchdog timer with custom parameters
  *
- * Sets mode, clock source, interval, and startup behaviour. Only
- * available on platforms whose HAL exposes these parameters.
+ * Stores mode, clock source, interval and startup behaviour, then programs
+ * the watchdog with them.  On a port without interval support, interval mode
+ * turns the watchdog off.
  *
  * @param mode          Watchdog or interval timer mode
  * @param clk           Clock source selection
  * @param interval      Timeout interval
  * @param start_held    If non-zero, start in held (paused) state
- * @param kick_on_start If non-zero, kick the timer on start
+ * @param kick_on_start If non-zero, kick the timer on start; used only where
+ *                      TIKU_WATCHDOG_INTERVAL_SUPPORTED is 1 (MSP430)
+ * @note The call reports nothing: check tiku_watchdog_mode_supported() first.
  */
 void tiku_watchdog_config(tiku_wdt_mode_t mode, tiku_wdt_clk_t clk,
                          tiku_wdt_interval_t interval, int start_held,
                          int kick_on_start);
 
-/** @brief Initialize the watchdog timer with default settings */
+/**
+ * @brief Program the watchdog with the stored configuration, which holds the
+ *        defaults until tiku_watchdog_config() changes it.
+ */
 void tiku_watchdog_init(void);
 
-/** @brief Kick (reset) the watchdog timer to prevent timeout */
+/**
+ * @brief Kick (reset) the watchdog timer to prevent timeout.
+ *
+ * A kick is also a hang-detector check-in (tiku_hang_checkin()).
+ */
 void tiku_watchdog_kick(void);
 
 /** @brief Pause the watchdog timer */
@@ -76,7 +86,10 @@ int tiku_watchdog_get_start_held(void);
 /** @brief Return whether the stored configuration kicks when initialized. */
 int tiku_watchdog_get_kick_on_start(void);
 
-/** @brief Return non-zero when @p mode has a real backend on this build. */
+/**
+ * @brief Return non-zero when this build can run @p mode: watchdog mode
+ *        always, interval mode only with TIKU_WATCHDOG_INTERVAL_SUPPORTED.
+ */
 int tiku_watchdog_mode_supported(tiku_wdt_mode_t mode);
 
 /** @brief Disable the watchdog timer entirely */
@@ -93,15 +106,15 @@ void tiku_watchdog_on(void);
 /**
  * @brief Return non-zero if the watchdog is currently armed.
  *
- * "Armed" means tiku_watchdog_off() has not been called since the
- * last init/config/on. Pause/resume do not affect this flag.
+ * Armed means the last init/config/on armed the hardware and
+ * tiku_watchdog_off() has not run since.  Pause/resume do not affect it.
  */
 int tiku_watchdog_is_on(void);
 
 /**
- * @brief Return the number of successful kicks since boot.
+ * @brief Return the number of tiku_watchdog_kick() calls since boot.
  *
- * Incremented inside tiku_watchdog_kick(). Wraps at 2^32.
+ * Wraps at 2^32.
  */
 uint32_t tiku_watchdog_kicks(void);
 

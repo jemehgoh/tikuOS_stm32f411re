@@ -5,11 +5,11 @@
  *
  * Authors: Ambuj Varshney <ambuj@tiku-os.org>
  *
- * tiku_shell_cmd_df.c - "df" command implementation.
+ * tiku_shell_cmd_df.c - "df" and "mkfs" command implementation.
  *
- * Reports the /data store as a filesystem.  Block accounting follows the store's
- * own model -- a file occupies whole slots -- with the exact stored byte count on
- * a second line.
+ * Reports the /data store as a filesystem.  Block accounting follows the
+ * store's own model -- a file occupies whole slots -- with the exact stored
+ * byte count on a second line.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -24,6 +24,7 @@
 #include "tiku.h"
 #include <stdint.h>
 #include <stdio.h>      /* snprintf */
+#include <string.h>     /* strcmp */
 
 /*---------------------------------------------------------------------------*/
 /* HELPERS                                                                   */
@@ -32,8 +33,7 @@
 /**
  * @brief Format a byte count compactly: "<n>B" / "<n.x>K" / "<n.x>M".
  *
- * Integer-only (the lightweight shell printf has no float); the tenths
- * digit is computed from the remainder.
+ * Integer arithmetic only; the tenths digit is the truncated remainder.
  */
 static void
 df_hsize(char *buf, size_t bufsz, uint32_t bytes)
@@ -69,21 +69,28 @@ tiku_shell_cmd_df(uint8_t argc, const char *argv[])
     (void)argv;
 
     if (tiku_vfs_tree_data_df(&s) != 0) {
-        SHELL_PRINTF(SH_RED "df: /data file store unavailable\n" SH_RST);
+        const char *why = tiku_vfs_tree_data_why();
+
+        SHELL_PRINTF(SH_RED "df: /data unavailable: %s\n" SH_RST,
+                     (why != NULL) ? why : "the store did not mount");
+        SHELL_PRINTF("  'mkfs' shows what the extent holds; "
+                     "'mkfs --erase-data' formats it\n");
         return;
     }
 
-    /* Block accounting: one fixed slot per file. */
-    used  = (uint32_t)s.used_files * (uint32_t)s.slot_bytes;
+    /* Used space is counted in slots: a file holds as many whole slots as its
+     * content needs.  The file count is a column of its own. */
+    used  = (uint32_t)s.used_slots * (uint32_t)s.slot_bytes;
     avail = (s.cap_bytes > used) ? (s.cap_bytes - used) : 0u;
-    pct   = (s.max_files != 0u)
-            ? (unsigned)((uint32_t)s.used_files * 100u / s.max_files) : 0u;
+    pct   = (s.total_slots != 0u)
+            ? (unsigned)((uint32_t)s.used_slots * 100u / s.total_slots) : 0u;
 
     df_hsize(sz, sizeof sz, s.cap_bytes);
     df_hsize(us, sizeof us, used);
     df_hsize(av, sizeof av, avail);
     df_hsize(st, sizeof st, s.used_bytes);
-    /* Pre-format the %-bearing fields so only %s/literals reach SHELL_PRINTF. */
+    /* Use% and Files are formatted to strings here; the row pads them with
+     * %5s and %7s. */
     snprintf(pc, sizeof pc, "%u%%", pct);
     snprintf(fl, sizeof fl, "%u/%u",
              (unsigned)s.used_files, (unsigned)s.max_files);
@@ -93,15 +100,14 @@ tiku_shell_cmd_df(uint8_t argc, const char *argv[])
                  "Backing");
     SHELL_PRINTF("%-10s %8s %8s %8s %5s %7s  %s\n",
                  "/data", sz, us, av, pc, fl, s.backing);
-    SHELL_PRINTF("  %s of file data stored; slot %u B\n",
-                 st, (unsigned)s.slot_bytes);
+    SHELL_PRINTF("  %u of %u slots in use, %s of file data stored; slot %u B\n",
+                 (unsigned)s.used_slots, (unsigned)s.total_slots, st,
+                 (unsigned)s.slot_bytes);
 
-    /* Carved-region breakdown: how the NVM region divides into the tier extent
-     * and this file store.  "idle" is the point of printing it -- the two
-     * extents are meant to tile the region exactly, so anything other than 0
-     * means region space is going nowhere (which is what this layout was
-     * reworked to make impossible).  Omitted on parts whose store rides its own
-     * backing array rather than a region. */
+    /* The NVM tier and this store tile the carved NVM region; an idle
+     * remainder, region space neither of them uses, prints in red.  A part
+     * whose store has its own backing array reports region_bytes 0 and prints
+     * no region line. */
     if (s.region_bytes != 0u) {
         char rg[12], ti[12], fx[12], id[12];
         df_hsize(rg, sizeof rg, s.region_bytes);
@@ -115,4 +121,52 @@ tiku_shell_cmd_df(uint8_t argc, const char *argv[])
             SHELL_PRINTF("\n");
         }
     }
+}
+
+void
+tiku_shell_cmd_mkfs(uint8_t argc, const char *argv[])
+{
+    tiku_tfs_probe_t p;
+    int erase = (argc >= 2u && strcmp(argv[1], "--erase-data") == 0);
+    int rc;
+
+    if (argc > 2u || (argc >= 2u && !erase)) {
+        SHELL_PRINTF("Usage: mkfs [--erase-data]\n");
+        return;
+    }
+    if (tiku_vfs_tree_data_probe(&p) != 0) {
+        SHELL_PRINTF(SH_RED "mkfs: no /data extent on this part\n" SH_RST);
+        return;
+    }
+    SHELL_PRINTF("/data extent: %s, %lu live entries\n",
+                 tiku_tfs_probe_name(p.kind), (unsigned long)p.live);
+    if (p.kind == TFS_PROBE_TOOSMALL) {
+        SHELL_PRINTF(SH_RED "mkfs: the extent is too small for a store\n" SH_RST);
+        return;
+    }
+    if (!tiku_vfs_tree_data_untouched() && !erase) {
+        SHELL_PRINTF("mkfs: formatting erases every file; "
+                     "run 'mkfs --erase-data' to proceed\n");
+        return;
+    }
+    rc = tiku_vfs_tree_data_format();
+    if (rc == -2) {
+        SHELL_PRINTF(SH_RED "mkfs: a layout change was interrupted; "
+                     "resume it with 'layout resume'\n" SH_RST);
+        return;
+    }
+    if (rc == -3) {
+        SHELL_PRINTF(SH_RED "mkfs: formatted, but layout recovery failed; "
+                     "inspect 'layout status' before retrying recovery\n" SH_RST);
+        return;
+    }
+    if (rc == 1) {
+        SHELL_PRINTF("mkfs: /data formatted; reboot to activate the layout\n");
+        return;
+    }
+    if (rc != 0) {
+        SHELL_PRINTF(SH_RED "mkfs: format failed\n" SH_RST);
+        return;
+    }
+    SHELL_PRINTF("mkfs: /data formatted\n");
 }

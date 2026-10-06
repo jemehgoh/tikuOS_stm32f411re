@@ -7,8 +7,8 @@
  *
  * tiku_shell_cmd_nvmprobe.c - "nvmprobe" diagnostic for the carved NVM region.
  *
- * An opt-in affordance to exercise the memory-mapped region backend from the
- * shell and the bench suite: report its geometry, and read or write at an offset.
+ * Exercises the memory-mapped region backend from the shell and the bench
+ * suite: geometry, read, write and verify at an offset, and a tier self-test.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -115,13 +115,13 @@ tiku_shell_cmd_nvmprobe(uint8_t argc, const char *argv[])
 
     if (strcmp(sub, "tier") == 0) {
         /*
-         * NVM-tier self-test: allocate from the tier, write through
-         * tiku_tier_nvm_write(), verify by plain readback, then confirm an
-         * over-capacity arena is refused.  The tier has no free, so each run
-         * consumes one 256 B arena until reboot.  "tier mark <txt>" writes
-         * <txt> instead of the fixed pattern and prints the block's region
-         * offset, so the bench can re-verify the bytes after a reset through
-         * the raw read path.
+         * NVM-tier self-test: create a 256-byte tier arena, write a text into
+         * a 64-byte block through tiku_tier_nvm_write(), compare it by plain
+         * readback, check that an arena of the tier's whole capacity is
+         * refused, then release the arena.  `tier mark <txt>` writes <txt>
+         * (at most 63 bytes) and prints the block's offset in the region,
+         * which `nvmprobe read` or `verify` takes after a reset.  Released
+         * bytes stay in place until another allocation reuses them.
          */
         const char *txt = (argc >= 4u && strcmp(argv[2], "mark") == 0)
                           ? argv[3] : "TIER-SELFTEST";
@@ -147,6 +147,7 @@ tiku_shell_cmd_nvmprobe(uint8_t argc, const char *argv[])
         blk = tiku_arena_alloc(&ar, 64u);
         if (blk == NULL) {
             SHELL_PRINTF("nvmprobe: tier arena alloc failed\n");
+            (void)tiku_mem_workspace_close(&ar);
             return;
         }
         wr_ok = (tiku_tier_nvm_write(blk, txt,
@@ -154,8 +155,9 @@ tiku_shell_cmd_nvmprobe(uint8_t argc, const char *argv[])
                  == TIKU_MEM_OK);
         vf_ok = (memcmp(blk, txt, len) == 0);
         rf_ok = (tiku_tier_arena_create(&over, TIKU_MEM_NVM,
-                                        st0.total_bytes + 64u, 142u)
+                                        st0.total_bytes, 142u)
                  != TIKU_MEM_OK);
+        if (!rf_ok) (void)tiku_arena_destroy(&over);
         (void)tiku_tier_stats(TIKU_MEM_NVM, &st1);
         SHELL_PRINTF("nvmprobe: tier total=%lu used=%lu->%lu "
                      "write=%s verify=%s refuse=%s\n",
@@ -174,6 +176,8 @@ tiku_shell_cmd_nvmprobe(uint8_t argc, const char *argv[])
                 SHELL_PRINTF("nvmprobe: tier mark unmapped\n");
             }
         }
+        if (tiku_mem_workspace_close(&ar) != TIKU_MEM_OK)
+            SHELL_PRINTF("nvmprobe: workspace release failed\n");
         return;
     }
 

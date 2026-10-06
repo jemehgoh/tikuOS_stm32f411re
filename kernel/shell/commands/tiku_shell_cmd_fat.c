@@ -7,9 +7,8 @@
  *
  * tiku_shell_cmd_fat.c - "fat" command: read a PC-written FAT32 volume.
  *
- * The binding is the only hardware here: the parser knows nothing about eMMC and
- * this file supplies the small callback that connects it to one, which is what let
- * the parser be developed and regression-tested on a host first.
+ * The FAT32 parser, kernel/fs/tiku_fat.c, reads blocks through a callback;
+ * this file supplies the one that reads the eMMC and the fat subcommands.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -23,8 +22,18 @@
 #if TIKU_SHELL_CMD_FAT
 
 #include <arch/ambiq/tiku_emmc_arch.h>
-#include <tikukits/crypto/sha256/tiku_kits_crypto_sha256.h>
 #include <kernel/cpu/tiku_hang.h>
+/* `fat hash` needs SHA-256, which a build links only with the crypto kit:
+ * the whole kit (TIKU_KIT_CRYPTO_ENABLE), or the SHA-256, HMAC and Base64
+ * files of it that TIKU_BASIC_CRYPTO_ENABLE adds for BASIC.  The Makefile
+ * sets either flag only with sources that provide SHA-256; without them
+ * `fat hash` prints that the build has no SHA-256. */
+#if (TIKU_KIT_CRYPTO_ENABLE + 0) || (TIKU_BASIC_CRYPTO_ENABLE + 0)
+#define FAT_HASH 1
+#include <tikukits/crypto/sha256/tiku_kits_crypto_sha256.h>
+#else
+#define FAT_HASH 0
+#endif
 #if (TIKU_DRV_USB_ENABLE + 0)
 #include <arch/ambiq/tiku_usb_arch.h>
 #endif
@@ -37,9 +46,8 @@
 /**
  * @brief Bridge tiku_fat's block callback to the eMMC driver.
  *
- * The reader asks in ABSOLUTE LBAs, which is exactly what the card wants, so
- * there is nothing to translate -- the partition offset lives inside the
- * mounted volume, not here.
+ * The reader asks for absolute LBAs, which the card takes as they are; the
+ * partition offset is applied inside tiku_fat.
  */
 static int fat_blk_read(uint32_t lba, uint32_t n, void *buf, void *ctx)
 {
@@ -51,7 +59,7 @@ static int fat_blk_read(uint32_t lba, uint32_t n, void *buf, void *ctx)
 static tiku_fat_t s_fs;
 static uint8_t    s_mounted;
 
-/** @brief Shared refusal: the card must be ours to read. */
+/** @brief Refuse unless the card is identified and USB does not own it. */
 static int fat_ready(void)
 {
 #if (TIKU_DRV_USB_ENABLE + 0)
@@ -68,6 +76,7 @@ static int fat_ready(void)
     return 1;
 }
 
+/** @brief Refuse unless a volume is mounted and fat_ready() passes. */
 static int fat_need_mount(void)
 {
     if (!s_mounted) {
@@ -78,9 +87,10 @@ static int fat_need_mount(void)
 }
 
 /*---------------------------------------------------------------------------*/
-/* F1 -- MOUNT                                                               */
+/* MOUNT                                                                     */
 /*---------------------------------------------------------------------------*/
 
+/** @brief `fat mount`: mount the card's FAT32 volume, print its geometry. */
 static void cmd_mount(void)
 {
     tiku_fat_err_t rc;
@@ -100,9 +110,8 @@ static void cmd_mount(void)
     s_mounted = 1u;
 
     /*
-     * Print what was DERIVED, not what was claimed.  Every one of these came
-     * out of the BPB's own arithmetic and can be checked against what the PC
-     * says about the same volume -- which is the F1 gate.
+     * The partition LBA is the volume's first sector, from the MBR or 0 for
+     * a card without one; the other values are computed from the BPB.
      */
     SHELL_PRINTF("fat mount: ok\n");
     SHELL_PRINTF("  partition LBA %lu  fat LBA %lu  data LBA %lu\n",
@@ -120,9 +129,10 @@ static void cmd_mount(void)
 }
 
 /*---------------------------------------------------------------------------*/
-/* F2 -- LISTING                                                             */
+/* LISTING                                                                   */
 /*---------------------------------------------------------------------------*/
 
+/** @brief `fat ls [path]`: list a directory of the mounted volume. */
 static void cmd_ls(const char *path)
 {
     tiku_fat_dir_t d;
@@ -156,13 +166,14 @@ static void cmd_ls(const char *path)
 }
 
 /*---------------------------------------------------------------------------*/
-/* F3 -- READ A FILE THROUGH THE CHAIN                                       */
+/* READ A FILE THROUGH THE CHAIN                                             */
 /*---------------------------------------------------------------------------*/
 
-/* One sector at a time keeps this off the big buffers the other subsystems
- * own; the read path is FAT-bound, not buffer-bound. */
+#if FAT_HASH
+/* `fat hash` reads through a 4 KB buffer of its own. */
 static uint8_t s_hashbuf[4096];
 
+/** @brief `fat hash <path>`: verify the file's chain, then SHA-256 it. */
 static void cmd_hash(const char *path)
 {
     tiku_fat_file_t f;
@@ -180,10 +191,9 @@ static void cmd_hash(const char *path)
     }
 
     /*
-     * Verify the chain BEFORE trusting a byte of it.  The read path is
-     * bounded by the file's size, so a loop that preserves the length would
-     * otherwise return exactly the right number of WRONG bytes -- see
-     * tiku_fat.h.  One extra chain walk is cheap next to hashing 54 MB.
+     * The read path stops at the file's size, so a cluster chain that loops
+     * back on itself returns the right number of wrong bytes.
+     * tiku_fat_verify() rejects such a chain before any byte is hashed.
      */
     rc = tiku_fat_verify(&s_fs, &f);
     if (rc != TIKU_FAT_OK) {
@@ -215,14 +225,23 @@ static void cmd_hash(const char *path)
     }
     SHELL_PRINTF("\n");
 }
+#else
+/** @brief `fat hash` in a build without SHA-256: say so. */
+static void cmd_hash(const char *path)
+{
+    SHELL_PRINTF("fat hash %s: this build has no SHA-256 (the crypto kit)\n",
+                 path);
+}
+#endif
 
 /*---------------------------------------------------------------------------*/
-/* EXTENTS -- what F4's staging path will hand to the block layer            */
+/* EXTENTS                                                                   */
 /*---------------------------------------------------------------------------*/
 
 static unsigned s_run_n;
 static uint32_t s_run_sec;
 
+/** @brief Extent callback for `fat runs`: print the first eight, count all. */
 static int run_cb(uint32_t lba, uint32_t nsec, void *ctx)
 {
     (void)ctx;
@@ -239,6 +258,7 @@ static int run_cb(uint32_t lba, uint32_t nsec, void *ctx)
     return 0;
 }
 
+/** @brief `fat runs <path>`: list a file's extents and count them. */
 static void cmd_runs(const char *path)
 {
     tiku_fat_file_t f;
@@ -257,9 +277,8 @@ static void cmd_runs(const char *path)
         SHELL_PRINTF("  walk: %s\n", tiku_fat_strerror(rc));
         return;
     }
-    /* Fragmentation, stated as a number rather than a feeling: one run is
-     * contiguous, and every extra run is a seam the staging path must chunk
-     * around. */
+    /* A file in one run is contiguous on the card; `fat stage` stages each
+     * run with its own tiku_emmc_stage_chunk() call. */
     SHELL_PRINTF("  %u runs covering %lu sectors -- %s\n", s_run_n,
                  (unsigned long)s_run_sec,
                  (s_run_n == 1u) ? "contiguous"
@@ -267,13 +286,13 @@ static void cmd_runs(const char *path)
 }
 
 /*---------------------------------------------------------------------------*/
-/* F4 -- STAGE A MODEL BY NAME                                               */
+/* STAGE A FILE BY NAME                                                      */
 /*---------------------------------------------------------------------------*/
 /*
- * The flow this whole arc was for: a PC drags a model onto the card, and the
- * board loads it by FILENAME into the working tier.  Nothing here knows an
- * LBA -- the chain walker turns the name into extents and the eMMC pipeline
- * appends them to the PSRAM image in order.
+ * A file is staged by name into the PSRAM tier: tiku_fat_runs() turns the
+ * file's cluster chain into extents, and the eMMC staging pipeline
+ * (tiku_emmc_stage_open(), _chunk() and _close()) appends them to the PSRAM
+ * image in order, from offset 0.
  */
 #if (TIKU_DRV_PSRAM_ENABLE + 0)
 #include <arch/ambiq/tiku_psram_arch.h>
@@ -283,12 +302,13 @@ static unsigned s_stage_runs;
 static int      s_stage_bad;
 
 /*
- * Helpers for other commands that address a file by LBA (the llm command
- * streams weights straight off the card).  Both require a mounted volume.
+ * tiku_shell_fat_locate() and tiku_shell_fat_stage_prefix() serve commands
+ * that address a file by LBA; both return -1 unless a volume is mounted.
  */
 
 static uint32_t s_loc_first, s_loc_runs;
 
+/** @brief Extent callback for tiku_shell_fat_locate(): first LBA, run count. */
 static int locate_cb(uint32_t lba, uint32_t nsec, void *ctx)
 {
     (void)nsec; (void)ctx;
@@ -297,7 +317,6 @@ static int locate_cb(uint32_t lba, uint32_t nsec, void *ctx)
     return 0;
 }
 
-/** @brief First LBA, byte size and extent count of a file. */
 int tiku_shell_fat_locate(const char *path, uint32_t *lba0, uint32_t *size,
                           uint32_t *nruns)
 {
@@ -313,24 +332,19 @@ int tiku_shell_fat_locate(const char *path, uint32_t *lba0, uint32_t *size,
 
 static uint32_t s_pfx_left;
 
+/** @brief Extent callback that stages runs until the prefix is covered. */
 static int prefix_cb(uint32_t lba, uint32_t nsec, void *ctx)
 {
     (void)ctx;
     if (nsec > s_pfx_left) { nsec = s_pfx_left; }
     if (tiku_emmc_stage_chunk(lba, nsec) != TIKU_EMMC_OK) {
-        s_pfx_left = 0xFFFFFFFFu;        /* poison: caller sees failure */
+        s_pfx_left = 0xFFFFFFFFu;        /* nonzero: stage_prefix fails  */
         return 1;
     }
     s_pfx_left -= nsec;
     return (s_pfx_left == 0u) ? 1 : 0;   /* covered the prefix: stop     */
 }
 
-/**
- * @brief Stage the first @p bytes of a file into the PSRAM tier base.
- *
- * The same verified eMMC->SRAM->PSRAM pipeline as `fat stage`, walked only
- * until the prefix is covered.  Rounds up to whole sectors.
- */
 int tiku_shell_fat_stage_prefix(const char *path, uint32_t bytes)
 {
     tiku_fat_file_t f;
@@ -342,7 +356,7 @@ int tiku_shell_fat_stage_prefix(const char *path, uint32_t bytes)
     if (tiku_fat_verify(&s_fs, &f) != TIKU_FAT_OK) { return -1; }
     if ((uint64_t)nsec * 512u > f.size + 511u) { return -1; }
     s_pfx_left = nsec;
-    tiku_emmc_stage_open();
+    if (tiku_emmc_stage_open() != TIKU_EMMC_OK) { return -1; }
     (void)tiku_fat_runs(&s_fs, &f, prefix_cb, 0);
     if (s_pfx_left != 0u) {
         (void)tiku_emmc_stage_close(0u, &src, &dst, &rd_us, &wr_us);
@@ -350,10 +364,11 @@ int tiku_shell_fat_stage_prefix(const char *path, uint32_t bytes)
     }
     if (tiku_emmc_stage_close(nsec * 512u, &src, &dst, &rd_us, &wr_us)
         != TIKU_EMMC_OK) {
-        return -1;                       /* readback hash mismatch       */
+        return -1;                       /* PSRAM read-back failed       */
     }
     return (src == dst) ? 0 : -1;
 }
+/** @brief Extent callback for `fat stage`: queue each run to the pipeline. */
 static int stage_cb(uint32_t lba, uint32_t nsec, void *ctx)
 {
     (void)ctx;
@@ -366,6 +381,7 @@ static int stage_cb(uint32_t lba, uint32_t nsec, void *ctx)
     return 0;
 }
 
+/** @brief `fat stage <path>`: copy a file into the PSRAM tier and check it. */
 static void cmd_stage(const char *path)
 {
     tiku_fat_file_t f;
@@ -382,7 +398,9 @@ static void cmd_stage(const char *path)
         SHELL_PRINTF("fat stage %s: %s\n", path, tiku_fat_strerror(rc));
         return;
     }
-    /* Verify the chain before moving a byte, for the reason in tiku_fat.h. */
+    /* tiku_fat_runs() stops at the file's size, so a cluster chain that
+     * loops back on itself yields the right number of sectors from the wrong
+     * clusters; tiku_fat_verify() rejects such a chain before a byte moves. */
     rc = tiku_fat_verify(&s_fs, &f);
     if (rc != TIKU_FAT_OK) {
         SHELL_PRINTF("fat stage %s: chain %s -- refusing\n", path,
@@ -399,7 +417,11 @@ static void cmd_stage(const char *path)
 
     SHELL_PRINTF("fat stage %s: %lu bytes\n", path, (unsigned long)f.size);
     s_stage_sec = 0u; s_stage_runs = 0u; s_stage_bad = 0;
-    tiku_emmc_stage_open();
+    if (tiku_emmc_stage_open() != TIKU_EMMC_OK) {
+        SHELL_PRINTF("  FAILED: the SRAM tier cannot lend the 512 KB"
+                     " bounce buffer\n");
+        return;
+    }
     rc = tiku_fat_runs(&s_fs, &f, stage_cb, (void *)0);
     if (rc != TIKU_FAT_OK || s_stage_bad) {
         SHELL_PRINTF("  FAILED during the walk (%s)\n",
@@ -408,11 +430,8 @@ static void cmd_stage(const char *path)
         return;
     }
     /*
-     * Whole sectors, NOT the file size. The staging pipeline hashes every
-     * byte it moves, and it moves whole sectors; clamping to the file size
-     * here made the two hashes cover regions 224 bytes apart and report a
-     * MISMATCH on a perfectly good transfer. Only a file whose length is an
-     * exact sector multiple hid it.
+     * The pipeline moves and hashes whole sectors, so the read-back hash
+     * covers s_stage_sec * 512 bytes, the span the source hash covers.
      */
     bytes = s_stage_sec * 512u;
 

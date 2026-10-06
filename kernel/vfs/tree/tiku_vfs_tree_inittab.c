@@ -7,9 +7,9 @@
  *
  * tiku_vfs_tree_inittab.c - /sys/init VFS nodes (init-table mirror).
  *
- * Mirrors the init table so a VFS client can read entries and toggle `enable`
- * without the shell.  Add and remove are deliberately absent: they are multi-field
- * operations that do not fit a single-node write.  Compiles away when init is off.
+ * Mirrors the init table: entries are readable and `enable` is writable
+ * without the shell.  Add and remove change several fields at once and have no
+ * node.  Compiles away when init is off.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -34,8 +34,7 @@
  * @brief Read handler for /sys/init/count.
  *
  * Renders the number of populated init-table entries as a decimal
- * line — i.e. how many of the eight slot directories below hold a
- * real entry rather than "(none)" placeholders.
+ * line: the slot directories that hold an entry.
  *
  * @param buf  Output buffer for the rendered text
  * @param max  Capacity of @p buf in bytes
@@ -48,11 +47,11 @@ init_count_read(char *buf, size_t max)
 }
 
 /**
- * @brief Generate the four handlers + children table for slot N.
+ * @brief Generate the five handlers and the children table for slot N.
  *
  * Read handlers for the entry's boot-order sequence, name and shell command,
- * plus a read/write enable flag writing through tiku_init_enable() (which
- * persists to FRAM).  Each re-fetches the entry, since `init` edits slots live.
+ * plus an enable flag that takes exactly "0" or "1" and persists it through
+ * tiku_init_enable().  Each re-fetches the entry; `init` edits slots live.
  */
 #define INIT_VFS_FUNCS(N)                                                     \
 static int init_seq_##N##_read(char *buf, size_t max)                         \
@@ -82,9 +81,17 @@ static int init_enable_##N##_read(char *buf, size_t max)                      \
 static int init_enable_##N##_write(const char *buf, size_t len)               \
 {                                                                             \
     const tiku_init_entry_t *e = tiku_init_get(N);                            \
-    (void)len;                                                                \
-    if (!e) return -1;                                                        \
-    return tiku_init_enable(e->name, (uint8_t)(buf[0] != '0'));               \
+    if (!e) {                                                                 \
+        return TIKU_VFS_ENOENT;                                               \
+    }                                                                         \
+    while (len > 0u && (buf[len - 1u] == '\n' || buf[len - 1u] == '\r' ||     \
+                        buf[len - 1u] == ' ' || buf[len - 1u] == '\t')) {     \
+        len--;                                                                \
+    }                                                                         \
+    if (len != 1u || (buf[0] != '0' && buf[0] != '1')) {                      \
+        return TIKU_VFS_EINVAL;                                               \
+    }                                                                         \
+    return tiku_init_enable(e->name, (uint8_t)(buf[0] == '1'));               \
 }                                                                             \
 static const tiku_vfs_node_t init_##N##_children[] = {                        \
     { "seq",    TIKU_VFS_FILE, init_seq_##N##_read,    NULL,                  \
@@ -94,7 +101,8 @@ static const tiku_vfs_node_t init_##N##_children[] = {                        \
     { "cmd",    TIKU_VFS_FILE, init_cmd_##N##_read,    NULL,                  \
       NULL, 0 },                                                              \
     { "enable", TIKU_VFS_FILE, init_enable_##N##_read,                        \
-                                init_enable_##N##_write, NULL, 0 },           \
+      init_enable_##N##_write, NULL, 0, NULL, NULL,                           \
+      TIKU_VFS_CAP_SYS | TIKU_VFS_CAP_FS },                                   \
 }
 
 INIT_VFS_FUNCS(0);

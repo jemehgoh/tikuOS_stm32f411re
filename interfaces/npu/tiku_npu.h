@@ -7,8 +7,12 @@
  *
  * tiku_npu.h - the neural accelerator contract.
  *
- * Legacy targets use a named store model. STM32N6 uses ST's LL-ATON
- * relocatable network_rel.bin contract and an event-driven submit path.
+ * A named model out of the file store, a buffer in, a buffer out, and one
+ * blocking run.  The backend keeps the caches coherent; a caller does no
+ * cache maintenance.
+ * 
+ * STM32N6 uses ST's LL-ATON relocatable network_rel.bin contract 
+ * and an event-driven submit path.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -23,12 +27,12 @@
 #include <kernel/process/tiku_process.h>
 #endif
 
-/** @brief Zero where no backend is compiled in, so callers can compile out. */
+/** @brief 1 when an NPU backend is compiled in, else 0. */
 #ifndef TIKU_HAS_NPU
 #define TIKU_HAS_NPU            0
 #endif
 
-#define TIKU_NPU_OK              0
+#define TIKU_NPU_OK              0  /**< success                           */
 #define TIKU_NPU_ERR_STATE      -1  /**< gated, or nothing loaded to run   */
 #define TIKU_NPU_ERR_MODEL      -2  /**< no such model, or not for this part */
 #define TIKU_NPU_ERR_TIMEOUT    -3  /**< submitted, never reached the end   */
@@ -156,11 +160,12 @@ int tiku_npu_model_last_error(const tiku_npu_model_t *model);
 
 #else
 
-/** @brief Models are named files in the store rather than linked-in arrays. */
+/** @brief Models are named files in the store. */
 #define TIKU_NPU_F_STORE_MODEL  (1u << 0)
 /** @brief Integer quantised networks only; no float path exists. */
 #define TIKU_NPU_F_INT_ONLY     (1u << 1)
 
+/** @brief Where the accelerator is in its lifecycle. */
 typedef enum {
     TIKU_NPU_ABSENT = 0,    /**< no accelerator on this part      */
     TIKU_NPU_GATED,         /**< present, powered down            */
@@ -174,12 +179,12 @@ typedef struct {
     uint16_t macs;          /**< multiply-accumulates per cycle   */
     uint16_t shram_kb;      /**< the accelerator's own memory     */
     uint32_t arena;         /**< working buffer the model needs   */
-    uint32_t in_bytes;      /**< 0 until a model is loaded        */
-    uint32_t out_bytes;
+    uint32_t in_bytes;      /**< input size; 0 until a model loads  */
+    uint32_t out_bytes;     /**< output size; 0 until a model loads */
 } tiku_npu_info_t;
 
 /**
- * @brief Which parts of this contract the backend actually implements.
+ * @brief Which parts of this contract the backend implements.
  *
  * @return A mask of TIKU_NPU_F_*
  */

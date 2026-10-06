@@ -7,9 +7,9 @@
  *
  * tiku_hang.h - check-in watchdog: live-hang detection with named attribution.
  *
- * A process that wedges the cooperative scheduler never lets the supervisor run,
- * so the board resets anonymously.  The tick ISR watches a progress heartbeat and
- * records which process held the CPU, so the recovery boot can quarantine it.
+ * A tick that sees the heartbeat stall while one process holds the CPU records
+ * that process and resets; autostart skips it on the next boot.  Only the
+ * nRF54L and Apollo4l tick ISRs call tiku_hang_tick().
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -21,17 +21,15 @@
 
 struct tiku_process;
 
-/*
- * Consecutive stalled ticks before a non-yielding process is declared hung.
- * Must EXCEED the longest legitimate non-yielding slice.  2 s (256 ticks)
- * proved too tight on device: an inline TLS certificate-chain verify (an
- * RSA chain, no worker offload) legitimately holds the CPU past 2 s between
- * its milestone kicks, and the web sweep's first fetch warm-reset mid-
- * handshake with the shell named in /sys/boot/hang.  8 s clears every
- * measured slice with margin while still catching a real wedge fast.
- * Unbounded waits (a REPL prompt, DELAY, INPUT) must still check in --
- * tiku_watchdog_kick() feeds the heartbeat -- no threshold covers those.
- * Override per build.
+/**
+ * @brief Consecutive stalled ticks before a non-yielding process is hung.
+ *
+ * It must exceed the longest slice that holds the CPU without a check-in,
+ * such as an inline RSA certificate-chain verify.  The default, 1024 ticks, is
+ * 8 s at the default 128 Hz tick; a build may override it.
+ *
+ * @note An unbounded wait (a REPL prompt, DELAY, INPUT) checks in through
+ *       tiku_hang_checkin() or tiku_watchdog_kick(); no threshold covers it.
  */
 #ifndef TIKU_HANG_THRESHOLD_TICKS
 #define TIKU_HANG_THRESHOLD_TICKS  1024u
@@ -44,30 +42,45 @@ struct tiku_process;
 /**
  * @brief Arm the detector.
  *
- * Call once when the scheduler loop starts.  Until armed the per-tick detector
- * is a no-op, so a harness driving the kernel without the loop cannot trip a
- * false hang reset while the predicate stays independently testable.
+ * Until armed, tiku_hang_tick() returns at once.  tiku_sched_loop() is the
+ * only caller, so code that runs the kernel without that loop never trips it.
+ *
+ * @note Call once, when the scheduler loop starts.
  */
 void tiku_hang_arm(void);
 
-/** @brief Scheduler progress heartbeat -- call once per dispatched event. */
+/**
+ * @brief Liveness check-in: bump the heartbeat the hang detector watches.
+ *
+ * The scheduler checks in once per dispatched event; tiku_watchdog_kick() and
+ * long driver loops check in too.  An operation that keeps checking in is not
+ * reset, however long it runs.
+ */
 void tiku_hang_checkin(void);
 
 /**
- * @brief Per-tick detector, called from the system-tick ISR.
+ * @brief Per-tick detector.
  *
- * On a confirmed hang it records the culprit and resets the chip (never
- * returns in that case).  A no-op until the stall threshold is crossed.
+ * Does nothing until tiku_hang_arm().  After TIKU_HANG_THRESHOLD_TICKS ticks
+ * with no check-in and a process on the CPU, it records that process and
+ * calls tiku_hang_arch_reset(), which does not return.
+ *
+ * @note System-tick ISR context.
  */
 void tiku_hang_tick(void);
 
 /**
- * @brief One detection step (NO reset): the culprit pid once the stall has
- *        lasted TIKU_HANG_THRESHOLD_TICKS, else -1.  Exposed for testing.
+ * @brief One detection step, without the reset: the culprit pid once the
+ *        stall has lasted TIKU_HANG_THRESHOLD_TICKS, else -1.  Exposed for
+ *        testing.
  */
 int8_t tiku_hang_detect_step(void);
 
-/** @brief Record @p p as the hang culprit (internal; public for tests). */
+/**
+ * @brief Record @p p as the hang culprit (internal; public for tests).
+ *
+ * A NULL @p p records pid -1 and the name "?".
+ */
 void tiku_hang_record(const struct tiku_process *p);
 
 /*---------------------------------------------------------------------------*/
@@ -78,9 +91,10 @@ void tiku_hang_record(const struct tiku_process *p);
  * @brief Capture the pre-reset culprit for this boot, then clear the
  *        cross-reset record.
  *
- * Call once early in boot, before autostart.  The record is one-shot: it is
- * read into this boot's view and wiped, so a single hang quarantines the
- * culprit for exactly the recovery boot, not forever.
+ * The record is one-shot: it is read into this boot's view and wiped, so one
+ * hang quarantines the culprit for the recovery boot only.
+ *
+ * @note Call once, early in boot, before autostart.
  */
 void tiku_hang_boot_init(void);
 
@@ -93,14 +107,14 @@ const char *tiku_hang_last_name(void);
 /** @brief Non-zero if @p p is this boot's hang culprit (match by name). */
 uint8_t tiku_hang_is_culprit(const struct tiku_process *p);
 
-/** @brief Forget this boot's culprit (e.g. after the user acknowledges). */
+/** @brief Forget this boot's culprit and clear the warm-reset record. */
 void tiku_hang_clear(void);
 
 /**
- * @brief Reset the chip (weak; an arch provides NVIC_SystemReset et al.).
+ * @brief Reset the chip.
  *
- * The portable default spins, so an un-wired arch at least contains the
- * failure rather than silently continuing.
+ * The nRF54L and Apollo4l ports define it.  The weak default spins forever,
+ * which a running hardware watchdog then ends with a reset.
  */
 void tiku_hang_arch_reset(void);
 

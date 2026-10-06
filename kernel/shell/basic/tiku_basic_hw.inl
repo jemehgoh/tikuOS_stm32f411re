@@ -8,8 +8,8 @@
  * tiku_basic_hw.inl - lazy hardware-bridge init for ADC and I2C.
  *
  * BASIC takes no peripheral at boot: the first call brings the matching HAL up
- * with a sensible default, and later calls are O(1) behind a ready flag.  GPIO,
- * LED and REBOOT need no init dance and live with their statements.
+ * with a fixed configuration, and a ready flag skips that on later calls.
+ * GPIO, LED and REBOOT need no init step and live with their statements.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -25,9 +25,8 @@ static uint8_t basic_adc_ready;
 /**
  * @brief Lazily initialise the ADC HAL for channel @p ch.
  *
- * Default config is 12-bit conversion, AVCC reference -- the
- * sensible "just give me a number" behaviour that 90% of casual
- * BASIC programs want.
+ * The HAL is set up once, for 12-bit conversion against the AVCC
+ * reference; the channel is initialised on every call.
  *
  * @return 0 on success, -1 on HAL failure.
  */

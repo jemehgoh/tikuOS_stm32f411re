@@ -7,9 +7,9 @@
  *
  * tiku_htimer.h - Hardware timer abstraction interface
  *
- * ISR-driven, single-shot, microsecond precision hardware timer.
- * Only one htimer can be active at a time. Callbacks run in
- * interrupt context and may reschedule for periodic operation.
+ * ISR-driven, single-shot hardware timer: 1 MHz on most ports, 16384 Hz on
+ * Ambiq, MCLK / 8 on MSP430 by default.  Only one htimer can be active at a
+ * time; callbacks run in interrupt context and may reschedule.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -27,8 +27,8 @@
  * @typedef tiku_htimer_clock_t
  * @brief Hardware timer tick type
  *
- * Width depends on platform (16 or 32 bits).
- * Override by defining TIKU_HTIMER_CLOCK_T before including this header.
+ * unsigned short on every port.  A port that widens it, to 32 bits at most,
+ * also defines TIKU_HTIMER_CLOCK_DIFF to return a signed difference as wide.
  */
 #ifndef TIKU_HTIMER_CLOCK_T_DEFINED
 typedef unsigned short tiku_htimer_clock_t;
@@ -63,6 +63,7 @@ struct tiku_htimer {
 /* RETURN CODES                                                              */
 /*---------------------------------------------------------------------------*/
 
+/** @brief Results of tiku_htimer_set(), _set_no_guard() and _cancel(). */
 enum tiku_htimer_status {
   TIKU_HTIMER_OK = 0,           /**< Success */
   TIKU_HTIMER_ERR_TIME = -1,    /**< Time too close or in the past */
@@ -95,8 +96,10 @@ enum tiku_htimer_status {
 /**
  * @brief Initialize the hardware timer subsystem
  *
- * Configures platform timer hardware and enables interrupts.
- * Call once during system init.
+ * Clears any pending htimer, then configures the platform timer; the global
+ * interrupt state is left as it was.
+ *
+ * @note Call once during system init.
  */
 void tiku_htimer_init(void);
 
@@ -106,10 +109,12 @@ void tiku_htimer_init(void);
  * @param time Absolute tick count when timer should fire
  * @param func Callback to execute (in ISR context)
  * @param ptr  User data passed to callback
- * @return TIKU_HTIMER_OK on success, error code on failure
+ * @return TIKU_HTIMER_OK; TIKU_HTIMER_ERR_INVALID for a NULL @p ht or
+ *         @p func; TIKU_HTIMER_ERR_TIME for a time less than
+ *         TIKU_HTIMER_GUARD_TIME ahead, or behind the counter
  *
- * Only one htimer can be active — calling this overrides any pending timer.
- * Time must be at least TIKU_HTIMER_GUARD_TIME ticks in the future.
+ * Only one htimer can be active: a successful call replaces any pending
+ * timer, and a refused one leaves it pending.
  */
 int tiku_htimer_set(struct tiku_htimer *ht, tiku_htimer_clock_t time,
                     tiku_htimer_callback_t func, void *ptr);
@@ -117,9 +122,11 @@ int tiku_htimer_set(struct tiku_htimer *ht, tiku_htimer_clock_t time,
 /**
  * @brief Schedule a single-shot hardware timer without the guard-time check.
  *
- * For tight back-to-back rescheduling from inside an ISR callback where the
- * caller has done its own margin analysis.  Misuse from non-ISR context
- * produces missed compares and silent drops.
+ * For back-to-back rescheduling from inside a callback, with a margin the
+ * caller has checked itself.
+ *
+ * @note ISR context only (inside an htimer callback); elsewhere a missed
+ *       compare drops the timer silently.
  */
 int tiku_htimer_set_no_guard(struct tiku_htimer *ht, tiku_htimer_clock_t time,
                              tiku_htimer_callback_t func, void *ptr);
@@ -139,16 +146,16 @@ int tiku_htimer_is_scheduled(void);
 /**
  * @brief Run the pending callback (called from platform ISR only)
  *
- * The platform timer interrupt handler must call this when
- * the compare-match fires. If the callback reschedules itself,
- * this function programs the next hardware interrupt automatically.
+ * The platform timer interrupt handler calls this when the
+ * compare-match fires.  The callback may reschedule with
+ * tiku_htimer_set(), which programs the next interrupt.
  *
  * @warning Only call from the hardware timer ISR.
  */
 void tiku_htimer_run_next(void);
 
 /*---------------------------------------------------------------------------*/
-/* PLATFORM INTERFACE (implemented per-architecture)                          */
+/* PLATFORM INTERFACE (implemented per-architecture)                         */
 /*---------------------------------------------------------------------------*/
 
 /** Initialize platform timer hardware */
@@ -174,7 +181,7 @@ tiku_htimer_clock_t tiku_htimer_arch_now(void);
  * @def TIKU_HTIMER_TIME(ht)
  * @brief Get the scheduled time of an htimer
  *
- * Useful for drift-free rescheduling inside a callback:
+ * For drift-free rescheduling inside a callback:
  * @code
  *   tiku_htimer_set(t, TIKU_HTIMER_TIME(t) + PERIOD, func, ptr);
  * @endcode
@@ -193,8 +200,8 @@ tiku_htimer_clock_t tiku_htimer_arch_now(void);
  * @def TIKU_HTIMER_GUARD_TIME
  * @brief Minimum ticks between now and a scheduled time
  *
- * Prevents scheduling too close to current time. Accounts for
- * ISR entry latency and register-write overhead.
+ * tiku_htimer_set() refuses a time closer than this to the counter: it covers
+ * ISR entry latency and the compare-register write.
  * Default: SECOND / 16384 (~61 us at 1 MHz)
  */
 #ifdef TIKU_HTIMER_CONF_GUARD_TIME

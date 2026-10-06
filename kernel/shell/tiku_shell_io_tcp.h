@@ -5,11 +5,11 @@
  *
  * Authors: Ambuj Varshney <ambuj@tiku-os.org>
  *
- * tiku_shell_io_tcp.h - TCP (telnet) I/O backend for the CLI
+ * tiku_shell_io_tcp.h - TCP (telnet) I/O backend for the shell.
  *
- * Listens on TCP port 23.  When a remote host connects, the CLI
- * reads from tcp_recv and writes to tcp_send.  When the connection
- * closes the listener resumes and waits for the next client.
+ * Listens on TCP port 23; a connected client becomes the shell's backend, and
+ * the listener takes the next client when it leaves.  The Makefile compiles
+ * tiku_shell_io_tcp.c only with TIKU_SHELL_NET_TEST.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -27,21 +27,17 @@
 /* CONFIGURATION                                                             */
 /*---------------------------------------------------------------------------*/
 
-/** TCP port the telnet CLI listens on */
+/** TCP port the telnet shell listens on */
 #ifndef TIKU_SHELL_TCP_PORT
 #define TIKU_SHELL_TCP_PORT   23
 #endif
 
-/*
- * Outgoing byte buffer.  tcp_putc() accumulates here; the CLI poll loop
- * drains it one MSS segment per cycle (tiku_shell_io_tcp_flush()), yielding
- * between segments so incoming ACKs are processed and the send window/TX pool
- * drain.  This buffer must therefore hold the *largest single command output*:
- * a command (e.g. `help`, ~1.5 KB across the full command table) emits all of
- * its bytes synchronously without yielding, so anything that does not fit is
- * dropped (the help loop cannot pause to let the window open).  Sized to clear
- * `help` with margin; only allocated on the Cortex-M parts that build the
- * telnet backend, where the SRAM is ample.
+/**
+ * @brief Output buffer size, in bytes.
+ *
+ * A command writes all its output within one poll.  A full buffer sends one
+ * segment to make room, and output is dropped when the TCP TX pool has no
+ * free slot, so the buffer is sized for the largest output (`help`).
  */
 #ifndef TIKU_SHELL_TCP_TX_BUF_SIZE
 #define TIKU_SHELL_TCP_TX_BUF_SIZE  2048
@@ -54,25 +50,28 @@
 /**
  * @brief Start the TCP listener on TIKU_SHELL_TCP_PORT.
  *
- * Call once during CLI initialisation (before the main loop).
- * The listener stays active for the lifetime of the process —
- * each time a connection closes, new SYNs are accepted again.
+ * The listener stays active for the lifetime of the process: each time a
+ * connection closes, new SYNs are accepted again.
+ *
+ * @note Call once, from the shell process's setup pass.
  */
 void tiku_shell_io_tcp_init(void);
 
 /**
  * @brief Check whether a TCP client is currently connected.
  *
+ * A connection the peer has half-closed (CLOSE_WAIT) is closed and dropped
+ * here, which frees its slot for the next client.
+ *
  * @return Non-zero if a connection is in the ESTABLISHED state.
  */
 uint8_t tiku_shell_io_tcp_is_connected(void);
 
 /**
- * @brief Flush the outgoing byte buffer over the TCP connection.
+ * @brief Send up to one MSS segment of the buffered output.
  *
- * Called automatically on newline or when the buffer is full,
- * but the CLI process should also call this at the end of each
- * poll cycle to push any remaining bytes.
+ * Called when the buffer fills and by the shell loop at the end of each poll,
+ * so longer output drains over several polls.
  */
 void tiku_shell_io_tcp_flush(void);
 

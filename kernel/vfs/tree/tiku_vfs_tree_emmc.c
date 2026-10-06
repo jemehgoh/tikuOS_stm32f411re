@@ -20,7 +20,7 @@
 #include <stdio.h>
 #include <string.h>
 
-/** @brief The lifecycle rung, from driver bookkeeping only. */
+/** @brief "down", "asleep" or "up", from driver bookkeeping only. */
 static int
 emmc_state_read(char *buf, size_t max)
 {
@@ -31,11 +31,10 @@ emmc_state_read(char *buf, size_t max)
 }
 
 /**
- * @brief Identity in one line.
+ * @brief The card identity on one line, or "unidentified".
  *
- * The day-one trophy, made greppable.  Serial and date are here because
- * they are how you tell one board's card from another's when a result looks
- * strange -- this is the same physical part that reported 'IS008' in E1.
+ * Manufacturer, OEM, product name, revision, serial and manufacture date;
+ * the serial and date tell one card from another.
  */
 static int
 emmc_cid_read(char *buf, size_t max)
@@ -50,28 +49,32 @@ emmc_cid_read(char *buf, size_t max)
 }
 
 /**
- * @brief Capacity in BYTES, which is 64-bit on this part.
+ * @brief Capacity in bytes, computed in 64 bits.
  *
- * 15 307 776 blocks x 512 is 7.84 GB, past what a uint32_t holds, so the
- * arithmetic is done in 64 bits and printed as such.
+ * An 8 GB card holds more bytes than a uint32_t counts, so the size is
+ * computed in 64 bits and printed in two decimal halves.
  */
 static int
 emmc_size_read(char *buf, size_t max)
 {
     uint64_t bytes = (uint64_t)tiku_emmc_capacity_blocks() * 512u;
-    return snprintf(buf, max, "%lu%09lu\n",
-                    (unsigned long)(bytes / 1000000000u),
-                    (unsigned long)(bytes % 1000000000u));
+    unsigned long hi = (unsigned long)(bytes / 1000000000u);
+    unsigned long lo = (unsigned long)(bytes % 1000000000u);
+
+    if (hi == 0u) {
+        return snprintf(buf, max, "%lu\n", lo);
+    }
+    return snprintf(buf, max, "%lu%09lu\n", hi, lo);
 }
 
-/** @brief Live bus clock (0 when the host is down). */
+/** @brief Bus clock in Hz (0 when the host is down). */
 static int
 emmc_hz_read(char *buf, size_t max)
 {
     return snprintf(buf, max, "%lu\n", (unsigned long)tiku_emmc_clock_hz());
 }
 
-/** @brief Live bus width in bits (0 when the host is down). */
+/** @brief Bus width in bits (0 when the host is down). */
 static int
 emmc_width_read(char *buf, size_t max)
 {
@@ -81,9 +84,8 @@ emmc_width_read(char *buf, size_t max)
 /**
  * @brief Write handler for /sys/emmc/state: the lifecycle verbs.
  *
- * "up" walks the full init ladder, "down" releases the SDIO0 domain,
- * "sleep"/"wake" drive CMD5 retention; the verbs match /sys/psram/state so
- * the storage lifecycle devices read and drive alike.
+ * "up" runs the full init sequence, "down" releases the SDIO0 domain, and
+ * "sleep"/"wake" drive CMD5 retention: the same verbs as /sys/psram/state.
  */
 static int
 emmc_state_write(const char *buf, size_t len)

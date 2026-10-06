@@ -58,7 +58,6 @@ int tiku_htimer_set(struct tiku_htimer *ht, tiku_htimer_clock_t time,
                     tiku_htimer_callback_t func, void *ptr) {
   tiku_htimer_clock_t now;
 
-  /* Validate */
   if (ht == NULL || func == NULL) {
     HTIMER_PRINTF("htimer: ERR_INVALID (ht=0x%x func=0x%x)\n",
                    (unsigned int)(uintptr_t)ht,
@@ -69,20 +68,18 @@ int tiku_htimer_set(struct tiku_htimer *ht, tiku_htimer_clock_t time,
   /* Guard: reject if too close to now (or wrapped past half-range) */
   now = TIKU_HTIMER_NOW();
   {
-    signed short diff = TIKU_HTIMER_CLOCK_DIFF(time, now);
-    if (diff < (signed short)TIKU_HTIMER_GUARD_TIME) {
+    long diff = TIKU_HTIMER_CLOCK_DIFF(time, now);
+    if (diff < (long)TIKU_HTIMER_GUARD_TIME) {
       HTIMER_PRINTF("htimer: ERR_TIME (time=%u now=%u diff=%d)\n", time, now,
                     (int)diff);
       return TIKU_HTIMER_ERR_TIME;
     }
   }
 
-  /* Configure */
   ht->time = time;
   ht->func = func;
   ht->ptr = ptr;
 
-  /* Arm */
   pending = ht;
   tiku_htimer_arch_schedule(time);
 
@@ -95,9 +92,8 @@ int tiku_htimer_set(struct tiku_htimer *ht, tiku_htimer_clock_t time,
 /**
  * @brief Schedule without the guard-time gate.
  *
- * For tight rescheduling paths where the caller knows the period and takes
- * responsibility for staying ahead of the counter.  Same body as
- * tiku_htimer_set() minus the guard check.
+ * tiku_htimer_set() without the guard check: the caller keeps @p time ahead
+ * of the counter.
  */
 int tiku_htimer_set_no_guard(struct tiku_htimer *ht, tiku_htimer_clock_t time,
                              tiku_htimer_callback_t func, void *ptr) {
@@ -120,9 +116,8 @@ int tiku_htimer_set_no_guard(struct tiku_htimer *ht, tiku_htimer_clock_t time,
 /**
  * @brief Cancel the pending hardware timer.
  *
- * Clears the pending pointer.  The hardware interrupt is not
- * disabled -- a spurious ISR will call run_next(), see
- * pending==NULL, and return harmlessly.
+ * Clears the pending pointer and leaves the compare interrupt armed; when it
+ * fires, run_next() finds nothing pending and returns.
  */
 int tiku_htimer_cancel(void) {
   if (pending == NULL) {
@@ -132,11 +127,6 @@ int tiku_htimer_cancel(void) {
   HTIMER_PRINTF("htimer: cancelled (was %u)\n", pending->time);
   pending = NULL;
 
-  /*
-   * The hardware interrupt is left enabled: a spurious ISR calls
-   * run_next(), sees pending == NULL and returns harmlessly, which
-   * avoids needing a platform-specific "disarm" function.
-   */
   return TIKU_HTIMER_OK;
 }
 

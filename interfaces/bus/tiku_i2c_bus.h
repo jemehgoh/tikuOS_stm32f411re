@@ -8,7 +8,8 @@
  * tiku_i2c_bus.h - platform-independent I2C bus interface.
  *
  * A portable I2C master API supporting standard (100 kHz) and fast (400 kHz)
- * modes.  All operations block; the hardware is reached through the arch layer.
+ * modes.  All operations block.  On a board that does not define
+ * TIKU_BOARD_I2C_BRW_100K every call returns TIKU_I2C_ERR_PARAM.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -68,6 +69,13 @@ typedef struct tiku_i2c_config {
 int tiku_i2c_init(const tiku_i2c_config_t *config);
 
 /**
+ * @brief Get the active I2C configuration, without bus traffic.
+ * @return Pointer to the settings of the last successful init, or NULL
+ *         while the bus is closed, after a failed init, or without I2C
+ */
+const tiku_i2c_config_t *tiku_i2c_get_config(void);
+
+/**
  * @brief Shut down the I2C bus.
  *
  * Places the peripheral in reset and releases the I/O pins.
@@ -102,13 +110,9 @@ int tiku_i2c_read(uint8_t addr, uint8_t *buf, uint16_t len);
 /**
  * @brief Probe an I2C address (presence check for a bus scan).
  *
- * The bus equivalent of a "ping": checks whether a device acknowledges
- * @p addr without transferring data (START, address, sample ACK, STOP).
- * This is a distinct primitive from tiku_i2c_write() -- a zero-length write
- * is intentionally rejected (write requires len >= 1), so a scan must use
- * this.  Where the controller cannot issue a true zero-byte transaction
- * (e.g. RP2350's DW_apb_i2c) the arch backend probes with a single 1-byte
- * read instead; either way an ACK means the device is present.
+ * Checks whether a device acknowledges @p addr without transferring data.  A
+ * scan must use this: tiku_i2c_write() rejects a zero-length write.  A backend
+ * that cannot issue a zero-byte transaction probes with a 1-byte read.
  *
  * @param addr  7-bit slave address (unshifted)
  * @return TIKU_I2C_OK if the device acknowledged, TIKU_I2C_ERR_NACK if no

@@ -7,9 +7,9 @@
  *
  * tiku_region.c - memory region registry.
  *
- * A boot-time registry of the platform's physical memory map, so a subsystem can
- * check its buffers sit in the right memory type and claim tracking can reject
- * two subsystems that overlap -- both caught at init rather than at run time.
+ * A boot-time registry of the platform's physical memory map, so a subsystem
+ * can check its buffers sit in the right memory type and claim tracking can
+ * reject two subsystems that overlap.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -26,13 +26,13 @@
 /* INTERNAL STATE                                                            */
 /*---------------------------------------------------------------------------*/
 
-/** Pointer to platform-provided region table (lives in flash) */
+/** Platform-provided region table, held by pointer */
 static const tiku_mem_region_t *region_table;
 
 /** Number of entries in the region table */
 static tiku_mem_arch_size_t region_count;
 
-/** Claimed region tracking array (lives in SRAM) */
+/** Claimed ranges; a slot with size 0 is free */
 static tiku_mem_claimed_t claimed[TIKU_REGION_MAX_CLAIMS];
 
 /** Number of active claims */
@@ -64,10 +64,10 @@ static int ranges_overlap(const uint8_t *a_base,
     uintptr_t b_start = (uintptr_t)b_base;
 
     /*
-     * Overflow-safe overlap check: avoid computing start + size which
-     * can wrap on 16-bit targets when a region reaches address 0xFFFF.
-     * Two ranges [a, a+as) and [b, b+bs) overlap iff the gap between
-     * their starts is smaller than the other range's size.
+     * Overflow-safe overlap check: start + size can wrap on 16-bit targets
+     * when a region reaches address 0xFFFF, so it is never computed.  Two
+     * ranges [a, a+as) and [b, b+bs) overlap iff the gap between their
+     * starts is smaller than the size of the range that starts first.
      */
     if (a_start >= b_start) {
         return (a_start - b_start) < (uintptr_t)b_size;
@@ -77,7 +77,7 @@ static int ranges_overlap(const uint8_t *a_base,
 }
 
 /**
- * @brief Check if a range falls within any declared region (type-agnostic)
+ * @brief Check if a range falls within any declared region (type-agnostic).
  *
  * Used by tiku_region_claim to verify that a range falls within known
  * memory without caring about the region type. A range is "known" if
@@ -129,9 +129,9 @@ static int region_is_known(const uint8_t *ptr, tiku_mem_arch_size_t size)
 /**
  * @brief Initialize the region registry with the platform's memory map.
  *
- * Keeps a pointer to the platform table rather than copying it, and rejects a
- * table whose regions overlap -- overlap would make a containment check
- * ambiguous, letting one buffer appear to be in two region types at once.
+ * Keeps a pointer to the platform table and clears every claim.  A table
+ * whose regions overlap is rejected: a buffer in the overlap would sit in two
+ * region types at once.
  *
  * @param table  Platform's const region descriptor array
  * @param count  Number of entries in the table
@@ -148,7 +148,6 @@ tiku_mem_err_t tiku_region_init(const tiku_mem_region_t *table,
         return TIKU_MEM_ERR_INVALID;
     }
 
-    /* Check for pairwise overlaps in the platform's region table */
     for (i = 0; i < count; i++) {
         for (j = i + 1; j < count; j++) {
             if (ranges_overlap(table[i].base, table[i].size,
@@ -161,7 +160,6 @@ tiku_mem_err_t tiku_region_init(const tiku_mem_region_t *table,
     region_table = table;
     region_count = count;
 
-    /* Zero the claimed regions array */
     for (i = 0; i < TIKU_REGION_MAX_CLAIMS; i++) {
         claimed[i].base     = NULL;
         claimed[i].size     = 0;
@@ -177,7 +175,7 @@ tiku_mem_err_t tiku_region_init(const tiku_mem_region_t *table,
  *
  * A linear scan; the whole range must sit in one matching region.  Arithmetic
  * is in uintptr_t, since comparing pointers into different objects is
- * undefined, and a wrapped ptr + size is rejected rather than passing.
+ * undefined; a range whose ptr + size wraps returns 0.
  *
  * @param ptr            Start of the range
  * @param size           Size of the range in bytes
@@ -211,11 +209,10 @@ tiku_mem_err_t tiku_region_contains(const uint8_t *ptr,
         reg_start = (uintptr_t)region_table[i].base;
 
         /*
-         * Overflow-safe containment: instead of computing
-         * reg_end = reg_start + reg_size (which wraps past 0xFFFF on
-         * 16-bit targets when the region reaches the top of the address
-         * space), compute the buffer's offset from the region base and
-         * verify that offset + size fits within the region size.
+         * Overflow-safe containment: reg_start + reg_size wraps past 0xFFFF
+         * on 16-bit targets when the region reaches the top of the address
+         * space, so the check takes the buffer's offset from the region
+         * base and verifies that offset + size fits within the region size.
          */
         if (range_start >= reg_start) {
             uintptr_t offset = range_start - reg_start;
@@ -234,16 +231,16 @@ tiku_mem_err_t tiku_region_contains(const uint8_t *ptr,
 /**
  * @brief Claim a memory range for a subsystem.
  *
- * Records ownership so an overlapping claim is caught.  This is the question
- * _contains() does not answer: a buffer can be in the right memory type and
- * still collide with another subsystem's.
+ * Records ownership; a later claim that overlaps this one fails.  The range
+ * must lie inside a declared region of any type, and may not overlap an
+ * existing claim.
  *
  * @param ptr       Start of the range to claim
  * @param size      Size of the range in bytes
  * @param owner_id  Identifier of the claiming subsystem
  * @return TIKU_MEM_OK on success, TIKU_MEM_ERR_INVALID if the range is
- *         outside every region, TIKU_MEM_ERR_FULL if the claim table is
- *         full, or TIKU_MEM_ERR_BUSY on an overlapping claim
+ *         outside every region or overlaps a claim, or TIKU_MEM_ERR_FULL if
+ *         the claim table is full
  */
 tiku_mem_err_t tiku_region_claim(const uint8_t *ptr,
                                   tiku_mem_arch_size_t size,
@@ -261,7 +258,6 @@ tiku_mem_err_t tiku_region_claim(const uint8_t *ptr,
         return TIKU_MEM_ERR_INVALID;
     }
 
-    /* Check for overlap with existing claims */
     for (i = 0; i < TIKU_REGION_MAX_CLAIMS; i++) {
         if (claimed[i].size == 0) {
             continue;
@@ -272,7 +268,6 @@ tiku_mem_err_t tiku_region_claim(const uint8_t *ptr,
         }
     }
 
-    /* Find first empty slot */
     for (i = 0; i < TIKU_REGION_MAX_CLAIMS; i++) {
         if (claimed[i].size == 0) {
             claimed[i].base     = ptr;
@@ -287,7 +282,7 @@ tiku_mem_err_t tiku_region_claim(const uint8_t *ptr,
 }
 
 /**
- * @brief Release a previously claimed memory range
+ * @brief Release a previously claimed memory range.
  *
  * Finds the claim by matching its base pointer (compared as uintptr_t
  * to avoid pointer comparison UB) and clears the slot.
@@ -319,16 +314,15 @@ tiku_mem_err_t tiku_region_unclaim(const uint8_t *ptr)
 }
 
 /**
- * @brief Look up the region type for a single address
+ * @brief Look up the region type for a single address.
  *
  * Scans the region table to find which region contains the address
- * and returns its type via the output parameter. Useful for debug
- * and diagnostic printing.
+ * and returns its type via the output parameter.
  *
  * @param ptr       Address to look up
  * @param out_type  Output: type of the containing region
- * @return TIKU_MEM_OK on success, TIKU_MEM_ERR_NOT_FOUND if the
- *         address is not in any declared region
+ * @return TIKU_MEM_OK on success, TIKU_MEM_ERR_NOT_FOUND if an argument is
+ *         NULL or the address is not in any declared region
  */
 tiku_mem_err_t tiku_region_get_type(const uint8_t *ptr,
                                      tiku_mem_region_type_t *out_type)

@@ -5,15 +5,11 @@
  *
  * Authors: Ambuj Varshney <ambuj@tiku-os.org>
  *
- * tiku_drv.h - Common driver-descriptor type
+ * tiku_drv.h - common driver-descriptor type.
  *
- * The descriptor is the single contract between core kernel and
- * the optional `drivers/` repo. The kernel iterates a static
- * table of pointers to descriptors at boot, calls each driver's
- * init(), and (eventually) splices its VFS nodes under
- * /dev/<class>/<mount>/. Drivers know nothing about the kernel
- * internals; the kernel knows nothing about each driver's
- * silicon-specific code. See drivers.md for the full design.
+ * The contract between the kernel and the optional drivers/ repo: at boot the
+ * kernel calls each descriptor's init() and mounts a ready driver's VFS nodes
+ * under /dev/<class>/<mount>/.  See drivers.md.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -29,11 +25,11 @@ extern "C" {
 #endif
 
 /**
- * @brief Driver class. Used to bucket descriptors and to choose
- *        the parent VFS directory (e.g. /dev/wifi/, /dev/sensor/).
+ * @brief Driver class: buckets descriptors and chooses the parent
+ *        VFS directory (e.g. /dev/wifi/, /dev/sensor/).
  *
- * Add new classes as new categories arrive — keep the enum tight
- * so it stays a uint8_t under the hood.
+ * A new class needs a matching directory in the registry's driver_classes[]
+ * table, which a static assert checks against TIKU_DRV_CLASS_COUNT.
  */
 typedef enum {
     TIKU_DRV_CLASS_SENSOR  = 0,
@@ -44,6 +40,7 @@ typedef enum {
     TIKU_DRV_CLASS_STORAGE = 5,
     TIKU_DRV_CLASS_INPUT   = 6,
     TIKU_DRV_CLASS_OTHER   = 7,
+    TIKU_DRV_CLASS_COUNT   = 8,   /**< number of classes; not a class */
 } tiku_drv_class_t;
 
 /**
@@ -58,15 +55,16 @@ typedef enum {
 #define TIKU_DRV_ERR_NOT_PRESENT (-2)
 #define TIKU_DRV_ERR_TIMEOUT   (-3)
 #define TIKU_DRV_ERR_INVALID   (-4)
+#define TIKU_DRV_ERR_IO        (-5) /**< operation or persistent flush failed */
 
 /**
  * @brief Driver descriptor — one per driver, statically allocated
  *        inside each driver's .c file as
  *        `const tiku_drv_t tiku_drv_<class>_<name>`.
  *
- * The descriptor lives in flash (`const`) so the table itself is
- * also flash-resident. SRAM cost per driver is zero — only the
- * 32-bit pointer in tiku_drv_table[] counts.
+ * The descriptor and the table are const, so the kernel keeps bounded
+ * per-boot status and mount records separately; TIKU_DRV_REGISTRY_MAX sets
+ * their capacity.
  */
 typedef struct tiku_drv {
     /** Human-readable name, e.g. "wifi-cyw43" or "temp-mcp9808". */
@@ -78,14 +76,13 @@ typedef struct tiku_drv {
     /** Called once at boot from tiku_drv_init_all(). Required. */
     int (*init)(void);
 
-    /** Optional teardown. NULL if the driver has nothing to undo
-     *  (e.g. compute-only drivers that just register VFS nodes). */
+    /** Optional teardown, NULL when the driver has nothing to undo.  The
+     *  registry does not call it. */
     int (*deinit)(void);
 
-    /** Optional VFS node array. Splice point is
-     *  /dev/<class>/<vfs_mount>/. NULL skips VFS contribution.
-     *  Node memory must outlive the driver (typically `static
-     *  const` arrays). */
+    /** Optional VFS node array, mounted at /dev/<class>/<vfs_mount>/.  NULL
+     *  needs vfs_node_count 0; with a non-zero count the mount fails.  The
+     *  nodes must outlive the driver (typically `static const` arrays). */
     const tiku_vfs_node_t *vfs_nodes;
 
     /** Number of entries in vfs_nodes. 0 disables VFS contribution

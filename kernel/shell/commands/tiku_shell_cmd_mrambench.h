@@ -7,9 +7,9 @@
  *
  * tiku_shell_cmd_mrambench.h - "mrambench" command: time the MRAM programmer.
  *
- * Benchmarks the bootrom programmer at several span sizes so the fixed per-call
- * overhead separates from the per-word cost.  Non-destructive: it programs scratch
- * in the upper half of the reserved mirror page.
+ * Times the bootrom MRAM programmer at each span that fits the upper half of
+ * the MRAM mirror region and derives a per-call overhead and a per-word cost;
+ * the timing runs only when the live image fits in the lower half.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -20,14 +20,14 @@
 #include <stdint.h>
 
 /**
- * @brief "mrambench" command handler — time the bootrom MRAM programmer.
+ * @brief "mrambench" command handler: time the bootrom MRAM programmer.
  *
- * Usage: mrambench
- * Prints a table of span size -> best-of-N program cycles/us, plus a
- * two-point fit of per-call overhead vs per-word cost.
+ * Usage: mrambench [verify]
+ * Prints the best-of-4 cycles and microseconds per span and a two-point fit of
+ * per-call overhead and per-word cost.  `verify` runs the flush self-test.
  *
- * @param argc  Argument count (unused)
- * @param argv  Argument vector (unused)
+ * @param argc  Argument count
+ * @param argv  Argument vector; argv[1] may be "verify"
  */
 void tiku_shell_cmd_mrambench(uint8_t argc, const char *argv[]);
 

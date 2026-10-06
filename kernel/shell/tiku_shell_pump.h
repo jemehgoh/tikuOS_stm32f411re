@@ -8,8 +8,8 @@
  * tiku_shell_pump.h - one cooperative service step for busy-wait loops.
  *
  * A long operation that busy-waits inside one command dispatch starves every
- * kernel service, so each such loop calls this once per iteration and aborts when
- * it returns non-zero.  One shared implementation, because hand-rolled copies drifted.
+ * kernel service, so each such loop calls this once per iteration and aborts
+ * when it returns non-zero.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -20,21 +20,15 @@
 #include <stdint.h>
 
 /**
- * @brief One cooperative service step for a busy-wait loop.
+ * @brief One service step for a busy-wait loop.
  *
- * Kicks the watchdog, drains the WiFi radio RX, paces
- * tiku_kits_net_tcp_periodic() to ~8 Hz along with @p periodic, then polls the
- * console for Ctrl-C through the SLIP-aware demux.
+ * Kicks the watchdog, polls the WiFi receive path and runs the TCP timer and
+ * @p periodic at most 8 times a second, each where the build has it, then
+ * reads one byte through tiku_shell_net_getc(), dropping any but Ctrl-C.
  *
- * @note The RX drain matters because the driver process is starved during a
- *       busy-wait, so the chip's FIFO would fill and inbound segments never
- *       reach the stack.  tcp_periodic advances connect/retransmit timeouts PER
- *       CALL, so calling it every iteration would blow through them.  The
- *       SLIP-aware poll keeps an IP payload byte 0x03 from reading as a break.
- * @param periodic Optional protocol housekeeping to run at the paced
- *                 net service point (e.g. tiku_kits_net_mqtt_periodic);
- *                 NULL for none.
- * @return 1 if the user pressed Ctrl-C (caller should abort), else 0
+ * @param periodic Optional protocol housekeeping run with the TCP timer
+ *                 (e.g. tiku_kits_net_mqtt_periodic); NULL for none.
+ * @return 1 if the byte read was Ctrl-C (the caller aborts), else 0
  */
 int tiku_shell_pump_net(void (*periodic)(void));
 

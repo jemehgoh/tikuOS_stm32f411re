@@ -7,9 +7,9 @@
  *
  * tiku_wake_hal.h - platform-agnostic wake-source query interface.
  *
- * Reports which interrupt families are armed and would therefore wake the CPU
- * from a low-power state, for the `wake` command and /sys/power/wake.  The arch
- * backend maps each role-named flag to whatever IE registers cover it.
+ * Reports which interrupt families are armed, and so can wake the CPU from a
+ * low-power state, for the `wake` command and /sys/power/wake.  Each port maps
+ * a flag to the interrupt-enable registers behind it.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -43,9 +43,8 @@
 /*---------------------------------------------------------------------------*/
 
 /**
- * Maximum GPIO ports the wake snapshot reports per-port enable
- * masks for. Sized for MSP430's P1..P4. Other platforms can leave
- * the unused entries zero.
+ * Number of GPIO ports whose per-pin enable masks the snapshot carries:
+ * MSP430's P1..P4.  An entry a port does not fill stays zero.
  */
 #define TIKU_WAKE_MAX_GPIO_PORTS 4
 
@@ -67,11 +66,12 @@ typedef struct {
 
 /**
  * @brief Snapshot the platform's currently-armed wake sources.
- * @param out  Destination snapshot. Cleared then populated.
  *
- * Reads volatile peripheral state, so call from a non-ISR context
- * if a coherent picture matters. Returns immediately; no side
- * effects on the hardware.
+ * Returns immediately, with no side effect on the hardware.
+ *
+ * @param out  Destination snapshot. Cleared then populated.
+ * @note Reads volatile peripheral state: call from non-ISR context for a
+ *       coherent snapshot.
  */
 void tiku_wake_arch_query(tiku_wake_sources_t *out);
 

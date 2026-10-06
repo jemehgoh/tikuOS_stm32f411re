@@ -7,9 +7,7 @@
  *
  * tiku_shell_cmd_echo.c - "echo" command implementation.
  *
- * Joins the arguments with single spaces and emits one trailing newline -- Unix
- * semantics.  The earlier `echo` alias for a VFS write was retired; `write` is
- * the right name for that.
+ * Prints the arguments joined by single spaces, then one newline.
  *
  * SPDX-License-Identifier: Apache-2.0
  */

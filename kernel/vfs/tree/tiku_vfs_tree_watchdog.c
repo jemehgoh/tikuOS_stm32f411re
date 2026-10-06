@@ -7,9 +7,9 @@
  *
  * tiku_vfs_tree_watchdog.c - /sys/watchdog VFS nodes.
  *
- * Exposes the kernel watchdog as six files so shells, scripts and BASIC can
- * inspect and reconfigure it without linking the API.  Every write forwards to
- * tiku_watchdog_config() and re-reads the other settings, so one field changes.
+ * The kernel watchdog as six files.  Writes to mode, clock and interval go
+ * through tiku_watchdog_config() with the other two read back, so a write
+ * changes one field.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -30,9 +30,8 @@
 /**
  * @brief Read handler for /sys/watchdog/mode.
  *
- * Renders the operating mode as a word ("watchdog\n" or "interval\n"), taken
- * from tiku_watchdog_mode_str() so the VFS and the shell `info` command always
- * agree.
+ * Renders the operating mode as a word ("watchdog\n" or "interval\n") from
+ * tiku_watchdog_mode_str(), the string the shell `info` command prints.
  *
  * @param buf  Output buffer for the rendered text
  * @param max  Capacity of @p buf in bytes
@@ -44,10 +43,13 @@ watchdog_mode_read(char *buf, size_t max)
     return snprintf(buf, max, "%s\n", tiku_watchdog_mode_str());
 }
 
-/* True iff the leading token of @buf (up to len, a NUL, or whitespace) is
- * exactly @tok.  Lets the mode/clock writes accept a full word ("watchdog",
- * "aclk") or its one-letter shorthand ("w", "a") while rejecting anything
- * else -- so a stray "watermelon" no longer silently arms watchdog mode. */
+/**
+ * @brief True iff the leading token of @p buf is exactly @p tok.
+ *
+ * The token ends at @p len, a NUL or whitespace, so the mode and clock writes
+ * take a full word ("watchdog", "aclk") or its one-letter shorthand ("w",
+ * "a") and reject anything else, such as "watermelon".
+ */
 static int
 wdt_token_is(const char *buf, size_t len, const char *tok)
 {
@@ -73,7 +75,8 @@ wdt_token_is(const char *buf, size_t len, const char *tok)
  *
  * @param buf  Input token ("watchdog"/"w" or "interval"/"i")
  * @param len  Input length in bytes
- * @return 0 on success, TIKU_VFS_EINVAL on an unrecognised token
+ * @return 0 on success, TIKU_VFS_EINVAL on an unrecognised token or a mode
+ *         the port does not support
  */
 static int
 watchdog_mode_write(const char *buf, size_t len)
@@ -101,9 +104,9 @@ watchdog_mode_write(const char *buf, size_t len)
 /**
  * @brief Read handler for /sys/watchdog/clock.
  *
- * Renders the watchdog clock source as "aclk\n" (32.768 kHz, keeps
- * counting in LPM3) or "smclk\n" (MCLK-derived, faster timeouts but
- * gated in deep sleep).
+ * Renders the watchdog clock source as "aclk\n" or "smclk\n".  On MSP430
+ * ACLK (32.768 kHz) keeps counting in LPM3; SMCLK (MCLK-derived) gives
+ * shorter timeouts but stops in deep sleep.
  *
  * @param buf  Output buffer for the rendered text
  * @param max  Capacity of @p buf in bytes
@@ -120,13 +123,13 @@ watchdog_clock_read(char *buf, size_t max)
 /**
  * @brief Write handler for /sys/watchdog/clock.
  *
- * Accepts "aclk" or "smclk"; only the first character decides.  Mode and
- * interval are preserved, but the wall-clock timeout changes: the same divider
- * counts a 32.768 kHz ACLK ~245x slower than an 8 MHz SMCLK.
+ * Accepts "aclk"/"a" or "smclk"/"s" as a whole token; mode and interval are
+ * kept.  Only MSP430's timeout depends on the source: the same divider counts
+ * a 32.768 kHz ACLK about 244 times slower than an 8 MHz SMCLK.
  *
- * @param buf  Input text ("a..." or "s...")
- * @param len  Input length in bytes (unused — first byte decides)
- * @return 0 on success, -1 on unrecognised input
+ * @param buf  Input token ("aclk"/"a" or "smclk"/"s")
+ * @param len  Input length in bytes
+ * @return 0 on success, TIKU_VFS_EINVAL on an unrecognised token
  */
 static int
 watchdog_clock_write(const char *buf, size_t len)
@@ -151,8 +154,8 @@ watchdog_clock_write(const char *buf, size_t len)
 /**
  * @brief Read handler for /sys/watchdog/interval.
  *
- * Renders the WDTIS divider as its cycle count -- "64\n", "512\n", "8192\n" or
- * "32768\n", not a time unit (at 32.768 kHz ACLK, 32768 cycles is one second).
+ * Renders the interval divider as a cycle count, not a time: "64\n", "512\n",
+ * "8192\n" or "32768\n" (32768 cycles of a 32.768 kHz clock are one second).
  * A divider outside the four supported steps reads "unknown\n".
  *
  * @param buf  Output buffer for the rendered text
@@ -182,12 +185,13 @@ watchdog_interval_read(char *buf, size_t max)
  * @brief Write handler for /sys/watchdog/interval.
  *
  * Parses a leading decimal and maps it onto one of the four hardware divider
- * steps.  The value must match exactly (64, 512, 8192, 32768) -- no rounding,
- * so a typo fails loudly rather than arming a different timeout.
+ * steps.  The value must be exactly 64, 512, 8192 or 32768; any other value
+ * returns TIKU_VFS_EINVAL.
  *
  * @param buf  Input text, decimal digits ("8192\n")
  * @param len  Input length in bytes
- * @return 0 on success, -1 if the value is not a supported step
+ * @return 0 on success, TIKU_VFS_EINVAL for an unsupported step, or
+ *         TIKU_VFS_ERANGE for a value past 16 bits
  */
 static int
 watchdog_interval_write(const char *buf, size_t len)
@@ -197,8 +201,8 @@ watchdog_interval_write(const char *buf, size_t len)
     tiku_wdt_interval_t iv;
 
     for (i = 0; i < len && buf[i] >= '0' && buf[i] <= '9'; i++) {
-        /* Guard the uint16 accumulator: without this, "65600" wraps to 64 and
-         * would silently arm the 64-cycle step instead of failing. */
+        /* Overflow check on the uint16 accumulator: a wrapped value would
+         * turn "65600" into 64 and arm the 64-cycle step. */
         if (val > (uint16_t)((65535u - (uint16_t)(buf[i] - '0')) / 10u)) {
             return TIKU_VFS_ERANGE;
         }
@@ -213,7 +217,7 @@ watchdog_interval_write(const char *buf, size_t len)
     } else if (val == 32768) {
         iv = TIKU_WDT_INTERVAL_32768;
     } else {
-        return TIKU_VFS_EINVAL;   /* a number, but not one of the 4 hardware steps */
+        return TIKU_VFS_EINVAL;   /* not one of the four hardware steps */
     }
     tiku_watchdog_config(tiku_watchdog_get_mode(),
                          tiku_watchdog_get_clk(), iv, 0, 1);
@@ -225,11 +229,10 @@ watchdog_interval_write(const char *buf, size_t len)
 /*---------------------------------------------------------------------------*/
 
 /**
- * @brief Write handler for /sys/watchdog/kick — pet the watchdog.
+ * @brief Write handler for /sys/watchdog/kick.
  *
  * Write-only, and the payload is ignored: any write restarts the countdown via
- * tiku_watchdog_kick(), so a script can keep the system alive through a long
- * operation with `write /sys/watchdog/kick 1`.
+ * tiku_watchdog_kick().
  *
  * @param buf  Ignored
  * @param len  Ignored
@@ -251,8 +254,8 @@ watchdog_kick_write(const char *buf, size_t len)
 /**
  * @brief Read handler for /sys/watchdog/enabled.
  *
- * Renders "1\n" when the watchdog counter is running and "0\n"
- * when it is held (WDTHOLD set).
+ * Renders "1\n" while the watchdog is armed, paused or not, and "0\n" while
+ * it is off (tiku_watchdog_is_on()).
  *
  * @param buf  Output buffer for the rendered text
  * @param max  Capacity of @p buf in bytes
@@ -269,8 +272,7 @@ watchdog_enabled_read(char *buf, size_t max)
  * @brief Write handler for /sys/watchdog/enabled.
  *
  * "1" starts the watchdog, "0" stops it; any other first byte is rejected.
- * Starting resumes the configured mode, clock and interval rather than
- * resetting them to defaults.
+ * Starting keeps the configured mode, clock and interval.
  *
  * @param buf  Input text ("1" or "0")
  * @param len  Input length in bytes (unused — first byte decides)
@@ -294,8 +296,6 @@ watchdog_enabled_write(const char *buf, size_t len)
  * @brief Read handler for /sys/watchdog/kicks.
  *
  * Renders the number of kicks issued since boot as a decimal line.
- * Useful as a cheap liveness signal: a healthy system shows this
- * value growing between two reads.
  *
  * @param buf  Output buffer for the rendered text
  * @param max  Capacity of @p buf in bytes
@@ -320,8 +320,8 @@ watchdog_kicks_read(char *buf, size_t max)
  * handler -- it is the one write-only node here.
  */
 const tiku_vfs_node_t tiku_vfs_tree_watchdog_children[] = {
-    /* Writable watchdog controls gate on CAP_SYS -- disabling or retiming the
-     * watchdog is safety-critical, not something an untrusted channel may do. */
+    /* Writable watchdog controls need CAP_SYS: disabling or retiming the
+     * watchdog is a safety change an untrusted channel may not make. */
     { "mode",     TIKU_VFS_FILE, watchdog_mode_read,     watchdog_mode_write,     NULL, 0, NULL, NULL, TIKU_VFS_CAP_SYS },
     { "clock",    TIKU_VFS_FILE, watchdog_clock_read,    watchdog_clock_write,    NULL, 0, NULL, NULL, TIKU_VFS_CAP_SYS },
     { "interval", TIKU_VFS_FILE, watchdog_interval_read, watchdog_interval_write, NULL, 0, NULL, NULL, TIKU_VFS_CAP_SYS },

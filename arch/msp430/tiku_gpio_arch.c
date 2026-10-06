@@ -7,7 +7,7 @@
  *
  * tiku_gpio_arch.c - MSP430 GPIO port access implementation
  *
- * Maps port numbers (1-4, J) to MSP430 register addresses at runtime.
+ * Maps device-declared port numbers (1-9, J) to register addresses at runtime.
  * All functions validate port/pin before touching registers.
  *
  * SPDX-License-Identifier: Apache-2.0
@@ -58,14 +58,27 @@ gpio_get_port(uint8_t port)
 #if TIKU_DEVICE_HAS_PORT4
         [4] = { &P4IN, &P4OUT, &P4DIR, &P4REN },
 #endif
+#if TIKU_DEVICE_HAS_PORT5
+        [5] = { &P5IN, &P5OUT, &P5DIR, &P5REN },
+#endif
+#if TIKU_DEVICE_HAS_PORT6
+        [6] = { &P6IN, &P6OUT, &P6DIR, &P6REN },
+#endif
+#if TIKU_DEVICE_HAS_PORT7
+        [7] = { &P7IN, &P7OUT, &P7DIR, &P7REN },
+#endif
+#if TIKU_DEVICE_HAS_PORT8
+        [8] = { &P8IN, &P8OUT, &P8DIR, &P8REN },
+#endif
+#if TIKU_DEVICE_HAS_PORT9
+        [9] = { &P9IN, &P9OUT, &P9DIR, &P9REN },
+#endif
     };
 
 #if TIKU_DEVICE_HAS_PORTJ
-    /* Port J registers are declared as 16-bit on MSP430 (PJ is shared
-     * with JTAG), but the gpio_port_t struct stores the byte-wide
-     * register pointer because the upper byte is reserved.  Cast to
-     * silence the incompatible-pointer-type warning; on little-endian
-     * MSP430 the byte access at &PJxN reads/writes the 8 GPIO bits. */
+    /* The PJ registers are declared 16-bit; the casts take their low byte,
+     * which on little-endian MSP430 holds the eight GPIO bits (the upper
+     * byte is reserved). */
     static const gpio_port_t portj = {
         (volatile uint8_t *)&PJIN,
         (volatile uint8_t *)&PJOUT,
@@ -77,7 +90,7 @@ gpio_get_port(uint8_t port)
     }
 #endif
 
-    if (port == 0 || port > 4) {
+    if (port == 0 || port >= sizeof(ports) / sizeof(ports[0])) {
         return (const gpio_port_t *)0;
     }
 
@@ -125,7 +138,7 @@ tiku_gpio_arch_set_input(uint8_t port, uint8_t pin)
     }
     *p->dir &= ~(1 << pin);
     *p->ren |= (1 << pin);       /* Enable pull resistor */
-    *p->out |= (1 << pin);       /* Pull-up (not pull-down) */
+    *p->out |= (1 << pin);       /* OUT = 1 selects the pull-up */
     return 0;
 }
 
@@ -175,4 +188,78 @@ tiku_gpio_arch_get_dir(uint8_t port, uint8_t pin)
         return -1;
     }
     return (*p->dir >> pin) & 1;
+}
+
+/**
+ * @brief Report whether a pin is routed to a module function.
+ *
+ * A set PxSEL0 or PxSEL1 bit hands the pin to a peripheral; the registers are
+ * only read.  LCD_C segment pins are selected through LCDCPCTLx instead, so
+ * they read as GPIO here.
+ *
+ * @return 1 when routed to a peripheral, 0 for a GPIO, -1 if port/pin invalid
+ */
+int
+tiku_gpio_arch_is_peripheral(uint8_t port, uint8_t pin)
+{
+    unsigned int sel;
+
+    if (gpio_validate(port, pin) == (const gpio_port_t *)0) {
+        return -1;
+    }
+    switch (port) {
+#if TIKU_DEVICE_HAS_PORT1
+    case 1:
+        sel = P1SEL0 | P1SEL1;
+        break;
+#endif
+#if TIKU_DEVICE_HAS_PORT2
+    case 2:
+        sel = P2SEL0 | P2SEL1;
+        break;
+#endif
+#if TIKU_DEVICE_HAS_PORT3
+    case 3:
+        sel = P3SEL0 | P3SEL1;
+        break;
+#endif
+#if TIKU_DEVICE_HAS_PORT4
+    case 4:
+        sel = P4SEL0 | P4SEL1;
+        break;
+#endif
+#if TIKU_DEVICE_HAS_PORT5
+    case 5:
+        sel = P5SEL0 | P5SEL1;
+        break;
+#endif
+#if TIKU_DEVICE_HAS_PORT6
+    case 6:
+        sel = P6SEL0 | P6SEL1;
+        break;
+#endif
+#if TIKU_DEVICE_HAS_PORT7
+    case 7:
+        sel = P7SEL0 | P7SEL1;
+        break;
+#endif
+#if TIKU_DEVICE_HAS_PORT8
+    case 8:
+        sel = P8SEL0 | P8SEL1;
+        break;
+#endif
+#if TIKU_DEVICE_HAS_PORT9
+    case 9:
+        sel = P9SEL0 | P9SEL1;
+        break;
+#endif
+#if TIKU_DEVICE_HAS_PORTJ
+    case 0xFF:
+        sel = PJSEL0 | PJSEL1;
+        break;
+#endif
+    default:
+        return -1;
+    }
+    return (int)((sel >> pin) & 1u);
 }

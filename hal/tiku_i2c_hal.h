@@ -5,11 +5,11 @@
  *
  * Authors: Ambuj Varshney <ambuj@tiku-os.org>
  *
- * tiku_i2c_hal.h - Platform-routing header for I2C bus
+ * tiku_i2c_hal.h - platform routing for the I2C bus driver.
  *
- * Routes to the correct architecture-specific I2C header based on the
- * selected platform. This is the single point where the arch I2C header
- * enters the include chain for the platform-independent bus layer.
+ * Includes arch/<platform>/tiku_i2c_arch.h for the PLATFORM_* macro the build
+ * defines. Code outside arch/ includes the I2C arch header only through this
+ * file.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -29,6 +29,8 @@
 #include <arch/stm32n6/tiku_i2c_arch.h>
 #elif defined(PLATFORM_RA8P1)
 #include <arch/ra8p1/tiku_i2c_arch.h>
+#elif defined(PLATFORM_ESP32C61)
+#include <arch/esp32c61/tiku_i2c_arch.h>
 #endif
 
 #endif /* TIKU_I2C_HAL_H_ */

@@ -7,9 +7,9 @@
  *
  * tiku_vfs_tree_boot.h - /sys/boot VFS nodes and boot bookkeeping.
  *
- * Owns the boot-related persistent state: the boot counter, the lifetime-uptime
- * accumulator and the reset-cause snapshot taken at init.  Also exports three
- * top-level /sys read handlers so the /sys assembly can reference them.
+ * Owns the boot counter and the lifetime-uptime accumulator (persist cells)
+ * and the reset-cause snapshot taken at init.  Also exports three top-level
+ * /sys read handlers for the /sys assembly.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -30,7 +30,7 @@
 #define TIKU_VFS_TREE_BOOT_NCHILD  7
 
 /**
- * @brief /sys/boot children: reason, count, stage, rstiv, clock/,
+ * @brief /sys/boot children: reason, count, stage, rstiv, hang, clock/,
  *        mpu/.
  *
  * Referenced by the /sys directory table in tiku_vfs_tree_sys.c.
@@ -38,24 +38,23 @@
 extern const tiku_vfs_node_t tiku_vfs_tree_boot_children[];
 
 /**
- * @brief Capture the reset cause and bump the FRAM boot counter.
+ * @brief Capture the reset cause and bump the durable boot counter.
  *
  * Validates this module's persist cells (boot counter, lifetime accumulator),
  * increments the counter and snapshots the accumulator.  Other modules'
  * persistent state is gated by its own cells and does not depend on this call.
  *
- * @note Must be the FIRST module init tiku_vfs_tree_init() calls: reading
- *       SYSRSTIV pops the highest pending cause, so an earlier read would
- *       consume the value snapshotted for /sys/boot/reason and /sys/boot/rstiv.
+ * @note Call before any other module init in tiku_vfs_tree_init(): on MSP430
+ *       reading SYSRSTIV pops the highest pending cause, so an earlier read
+ *       would consume the value /sys/boot/reason and /sys/boot/rstiv report.
  */
 void tiku_vfs_tree_boot_init(void);
 
 /**
  * @brief Read handler for /sys/boot_count (also /sys/boot/count).
  *
- * Exported because the node appears in the /sys table owned by
- * tiku_vfs_tree_sys.c.  Renders the SRAM mirror of the FRAM boot
- * counter as a decimal line.
+ * Renders the SRAM copy of the durable boot counter as a decimal line.
+ * The /sys table in tiku_vfs_tree_sys.c references it.
  *
  * @param buf  Output buffer for the rendered text
  * @param max  Capacity of @p buf in bytes
@@ -66,9 +65,8 @@ int tiku_vfs_tree_boot_count_read(char *buf, size_t max);
 /**
  * @brief Read handler for /sys/last_reset.
  *
- * Renders the coarse-bucketed reset cause ("watchdog\n", "power\n",
- * "reboot\n" or "other\n") — the script-friendly companion to the
- * detailed /sys/boot/reason.
+ * Renders the reset cause in one of four buckets ("watchdog\n", "power\n",
+ * "reboot\n" or "other\n"); /sys/boot/reason gives the detailed name.
  *
  * @param buf  Output buffer for the rendered text
  * @param max  Capacity of @p buf in bytes
@@ -80,12 +78,12 @@ int tiku_vfs_tree_boot_last_reset_read(char *buf, size_t max);
  * @brief Read handler for /sys/cold_boots.
  *
  * Renders the lifetime uptime (seconds accumulated across every
- * boot) as a decimal line, lazily persisting the fresh value to
- * FRAM as a side effect.
+ * boot) as a decimal line, saving the fresh value to its persist
+ * cell as a side effect.
  *
  * @param buf  Output buffer for the rendered text
  * @param max  Capacity of @p buf in bytes
- * @return Bytes written, or -1 on error
+ * @return Bytes written, or TIKU_VFS_EIO when the cell cannot be saved
  */
 int tiku_vfs_tree_boot_cold_boots_read(char *buf, size_t max);
 

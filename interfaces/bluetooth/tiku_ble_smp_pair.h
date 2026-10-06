@@ -5,11 +5,11 @@
  *
  * Authors: Ambuj Varshney <ambuj@tiku-os.org>
  *
- * tiku_ble_smp_pair.h - LE Secure Connections "Just Works" pairing engine.
+ * tiku_ble_smp_pair.h - LE-SC pairing engine (Just Works, Numeric Comparison).
  *
  * A transport-agnostic state machine driving the SMP exchange to a shared LTK.
  * It handles raw SMP PDUs only; the caller wraps them in L2CAP and moves them.
- * The crypto lives in tiku_ble_smp.{c,h}.  One pairing at a time, all state static.
+ * The crypto lives in tiku_ble_smp.{c,h}.  One pairing at a time, state static.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -21,19 +21,19 @@
 
 /** Local role in the pairing exchange. */
 typedef enum {
-    TIKU_BLE_SMP_ROLE_INITIATOR = 0,     /* central   */
-    TIKU_BLE_SMP_ROLE_RESPONDER = 1      /* peripheral */
+    TIKU_BLE_SMP_ROLE_INITIATOR = 0,     /**< central                       */
+    TIKU_BLE_SMP_ROLE_RESPONDER = 1      /**< peripheral                    */
 } tiku_ble_smp_role_t;
 
 /** Engine state. */
 typedef enum {
-    TIKU_BLE_SMP_STATE_IDLE = 0,         /* not started                     */
-    TIKU_BLE_SMP_STATE_PAIRING,          /* exchange in progress            */
-    TIKU_BLE_SMP_STATE_DONE,             /* LTK derived, DHKey checks OK     */
-    TIKU_BLE_SMP_STATE_FAILED            /* aborted / verification mismatch  */
+    TIKU_BLE_SMP_STATE_IDLE = 0,         /**< not started                   */
+    TIKU_BLE_SMP_STATE_PAIRING,          /**< exchange in progress          */
+    TIKU_BLE_SMP_STATE_DONE,             /**< LTK derived, DHKey checks OK  */
+    TIKU_BLE_SMP_STATE_FAILED            /**< aborted / verification failed */
 } tiku_ble_smp_state_t;
 
-/** Largest SMP PDU emitted or consumed: Pairing Public Key = 1 + 64 = 65 bytes. */
+/** Largest SMP PDU either way: Pairing Public Key, 1 + 64 = 65 bytes. */
 #define TIKU_BLE_SMP_PDU_MAX  65u
 
 /** @brief Clear all pairing state back to IDLE. */
@@ -74,5 +74,22 @@ tiku_ble_smp_state_t tiku_ble_smp_pair_state(void);
  * @return 0 and fills @p ltk when DONE, else -1.
  */
 int tiku_ble_smp_pair_ltk(uint8_t ltk[16]);
+
+/**
+ * @brief Choose the pairing method for the next tiku_ble_smp_pair_start().
+ *        0 = Just Works (unauthenticated, the default); non-zero = LE-SC
+ *        Numeric Comparison (both peers derive the same six-digit value;
+ *        both roles must select it).  Persists across reset().
+ */
+void tiku_ble_smp_pair_set_method(int numeric_compare);
+
+/**
+ * @brief The Numeric Comparison value, once both nonces are exchanged.
+ *        A matching pairing yields the same value on both peers; a man in
+ *        the middle makes them differ.
+ * @return 0 and the six-digit value in @p out, or -1 if not yet available
+ *         (Just Works, or the exchange has not reached the nonce stage).
+ */
+int tiku_ble_smp_pair_compare_value(uint32_t *out);
 
 #endif /* TIKU_BLE_SMP_PAIR_H_ */

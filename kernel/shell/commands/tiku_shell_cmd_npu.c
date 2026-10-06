@@ -7,8 +7,9 @@
  *
  * tiku_shell_cmd_npu.c - "npu" shell command.
  *
- * Release the Ethos-U55 and report what it says about itself.  Running a
- * command stream on it is not yet wired.
+ * Brings up the Ethos-U55 and prints its id, MAC rate and SHRAM size, loads a
+ * model from /data, times it against the M85, and checks its output
+ * (`npu-test`).
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -21,7 +22,7 @@
 #include <arch/ra8p1/tiku_npu_arch.h>
 #include "tiku_shell_cmd_util.h"
 
-/** @brief Map a bring-up return code to something a reader can act on. */
+/** @brief Short text for a TIKU_RA8P1_NPU_ERR_* code, or "unknown". */
 static const char *npu_err(int rc)
 {
     switch (rc) {
@@ -113,25 +114,23 @@ void tiku_shell_cmd_npu_test(uint8_t argc, const char *argv[])
                  rounds, rounds, (unsigned long)sta,
                  (unsigned long)tiku_ra8p1_npu_irq_count);
 
-    /* The same check against a corrupted stream, so a pass above means the
-     * comparison can distinguish a good run from a bad one. */
+    /* A corrupted stream is expected to fail the comparison; a pass means
+     * the comparison detects nothing. */
     rc = tiku_ra8p1_npu_selftest_tampered(seed);
     SHELL_PRINTF("npu: tampered stream %s\n",
                  (rc == TIKU_RA8P1_NPU_OK) ? "ACCEPTED (check is blind)"
                                            : npu_err(rc));
 
-    /* And the same run with the cache maintenance taken out.  It has to FAIL:
-     * a pass would mean the buffers never held dirty lines, and the maintained
-     * run above would have proven nothing about coherency. */
-    /* And with the completion interrupt masked.  It must FAIL: a pass would
-     * mean the run never depended on the interrupt at all. */
+    /* With the completion interrupt masked the run is expected to fail; a
+     * pass means the run does not wait on the interrupt. */
     rc = tiku_ra8p1_npu_selftest_noirq(seed);
     SHELL_PRINTF("npu: without the completion irq %s\n",
                  (rc == TIKU_RA8P1_NPU_OK) ? "PASSED (run was not irq-driven)"
                                            : npu_err(rc));
 
-    /* Only meaningful once a model has weights: a wrong answer is the only
-     * proof the accelerator reads them, since it cannot check them. */
+    /* With one weight byte corrupted the output is expected to differ from
+     * the M85's; a pass means the weights are not read.  A model without
+     * weights returns TIKU_RA8P1_NPU_ERR_IMAGE and prints nothing. */
     rc = tiku_ra8p1_npu_selftest_badwts(seed);
     if (rc != TIKU_RA8P1_NPU_ERR_IMAGE) {
         SHELL_PRINTF("npu: with a corrupted weight %s\n",
@@ -139,6 +138,9 @@ void tiku_shell_cmd_npu_test(uint8_t argc, const char *argv[])
                                                : npu_err(rc));
     }
 
+    /* Without cache maintenance the run is expected to fail.  A pass means
+     * the buffers held no dirty lines, so the maintained runs above did not
+     * exercise cache coherency. */
     rc = tiku_ra8p1_npu_selftest_nomaint(seed);
     SHELL_PRINTF("npu: without cache maintenance %s\n",
                  (rc == TIKU_RA8P1_NPU_OK) ? "PASSED (buffers were not cached)"

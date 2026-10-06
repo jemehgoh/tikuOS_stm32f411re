@@ -38,9 +38,8 @@ void
 tiku_shell_io_set_backend(const tiku_shell_io_t *backend)
 {
     active_io = backend;
-    /* The active channel defines the ambient trust for VFS writes: a local
-     * console is CAP_ALL, a remote backend is restricted.  Clearing the
-     * backend (NULL) falls back to full authority (kernel/init path). */
+    /* VFS writes take the active backend's capability mask; with no
+     * backend (the kernel and init paths) they get TIKU_VFS_CAP_ALL. */
     tiku_vfs_caller_cap_set(backend != (void *)0
                                 ? (tiku_vfs_cap_t)backend->cap
                                 : TIKU_VFS_CAP_ALL);
@@ -334,7 +333,7 @@ tiku_shell_io_has_crlf(void)
 /*---------------------------------------------------------------------------*/
 
 /**
- * @brief UART backend — serial terminal over the LaunchPad backchannel.
+ * @brief UART backend — the board's serial console.
  *
  * Echo and CRLF are both enabled for interactive terminal use.
  */
@@ -343,5 +342,5 @@ const tiku_shell_io_t tiku_shell_io_uart = {
     tiku_uart_rx_ready,                     /* rx_ready */
     tiku_uart_getc,                         /* getc */
     TIKU_SHELL_IO_CRLF | TIKU_SHELL_IO_ECHO,   /* flags */
-    TIKU_VFS_CAP_ALL                        /* physical console = full authority */
+    TIKU_VFS_CAP_ALL                        /* local console: all authority */
 };

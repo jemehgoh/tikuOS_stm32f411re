@@ -5,10 +5,10 @@
  *
  * Authors: Ambuj Varshney <ambuj@tiku-os.org>
  *
- * tiku_boot.c - System boot and initialization implementation
+ * tiku_boot.c - the kernel boot sequence.
  *
- * This file implements system boot sequence management and initialization
- * functions for the Tiku Operating System.
+ * Runs the CPU, memory, peripheral and service stages in order, with the
+ * per-port steps each stage needs, and records the stage reached.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -21,6 +21,10 @@
 #if defined(PLATFORM_STM32N6)
 #include <arch/stm32n6/tiku_ospi_arch.h>
 #include <arch/stm32n6/tiku_sram_arch.h>
+#elif defined(PLATFORM_ESP32C61)
+#include <arch/esp32c61/tiku_flash_arch.h>
+#include <arch/esp32c61/tiku_psram_arch.h>
+#include <arch/esp32c61/tiku_xip_arch.h>
 #endif
 #include <kernel/cpu/tiku_stack.h>   /* stack-paint for /sys/mem/stack_free */
 #include "kernel/cpu/tiku_common.h"
@@ -37,6 +41,10 @@
 #endif
 #elif defined(PLATFORM_AMBIQ)
 #include "arch/ambiq/tiku_uart_arch.h"
+#elif defined(PLATFORM_NORDIC)
+#if defined(TIKU_CONSOLE_USB)
+#include "arch/nordic/tiku_usb_cdc_arch.h"
+#endif
 #endif
 
 
@@ -44,7 +52,7 @@
 /* PRIVATE CONSTANTS                                                        */
 /*---------------------------------------------------------------------------*/
 
-/* Boot sequence timeout in milliseconds */
+/* Boot timeout in milliseconds.  No code reads it. */
 #define TIKU_BOOT_TIMEOUT_MS    5000
 
 
@@ -55,7 +63,7 @@
 /** Current boot stage */
 static tiku_boot_stage_e current_boot_stage = TIKU_BOOT_STAGE_INIT;
 
-/** Boot completion flag */
+/** 1 once every stage has run */
 static volatile int boot_complete = 0;
 
 /*---------------------------------------------------------------------------*/
@@ -72,25 +80,20 @@ static int tiku_boot_init_services(void);
 /*---------------------------------------------------------------------------*/
 
 /*
- * @brief Perform complete system initialization
+ * @brief Run the boot sequence: CPU, memory, peripherals, then services.
  */
 int 
 tiku_cpu_full_init(unsigned int cpu_freq)
 {
     int result;
     
-    /* Initialize boot system 
-    * Currently only turn off watchdog
-    */
-   
     current_boot_stage = TIKU_BOOT_STAGE_INIT;
 
     boot_complete = 0;
 
-    /* Paint the unused stack now, at the shallowest call depth, so
-     * /sys/mem/stack_free can report worst-case headroom.  Bounded by the
-     * arch stack bottom (above the MPU guard + heap); a no-op on an arch
-     * that has not declared its bounds. */
+    /* At the shallowest call depth of boot, fills the stack below this frame
+     * down to the arch's stack bottom, for /sys/mem/stack_free.  An arch
+     * that declares no stack bottom paints nothing. */
     tiku_stack_paint();
 
     /* CPU initialization stage */
@@ -112,6 +115,11 @@ tiku_cpu_full_init(unsigned int cpu_freq)
         return result;
     }
     MAIN_PRINTF("Boot: Memory done\n");
+
+    /* Applies the CPU-rate preference that tiku_mem_init() restored, before
+     * the clock and peripherals start.  On Nordic the call does nothing: that
+     * port picks its rate earlier, from RRAM. */
+    tiku_cpu_freq_boot_apply();
 
     /* Peripheral initialization stage */
     current_boot_stage = TIKU_BOOT_STAGE_PERIPHERALS;
@@ -137,17 +145,16 @@ tiku_cpu_full_init(unsigned int cpu_freq)
     current_boot_stage = TIKU_BOOT_STAGE_COMPLETE;
 
 #if defined(PLATFORM_AMBIQ) || defined(PLATFORM_RP2350) || \
-    defined(PLATFORM_NORDIC)
-    /* The ARM reset handlers mask IRQs (cpsid i in tiku_crt_early.c) so no
-     * ISR can fire into half-initialized kernel state.  Everything an ISR
-     * touches now exists -- tiku_sched_init() just built the process queue --
-     * so unmask HERE, not only at the top of tiku_sched_loop(): every build
-     * that runs work before (or instead of) the scheduler -- TEST_ENABLE,
-     * TIKU_TURBO_BENCH, the deep-sleep power autorun, embedded BASIC -- was
-     * otherwise running with a dead tick, and every WFI in it fell straight
-     * through (wake on pended IRQ, ISR never executed, time never advanced).
-     * The scheduler's own tiku_cpu_irq_enable() stays: it is idempotent.
-     * MSP430 is untouched -- its GIE discipline predates this and works. */
+    defined(PLATFORM_NORDIC) || defined(PLATFORM_ESP32C61)
+    /* The Cortex-M reset handlers mask interrupts (cpsid i in
+     * tiku_crt_early.c), so no ISR runs against half-built kernel state.
+     * Everything an ISR touches exists once tiku_sched_init() has built the
+     * process queue, and interrupts are unmasked here for work that runs
+     * before or instead of the scheduler: TEST_ENABLE, TIKU_TURBO_BENCH, the
+     * power autorun, embedded BASIC.  With interrupts masked the tick does
+     * not advance, and WFI wakes on a pending IRQ without running its ISR.
+     * tiku_sched_loop() unmasks again; the call is idempotent.  On MSP430
+     * GIE stays clear until tiku_sched_loop() sets it. */
     tiku_cpu_irq_enable();
 #endif
 
@@ -158,7 +165,7 @@ tiku_cpu_full_init(unsigned int cpu_freq)
 }
 
 /**
- * @brief Get current boot stage
+ * @brief Stage the boot sequence has reached.
  */
 tiku_boot_stage_e 
 tiku_boot_get_stage(void)
@@ -167,7 +174,7 @@ tiku_boot_get_stage(void)
 }
 
 /**
- * @brief Check if boot sequence is complete
+ * @brief Whether tiku_cpu_full_init() has run every stage.
  */
 int 
 tiku_boot_is_complete(void)
@@ -180,9 +187,9 @@ tiku_boot_is_complete(void)
 /*---------------------------------------------------------------------------*/
 
 /**
- * @brief Initialize CPU subsystem
+ * @brief Arch CPU boot, then the CPU clock at @p cpu_freq.
  * @param cpu_freq Target CPU frequency in MHz
- * @return TIKU_BOOT_SUCCESS on success, TIKU_BOOT_ERROR on failure
+ * @return TIKU_BOOT_SUCCESS
  */
 static int
 tiku_boot_init_cpu(unsigned int cpu_freq)
@@ -190,10 +197,9 @@ tiku_boot_init_cpu(unsigned int cpu_freq)
     tiku_cpu_boot_init();
     tiku_cpu_freq_init(cpu_freq);
 
-    /* Unlock I/O pins from LPM5 state on MSP430FR devices: all GPIO
-     * is locked after reset until LOCKLPM5 is cleared. The Cortex-M
-     * RP2350 has no equivalent — pads are usable immediately after
-     * the bank's reset is released, which the arch boot does. */
+    /* MSP430FR parts hold every GPIO locked after reset until LOCKLPM5 is
+     * cleared.  tiku_cpu_boot_init() has cleared it already, so this second
+     * clear has no effect. */
 #if defined(PLATFORM_MSP430)
     PM5CTL0 &= ~LOCKLPM5;
 #endif
@@ -202,8 +208,8 @@ tiku_boot_init_cpu(unsigned int cpu_freq)
 }
 
 /**
- * @brief Initialize memory subsystem
- * @return TIKU_BOOT_SUCCESS on success, TIKU_BOOT_ERROR on failure
+ * @brief Durable-memory backends, tiku_mem_init(), then the tier allocator.
+ * @return TIKU_BOOT_SUCCESS
  */
 static int
 tiku_boot_init_memory(void)
@@ -216,24 +222,23 @@ tiku_boot_init_memory(void)
     if (tiku_ospi_init() != TIKU_OSPI_OK) {
         return TIKU_BOOT_ERROR;
     }
+#elif defined(PLATFORM_ESP32C61)
+    /* The flash starts first: tiku_mem_init() restores the durable mirror
+     * from it. */
+    (void)tiku_flash_init();
 #endif
 
     /* Initialize memory subsystem (arch-specific setup + module state) */
     tiku_mem_init();
 
 #if defined(PLATFORM_AMBIQ) || defined(PLATFORM_RP2350) || \
-    defined(PLATFORM_NORDIC) || defined(PLATFORM_STM32N6)
-    /* Bring up the tier allocator at boot so tier-backed allocations (per-
-     * process memory, etc.) work without relying on a lazy first-touch init.
-     * tiku_tier_init is idempotent, so BASIC's later lazy call is a no-op.
-     *
-     * Every platform with a carved NVM region does this, because since v0.06
-     * the NVM tier is a DECLARED extent of fixed size (TIKU_NVM_TIER_BYTES)
-     * rather than whatever was left over -- so it should exist from boot, and
-     * `free` should be able to report it without something having touched
-     * BASIC first.  RP2350 needed it even before that, having no BASIC in its
-     * build to trigger the lazy path at all.
-     * (MSP430 keeps its existing lazy init until validated there.) */
+    defined(PLATFORM_NORDIC) || defined(PLATFORM_STM32N6) || \
+    defined(PLATFORM_ESP32C61)
+    /* Every port with a carved NVM region wires the tier allocator here,
+     * before any consumer allocates: tiku_tier_init() runs the layout
+     * service, which fixes the NVM tier's extent for this boot.  The call is
+     * idempotent, so a later one (BASIC, free) does nothing.  MSP430 wires
+     * its tier on the first tiku_tier_init() call. */
     (void)tiku_tier_init();
 #endif
 
@@ -241,43 +246,53 @@ tiku_boot_init_memory(void)
 }
 
 /**
- * @brief Initialize peripheral subsystem
- * @return TIKU_BOOT_SUCCESS on success, TIKU_BOOT_ERROR on failure
+ * @brief Console, per-port boot checks, then the system clock.
+ * @return TIKU_BOOT_SUCCESS
  */
 static int
 tiku_boot_init_peripherals(void)
 {
-    /* UART must be initialized before clock so printf is available
-     * as early as possible (GPIO is already unlocked by init_cpu). */
+    /* The UART starts first, so a UART console carries the output of the
+     * rest of boot.  The GPIO unlock in tiku_boot_init_cpu() has run. */
     tiku_uart_init();
 
 #if defined(PLATFORM_STM32N6) && defined(TIKU_N6_SRAM_PROBE)
-    /* After the console exists: the probe reports as it walks, and nothing
-     * owns the banks it writes to yet. */
+    /* The probe prints as it walks the SRAM banks, so it runs after the
+     * console starts, and before anything owns the banks it writes. */
     tiku_stm32n6_sram_probe();
 #endif
 
+#if defined(PLATFORM_ESP32C61)
+    /* After the console starts and before any call into the XIP image or
+     * any PSRAM access.  Boot halts with a message when the kernel has code
+     * in the XIP image and xip.bin is from another build, or when a build
+     * that places buffers in PSRAM finds no PSRAM to hold them.  Those
+     * buffers are zeroed here. */
+    tiku_esp32c61_xip_require();
+    tiku_esp32c61_psram_data_boot();
+#endif
+
 #if defined(TIKU_CONSOLE_USB)
-    /* Native USB CDC-ACM console (TIKU_CONSOLE=usb/both). Polled: serviced
-     * whenever the scheduler is idle, and also nudged from putc/getc. */
+    /* Native USB CDC-ACM console (TIKU_CONSOLE=usb or both).  It is polled,
+     * from the scheduler's idle hook and from its own putc and getc. */
     tiku_usb_cdc_init();
     tiku_sched_set_idle_hook(tiku_usb_cdc_poll);
 #endif
 
-    /* System clock must be up before timers or scheduler */
+    /* The system clock starts before tiku_sched_init() starts the timers. */
     tiku_clock_init();
 
     return TIKU_BOOT_SUCCESS;
 }
 
 /**
- * @brief Initialize system services
- * @return TIKU_BOOT_SUCCESS on success, TIKU_BOOT_ERROR on failure
+ * @brief The scheduler, which starts processes and both timer services.
+ * @return TIKU_BOOT_SUCCESS
  */
 static int
 tiku_boot_init_services(void)
 {
-    /* Scheduler init brings up processes, htimer, and software timers */
+    /* Starts the process subsystem, the htimer and the software timers. */
     tiku_sched_init();
 
     return TIKU_BOOT_SUCCESS;

@@ -7,9 +7,9 @@
  *
  * tiku_shell_cmd_mem.c - "peek" and "poke" implementation.
  *
- * Parses an address then dereferences it directly, with no MPU bypass: a write to
- * a read-only region drops exactly as it would from application code, so prompt
- * behaviour is faithful to runtime.
+ * Parses an address and dereferences it directly.  The MPU is left as it is,
+ * so a store to a protected region is dropped or faults as it does from any
+ * other code.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -17,7 +17,7 @@
 #include "tiku_shell_cmd_mem.h"
 #include <kernel/shell/tiku_shell.h>
 
-/** Cap one peek at 32 bytes so the printed line stays short. */
+/** Most bytes one peek reads; they print on one line. */
 #define MEM_PEEK_MAX     32
 
 /*---------------------------------------------------------------------------*/
@@ -28,9 +28,7 @@
  * @brief Parse an unsigned 32-bit value (decimal or 0x-prefixed hex).
  *
  * @return 1 on success with @p out written; 0 on parse error,
- *         empty string, or value > 0xFFFFFFFF (cannot occur for
- *         a uint32_t accumulator, kept for symmetry with the
- *         narrower variants used elsewhere).
+ *         empty string, or value > 0xFFFFFFFF.
  */
 static uint8_t
 mem_parse_u32(const char *s, uint32_t *out)
@@ -59,6 +57,9 @@ mem_parse_u32(const char *s, uint32_t *out)
         } else {
             return 0;
         }
+        if (val > (UINT32_MAX - digit) / (hex ? 16U : 10U)) {
+            return 0;
+        }
         val = val * (hex ? 16U : 10U) + digit;
         s++;
     }
@@ -69,9 +70,9 @@ mem_parse_u32(const char *s, uint32_t *out)
 /**
  * @brief Address parse, sized for the platform's pointers.
  *
- * MSP430 (small model) pointers are 16-bit, so addresses above 0xFFFF are
- * rejected there -- reaching HIFRAM needs __data20 accesses this command does
- * not do.  Every 32-bit port takes the full 32-bit range.
+ * On MSP430 addresses above 0xFFFF are rejected: reaching HIFRAM needs
+ * __data20 accesses this command does not make.  Every 32-bit port takes the
+ * full 32-bit range.
  *
  * @return 1 on success, 0 on parse error or out-of-range.
  */
@@ -92,7 +93,7 @@ mem_parse_addr(const char *s, uintptr_t *out)
 }
 
 /*---------------------------------------------------------------------------*/
-/* peek                                                                      */
+/* PEEK                                                                      */
 /*---------------------------------------------------------------------------*/
 
 void
@@ -120,9 +121,8 @@ tiku_shell_cmd_peek(uint8_t argc, const char *argv[])
             return;
         }
     }
-    /* Defend against wraparound at the top of the address space: a peek that
-     * would cross the pointer's ceiling is truncated rather than silently
-     * rolling over into low memory. */
+    /* A peek that would run past the top of the address space is cut short
+     * there. */
 #if defined(PLATFORM_MSP430)
     if ((uint32_t)addr + count > 0x10000UL) {
         count = 0x10000UL - (uint32_t)addr;
@@ -146,7 +146,7 @@ tiku_shell_cmd_peek(uint8_t argc, const char *argv[])
 }
 
 /*---------------------------------------------------------------------------*/
-/* poke                                                                      */
+/* POKE                                                                      */
 /*---------------------------------------------------------------------------*/
 
 void
@@ -171,9 +171,9 @@ tiku_shell_cmd_poke(uint8_t argc, const char *argv[])
         return;
     }
 
-    /* Read-back is informational: it lets the caller see whether
-     * the write took effect (handy when poking FRAM through the
-     * MPU's read-only mask) without paying for a separate peek. */
+    /* The byte is read back after the store and both values print.  A store
+     * that did not take, such as one to MSP430 FRAM behind the MPU's
+     * read-only mask, reads back the old value. */
     p      = (volatile uint8_t *)addr;
     before = *p;
     *p     = (uint8_t)val;

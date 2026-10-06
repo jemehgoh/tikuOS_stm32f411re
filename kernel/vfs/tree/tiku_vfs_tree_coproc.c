@@ -7,8 +7,8 @@
  *
  * tiku_vfs_tree_coproc.c - /sys/coproc, over interfaces/coproc alone.
  *
- * Portable by construction: every handler goes through tiku_coproc_*, so the
- * tree reads the same on any platform that carries a backend.
+ * Every handler goes through the tiku_coproc_* interface, so the tree is the
+ * same on every platform with a coproc backend (TIKU_HAS_COPROC).
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -23,6 +23,8 @@
 
 #if (TIKU_HAS_COPROC + 0)
 
+/** @brief Read handler for /sys/coproc/state: absent, stopped, started,
+ *         running or faulted. */
 static int coproc_state_read(char *buf, size_t max)
 {
     static const char *const names[] = {
@@ -36,12 +38,14 @@ static int coproc_state_read(char *buf, size_t max)
     return snprintf(buf, max, "%s\n", names[st]);
 }
 
+/** @brief Read handler for /sys/coproc/heartbeat: its heartbeat counter. */
 static int coproc_heartbeat_read(char *buf, size_t max)
 {
     return snprintf(buf, max, "%lu\n",
                     (unsigned long)tiku_coproc_heartbeat());
 }
 
+/** @brief Read handler for /sys/coproc/image: size, flags, mailbox cap. */
 static int coproc_image_read(char *buf, size_t max)
 {
     return snprintf(buf, max, "%lu flags=%lx cap=%lu\n",
@@ -50,12 +54,14 @@ static int coproc_image_read(char *buf, size_t max)
                     (unsigned long)TIKU_COPROC_MSG_CAP);
 }
 
+/** @brief Read handler for /sys/coproc/run: 1 while it runs. */
 static int coproc_run_read(char *buf, size_t max)
 {
     return snprintf(buf, max, "%d\n",
                     tiku_coproc_state() == TIKU_COPROC_RUNNING ? 1 : 0);
 }
 
+/** @brief Write handler for /sys/coproc/run: "1" starts it, "0" stops it. */
 static int coproc_run_write(const char *buf, size_t len)
 {
     if (len >= 1u && buf[0] == '1') {
@@ -67,10 +73,11 @@ static int coproc_run_write(const char *buf, size_t len)
     return TIKU_VFS_EINVAL;
 }
 
-/*
- * Echo surface over the mailbox: writing sends the bytes, reading returns
- * "<reply_seq> <last reply>".  A seq that advances after a write proves the
- * cross-core path; the bench suite asserts it.
+/**
+ * @brief Read handler for /sys/coproc/echo: "<reply_seq> <last reply>".
+ *
+ * A write sends bytes over the mailbox; reply_seq advances when a reply comes
+ * back from the other core.
  */
 static int coproc_echo_read(char *buf, size_t max)
 {
@@ -84,6 +91,7 @@ static int coproc_echo_read(char *buf, size_t max)
                     (unsigned long)tiku_coproc_reply_seq(), body);
 }
 
+/** @brief Write handler for /sys/coproc/echo: send the bytes. */
 static int coproc_echo_write(const char *buf, size_t len)
 {
     return (tiku_coproc_send(buf, (uint32_t)len) == TIKU_COPROC_OK)
@@ -94,8 +102,9 @@ const tiku_vfs_node_t tiku_vfs_tree_coproc_children[] = {
     { "state",     TIKU_VFS_FILE, coproc_state_read,     NULL, NULL, 0 },
     { "heartbeat", TIKU_VFS_FILE, coproc_heartbeat_read, NULL, NULL, 0 },
     { "image",     TIKU_VFS_FILE, coproc_image_read,     NULL, NULL, 0 },
-    /* Launch is a one-way door on every backend so far; gate it the way the
-     * watchdog gates its controls. */
+    /* A start cannot always be undone: stop is cooperative, and the first
+     * start of a oneshot backend may constrain other subsystems until
+     * power-off.  run needs CAP_SYS. */
     { "run",       TIKU_VFS_FILE, coproc_run_read,  coproc_run_write,
       NULL, 0, NULL, NULL, TIKU_VFS_CAP_SYS },
     { "echo",      TIKU_VFS_FILE, coproc_echo_read, coproc_echo_write,

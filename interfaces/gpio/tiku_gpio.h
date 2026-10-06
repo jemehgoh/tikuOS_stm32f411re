@@ -7,9 +7,8 @@
  *
  * tiku_gpio.h - platform-agnostic raw GPIO interface.
  *
- * A stable port/pin-indexed API for kernel code needing direct pin control, with
- * no dependency on the per-board LED indirection.  Header-only: every call is a
- * static inline resolving to the arch driver, so it costs nothing extra.
+ * A port/pin-indexed API for kernel code that drives pins directly.
+ * Header-only: every call is a static inline resolving to the arch driver.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -26,6 +25,10 @@
 #include <arch/nordic/tiku_gpio_arch.h>
 #elif defined(PLATFORM_STM32N6)
 #include <arch/stm32n6/tiku_gpio_arch.h>
+#elif defined(PLATFORM_RA8P1)
+#include <arch/ra8p1/tiku_gpio_arch.h>
+#elif defined(PLATFORM_ESP32C61)
+#include <arch/esp32c61/tiku_gpio_arch.h>
 #else
 #include <arch/msp430/tiku_gpio_arch.h>
 #endif
@@ -35,8 +38,8 @@
 /* RETURN CODES                                                              */
 /*---------------------------------------------------------------------------*/
 
-#define TIKU_GPIO_OK           0
-#define TIKU_GPIO_ERR_INVALID -1
+#define TIKU_GPIO_OK           0    /**< success                   */
+#define TIKU_GPIO_ERR_INVALID -1    /**< bad port or pin           */
 
 /*---------------------------------------------------------------------------*/
 /* CORE API                                                                  */
@@ -44,8 +47,8 @@
 
 /**
  * @brief Configure a pin as digital output.
- * @param port Port number (1..N for numbered ports; 0xFF for port J)
- * @param pin  Pin within port (0..7)
+ * @param port Platform port number (see tiku_gpio_geometry.h); 0xFF for port J
+ * @param pin  Pin within port (see tiku_gpio_geometry.h for the platform width)
  * @return TIKU_GPIO_OK or TIKU_GPIO_ERR_INVALID
  */
 static inline int tiku_gpio_dir_out(uint8_t port, uint8_t pin)
@@ -54,7 +57,10 @@ static inline int tiku_gpio_dir_out(uint8_t port, uint8_t pin)
 }
 
 /**
- * @brief Configure a pin as digital input with pull-up.
+ * @brief Configure a pin as a digital input.
+ *
+ * The MSP430 and RP2350 ports also enable the pin's pull-up; the other ports
+ * do not set one.
  */
 static inline int tiku_gpio_dir_in(uint8_t port, uint8_t pin)
 {
@@ -62,9 +68,7 @@ static inline int tiku_gpio_dir_in(uint8_t port, uint8_t pin)
 }
 
 /**
- * @brief Drive a pin high.
- *
- * Side effect: sets pin direction to output if not already.
+ * @brief Drive a pin high, making it an output if it is not one.
  */
 static inline int tiku_gpio_set(uint8_t port, uint8_t pin)
 {
@@ -72,7 +76,7 @@ static inline int tiku_gpio_set(uint8_t port, uint8_t pin)
 }
 
 /**
- * @brief Drive a pin low.
+ * @brief Drive a pin low, making it an output if it is not one.
  */
 static inline int tiku_gpio_clear(uint8_t port, uint8_t pin)
 {
@@ -90,8 +94,8 @@ static inline int tiku_gpio_toggle(uint8_t port, uint8_t pin)
 /**
  * @brief Drive a pin to the given value (0 or 1).
  *
- * Equivalent to tiku_gpio_set/clear but selectable at runtime.
- * This is the hot-path call used by tiku_bitbang.
+ * Equivalent to tiku_gpio_set/clear, selectable at runtime, and likewise
+ * makes the pin an output.  tiku_bitbang drives its pins through this call.
  */
 static inline int tiku_gpio_write(uint8_t port, uint8_t pin, uint8_t val)
 {
