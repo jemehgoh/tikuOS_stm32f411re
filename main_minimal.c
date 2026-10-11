@@ -293,15 +293,7 @@ int main(void)
 #include "arch/stm32n6/tiku_uart_arch.h"
 #include "arch/stm32n6/tiku_gpio_arch.h"
 #include "arch/stm32n6/tiku_stm32n6_regs.h"
-<<<<<<< HEAD
 #include "arch/stm32n6/tiku_device_select.h"
-=======
-
-/* NUCLEO-N657X0-Q LED3, on PG0.  LED1 is PG8 and LED2 is PG10 on the same
- * port. */
-#define TIKU_MIN_LED_PORT   STM32N6_GPIO_PORT_G
-#define TIKU_MIN_LED_PIN    0U
->>>>>>> main
 
 int main(void)
 {
@@ -316,17 +308,11 @@ int main(void)
     tiku_uart_init();
 
     tiku_cpu_stm32n6_delay_ms(100);
-<<<<<<< HEAD
     tiku_uart_puts("\n\n--- TikuOS minimal smoke test (");
     tiku_uart_puts(TIKU_BOARD_NAME);
     tiku_uart_puts(") ---\n");
     /* The image identifies its own delay calibration, so a heartbeat period
      * can never be attributed to the wrong build. */
-=======
-    tiku_uart_puts("\n\n--- TikuOS minimal smoke test (NUCLEO-N657X0-Q) ---\n");
-    /* The build's fallback spin rate.  The delays measure the rate against
-     * LPTIM1 on first use and use this constant only if that fails. */
->>>>>>> main
     tiku_uart_printf("spin=%u iters/ms\n",
                      (unsigned int)TIKU_STM32N6_SPIN_ITERS_PER_MS);
 

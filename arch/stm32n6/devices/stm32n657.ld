@@ -152,35 +152,49 @@ SECTIONS
     } > AXISRAM
 
     /*
-     * SRAM tier: the rest of the AXI SRAM above .axisram, less a 32 KB
-     * reserve.  The span lies outside every output section, so the startup
-     * code does not zero it, and it moves up as .axisram grows.
+     * SRAM tier: the complete AXI SRAM span above .axisram.  The span lies
+     * outside every output section, so the startup code does not zero it, and
+     * it moves up as .axisram grows.
      *
-     * The reserve guards nothing here: the stack is in the image window and
-     * nothing sits above the tier in this bank.  A smaller reserve gives the
-     * tier the difference.
+     * When the NPU is enabled, the boot-time allocator reserves the high-end
+     * Neural-ART window from this single SRAM tier.  The linker describes that
+     * reservation, but does not remove it from __tier_sram_start/end: Phase 3
+     * must install the runtime reservation before any general SRAM allocation.
+     * With no reservation symbol, the disabled-NPU build has a zero-sized
+     * reservation at the AXI SRAM end and keeps the complete span available.
      */
-    __tiku_npu_tier_size       = DEFINED(__tier_npu_size)
-                                  ? __tier_npu_size : 0;
-    ASSERT((__tiku_npu_tier_size > 0) &&
-           (__tiku_npu_tier_size <= LENGTH(AXISRAM)) &&
-           ((__tiku_npu_tier_size % 32) == 0),
-           "TIKU_TIER_NPU_SIZE must be a positive multiple of 32 within AXISRAM")
-    __tiku_tier_span_start      = __axisram_top;
-    __tiku_npu_tier_start       = ORIGIN(AXISRAM) + LENGTH(AXISRAM) -
-                                  __tiku_npu_tier_size;
-    __tiku_npu_tier_end         = ORIGIN(AXISRAM) + LENGTH(AXISRAM);
-    __tiku_tier_span_limit      = __tiku_npu_tier_start;
+    __tiku_npu_reserve_size = DEFINED(__npu_reserve_size)
+                              ? __npu_reserve_size : 0;
+    __npu_reserved_end       = ORIGIN(AXISRAM) + LENGTH(AXISRAM);
+    __npu_reserved_start     = __npu_reserved_end -
+                               __tiku_npu_reserve_size;
+    __tiku_tier_span_start   = __axisram_top;
+    __tiku_tier_span_limit   = __npu_reserved_end;
     __tiku_tier_reserve_default = 0;
     __tiku_tier_floor_default   = 0x40000;
     INCLUDE arch/common/tiku_sram_layout.ld
 
-    __tier_npu_start = __tiku_npu_tier_start;
-    __tier_npu_end   = __tiku_npu_tier_end;
-    ASSERT(__tier_sram_end <= __tier_npu_start,
-           "general SRAM tier overlaps the reserved NPU extent")
-    ASSERT((__tier_npu_end - __tier_npu_start) == __tiku_npu_tier_size,
-           "reserved NPU extent does not match TIKU_TIER_NPU_SIZE")
+    /* Temporary compatibility aliases for current STM32N6 consumers. */
+    __tier_npu_start = __npu_reserved_start;
+    __tier_npu_end   = __npu_reserved_end;
+
+    ASSERT((__tiku_npu_reserve_size == 0) ||
+           ((__tiku_npu_reserve_size % 32) == 0),
+           "NPU SRAM reservation must be zero or a multiple of 32 bytes")
+    ASSERT((__npu_reserved_start % 32) == 0,
+           "NPU SRAM reservation start must be 32-byte aligned")
+    ASSERT((__npu_reserved_end % 32) == 0,
+           "NPU SRAM reservation end must be 32-byte aligned")
+    ASSERT(__npu_reserved_start <= __npu_reserved_end,
+           "NPU SRAM reservation exceeds the AXI SRAM range")
+    ASSERT((__npu_reserved_end - __npu_reserved_start) ==
+           __tiku_npu_reserve_size,
+           "NPU SRAM reservation extent does not match its configured size")
+    ASSERT((__npu_reserved_start >= __tier_sram_start) &&
+           (__npu_reserved_end <= __tier_sram_end),
+           "NPU SRAM reservation is outside the SRAM tier")
+    ASSERT((__npu_reserved_start - __tier_sram_start) >= __tiku_tier_floor,
+           "SRAM outside the NPU reservation fell below TIKU_TIER_SRAM_MIN")
 
     _end = __uninit_end;
     PROVIDE(end = _end);

@@ -1171,17 +1171,19 @@ CFLAGS += -I$(PROJ_DIR)
 CFLAGS += -ffunction-sections -fdata-sections
 # The AXI SRAM above the ROM's image window (0x341C0000 to 0x343C0000,
 # 2 MB) holds the .axisram statics, which tiku_crt_early.c zeroes after the
-# banks are powered, and above them the SRAM tier: the rest of the bank less
-# a 32 KB reserve (stm32n657.ld).  An access above 0x343C0000 hangs the bus.
-# The tier is linker-derived, so TIKU_TIER_SRAM_MIN is its guaranteed
-# minimum, not its size.
+# banks are powered, and above them the complete SRAM tier.  An access above
+# 0x343C0000 hangs the bus.  The tier is linker-derived, so
+# TIKU_TIER_SRAM_MIN is its guaranteed minimum, not its size.
 TIKU_TIER_SRAM_MIN ?= 262144
 CFLAGS += -DTIKU_TIER_SRAM_MIN=$(TIKU_TIER_SRAM_MIN)
 CFLAGS += -DTIKU_TIER_SRAM_DERIVED=1
-# Reserved Neural-ART workspace.  This is a named build-time knob because the
-# NPU extent is intentionally excluded from the general-purpose SRAM tier.
-TIKU_TIER_NPU_SIZE ?= 1835008
-CFLAGS += -DTIKU_TIER_NPU_SIZE=$(TIKU_TIER_NPU_SIZE)
+# Reserved Neural-ART workspace.  The reservation is an STM32N6 NPU build
+# property, not a generic memory-tier setting.  The linker still consumes the
+# reservation symbol only for NPU-enabled builds.
+TIKU_NPU_SRAM_RESERVE_SIZE ?= 1835008  # 0x1c0000 bytes
+ifeq ($(TIKU_NPU_ENABLE),1)
+CFLAGS += -DTIKU_NPU_SRAM_RESERVE_SIZE=$(TIKU_NPU_SRAM_RESERVE_SIZE)
+endif
 
 else ifeq ($(TIKU_PLATFORM),ra8p1)
 
@@ -1406,9 +1408,12 @@ else ifeq ($(TIKU_PLATFORM),stm32n6)
 
 LDFLAGS  = -mcpu=cortex-m55 -mthumb -mfpu=auto -mfloat-abi=hard
 LDFLAGS += --specs=nano.specs --specs=nosys.specs -nostartfiles
+ifeq ($(TIKU_NPU_ENABLE),1)
+# The linker script uses DEFINED(__npu_reserve_size) while it is parsed, so
+# this symbol must reach ld before -T introduces the script.
+LDFLAGS += -Wl,--defsym=__npu_reserve_size=$(TIKU_NPU_SRAM_RESERVE_SIZE)
+endif
 LDFLAGS += -Tarch/stm32n6/devices/stm32n657.ld
-# Keep the linker carve in lock-step with the allocator-facing config above.
-LDFLAGS += -Wl,--defsym=__tier_npu_size=$(TIKU_TIER_NPU_SIZE)
 LDFLAGS += -Wl,--gc-sections
 LDFLAGS += -Wl,-u,tiku_autostart_processes
 # The vector table is the image's first bytes and nothing references it;
@@ -1956,6 +1961,7 @@ SRCS += arch/stm32n6/tiku_crt_early.c
 SRCS += arch/stm32n6/tiku_cpu_common.c
 SRCS += arch/stm32n6/tiku_cpu_freq_boot_arch.c
 SRCS += arch/stm32n6/tiku_uart_arch.c
+SRCS += arch/stm32n6/tiku_syscalls.c
 SRCS += arch/stm32n6/tiku_gpio_arch.c
 SRCS += arch/stm32n6/tiku_crit_arch.c
 SRCS += arch/stm32n6/tiku_timer_arch.c
@@ -1971,9 +1977,15 @@ SRCS += arch/stm32n6/tiku_lcd_arch.c
 SRCS += arch/stm32n6/tiku_dma_arch.c
 SRCS += arch/stm32n6/tiku_dcmipp_arch.c
 SRCS += arch/stm32n6/tiku_pwm_arch.c
+SRCS += arch/stm32n6/tiku_xspi_arch.c
 SRCS += arch/stm32n6/tiku_ospi_arch.c
 SRCS += arch/stm32n6/tiku_sram_arch.c
+ifeq ($(TIKU_STM32N6_REGION_TEST_ENABLE),1)
+SRCS += tests/tiku_stm32n6_region_acceptance.c
+CFLAGS += -DTIKU_STM32N6_REGION_TEST_ENABLE=1
+endif
 ifeq ($(TIKU_NPU_ENABLE),1)
+SRCS += arch/stm32n6/tiku_npu_mem.c
 SRCS += arch/stm32n6/tiku_npu_arch.c
 SRCS += arch/stm32n6/tiku_npu_llaton.c
 SRCS += arch/stm32n6/tiku_n6_model_store.c
@@ -2014,18 +2026,51 @@ TIKU_NPU_PIC_SRCS := \
 CFLAGS += -DSTM32N6=1
 CFLAGS += -I$(LL_ATON_ROOT) -I$(LL_ATON_INC) -I$(LL_ATON_PLAT)
 CFLAGS += -I$(PROJ_DIR)/arch/stm32n6
+# Debian's ARM newlib provides int64_t but omits the internal marker that
+# enables the C99 PRI*64 format macros used by LL-ATON.
+CFLAGS += -D__int64_t_defined=1
 LDLIBS += $(PROJ_DIR)/third_party/st/edgeai/4.0.0/Middlewares/ST/AI/Lib/GCC/ARMCortexM55/NetworkRuntime1201_CM55_GCC_PIC.a
 CFLAGS += -DTIKU_HAS_NPU=1
+ifeq ($(TIKU_NPU_MEM_TEST_ENABLE),1)
+SRCS += tests/tiku_npu_mem_acceptance.c
+CFLAGS += -DTIKU_NPU_MEM_TEST_ENABLE=1
+endif
+ifeq ($(TIKU_NPU_MEM_NEGATIVE_TEST_ENABLE),1)
+CFLAGS += -DTIKU_NPU_MEM_NEGATIVE_TEST_ENABLE=1
+endif
 ifeq ($(TIKU_NPU_EMBEDDED_TEST_ENABLE),1)
 SRCS += tests/tiku_npu_embedded_acceptance.c
 CFLAGS += -DTIKU_NPU_EMBEDDED_TEST_ENABLE=1
+endif
+ifeq ($(TIKU_NPU_RUN_TEST_ENABLE),1)
+CFLAGS += -DTIKU_NPU_RUN_TEST_ENABLE=1
 endif
 ifeq ($(TIKU_NPU_VFS_TEST_ENABLE),1)
 SRCS += tests/tiku_npu_vfs_acceptance.c
 CFLAGS += -DTIKU_NPU_VFS_TEST_ENABLE=1
 endif
+ifeq ($(TIKU_NPU_PREFLIGHT_TEST_ENABLE),1)
+SRCS += tests/tiku_npu_preflight_acceptance.c
+SRCS += tests/npu/fixtures/stm32n6_identity_corrupt.network_rel.c
+CFLAGS += -DTIKU_NPU_PREFLIGHT_TEST_ENABLE=1
+endif
+ifeq ($(TIKU_NPU_POOL_TEST_ENABLE),1)
+SRCS += tests/tiku_npu_pool_acceptance.c
+ifneq ($(TIKU_NPU_PREFLIGHT_TEST_ENABLE),1)
+SRCS += tests/npu/fixtures/stm32n6_identity_corrupt.network_rel.c
+endif
+CFLAGS += -DTIKU_NPU_POOL_TEST_ENABLE=1
+endif
+ifeq ($(TIKU_NPU_RESOURCE_TEST_ENABLE),1)
+SRCS += tests/tiku_npu_resource_acceptance.c
+CFLAGS += -DTIKU_NPU_RESOURCE_TEST_ENABLE=1
+endif
+ifeq ($(TIKU_NPU_LIFECYCLE_TEST_ENABLE),1)
+SRCS += tests/tiku_npu_lifecycle_acceptance.c
+CFLAGS += -DTIKU_NPU_LIFECYCLE_TEST_ENABLE=1
+endif
 # The current YOLO network_rel.bin is a 3.2 MiB combined image. It is deployed
-# to the reserved external-NOR bigblob slot before the acceptance tests run; it is
+# to the reserved external-NOR raw model slot before the acceptance tests run; it is
 # intentionally not linked into the 255 KiB STM32N6 boot image.
 endif
 SRCS += arch/stm32n6/tiku_cache_arch.c

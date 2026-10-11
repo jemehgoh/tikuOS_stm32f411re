@@ -89,11 +89,11 @@ void tiku_mem_arch_init(void) {
 /** @brief The mirror's image when it checks out (see tiku_mem_hal.h). */
 const uint8_t *tiku_mem_arch_durable(size_t *len) {
     *len = 0u;
-    if (!tiku_xspi_ready() || tiku_xspi_mmap_enable() != TIKU_XSPI_OK) {
+    if (!tiku_ospi_ready() || tiku_ospi_mmap_enable() != TIKU_OSPI_OK) {
         return NULL;
     }
     return tiku_nvm_mirror_image((const uint32_t *)(const void *)MIRROR_PTR,
-                                 TIKU_XSPI_MIRROR_BYTES, len);
+                                 TIKU_OSPI_MIRROR_BYTES, len);
 }
 
 /** @brief The .uninit window durable variables live in (see tiku_mem_hal.h). */
@@ -137,9 +137,9 @@ void tiku_mem_arch_nvm_write(uint8_t *dst, const uint8_t *src,
     __asm__ volatile ("dsb" ::: "memory");
 }
 
-void tiku_mem_arch_nvm_flush(void) {
+int tiku_mem_arch_nvm_flush_status(void) {
     if (!tiku_ospi_ready()) {
-        return;
+        return -1;
     }
 
     size_t len = (size_t)((uintptr_t)&__uninit_end - (uintptr_t)&__uninit_start);
@@ -171,19 +171,19 @@ void tiku_mem_arch_nvm_flush(void) {
     for (unsigned i = 0U; i < TIKU_OSPI_MIRROR_SECTORS; i++) {
         if (tiku_ospi_erase_sector(TIKU_OSPI_MIRROR_ADDR +
                                    (i * TIKU_OSPI_SECTOR_SIZE)) != TIKU_OSPI_OK) {
-            return;
+            return -1;
         }
     }
     if (tiku_ospi_program(TIKU_OSPI_MIRROR_ADDR + TIKU_NVM_MIRROR_HDR_BYTES,
                           &__uninit_start, (uint32_t)len) != TIKU_OSPI_OK) {
-        return;
+        return -1;
     }
     if (tiku_ospi_program(TIKU_OSPI_MIRROR_ADDR, hdr_out,
                           sizeof(hdr_out)) != TIKU_OSPI_OK) {
-        return;
+        return -1;
     }
     mem_program_count++;
-    (void)tiku_ospi_mmap_enable();      /* leave reads cheap again */
+    return (int)tiku_ospi_mmap_enable();      /* leave reads cheap again */
 }
 
 /** @brief tiku_mem_arch_nvm_flush_status() with its result discarded. */

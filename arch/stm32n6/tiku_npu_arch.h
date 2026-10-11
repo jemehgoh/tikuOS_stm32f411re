@@ -14,6 +14,10 @@
 
 #include <stdint.h>
 
+#if (TIKU_HAS_NPU + 0) && !defined(TIKU_NPU_SRAM_RESERVE_SIZE)
+#error "STM32N6 NPU build requires TIKU_NPU_SRAM_RESERVE_SIZE"
+#endif
+
 /* Init is deliberately status-returning so a duplicate call is observable. */
 #define TIKU_NPU_INIT_OK             0
 #define TIKU_NPU_INIT_ALREADY        1
@@ -23,7 +27,7 @@
 #define TIKU_NPU_INIT_ERR_ALLOC     -4
 
 /**
- * @brief Enable the STM32N6 NPU domain and register its reserved tier.
+ * @brief Enable the STM32N6 NPU domain using the boot-owned SRAM root.
  *
  * Applications call this after boot and before binding or loading a model.
  * LL-ATON owns the ATON runtime and model execution. A second call returns
@@ -35,8 +39,8 @@ int tiku_npu_init(void);
  * @brief Shut down the application-owned NPU runtime.
  *
  * The call is rejected while a model is bound, loaded, or running.  A
- * successful shutdown releases the NPU tier so a later application can call
- * tiku_npu_init() again in the same boot.
+ * successful shutdown retains the boot-owned SRAM reservation so a later
+ * application can call tiku_npu_init() again safely in the same boot.
  */
 int tiku_npu_shutdown(void);
 

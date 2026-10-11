@@ -302,10 +302,12 @@ uint32_t tiku_mem_guard_violations(void);
 /*---------------------------------------------------------------------------*/
 
 /*
- * The region registry maps the physical memory layout at boot time.
- * Subsystems query it to verify that their buffers are in the correct
- * memory type (SRAM or NVM for arenas, NVM for persistent storage). Claims
- * track which subsystem owns each region to detect overlaps early.
+ * The region registry maps the memory ranges available to generic checked
+ * callers at boot time.  A platform may omit a privately owned or reserved
+ * window.  Subsystems query it to verify that their buffers are in the
+ * correct memory type (SRAM or NVM for arenas, NVM for persistent storage).
+ * Claims track which subsystem owns each published range to detect overlaps
+ * early.
  */
 
 /** Maximum number of platform-defined memory regions */
@@ -1560,15 +1562,6 @@ tiku_mem_err_t tiku_mem_workspace_close(tiku_mem_workspace_t *workspace);
 #define TIKU_TIER_SRAM_SIZE  128
 #endif
 
-/**
- * Size of the dedicated NPU tier in bytes.  STM32N6 overrides this from the
- * Makefile and passes the same value to the linker; keeping a named default
- * here lets allocator-facing code compile for host/unit-test builds too.
- */
-#ifndef TIKU_TIER_NPU_SIZE
-#define TIKU_TIER_NPU_SIZE   (512U * 1024U)
-#endif
-
 /*
  * @brief Size in bytes of MSP430's NVM tier, a lower-FRAM array.
  *
@@ -1627,31 +1620,6 @@ tiku_mem_err_t tiku_tier_init(void);
  *         TIKU_MEM_ERR_BUSY while a reclaim fence holds the tier
  */
 tiku_mem_err_t tiku_tier_attach_psram(void *base, tiku_mem_arch_size_t size);
-
-/**
- * @brief Register the reserved NPU extent as an explicit allocator tier.
- *
- * The extent is linker-owned and may be attached after boot and detached only
- * after every NPU allocation has been released.
- */
-tiku_mem_err_t tiku_tier_attach_npu(void *base, tiku_mem_arch_size_t size);
-
-/**
- * @brief Rewind the dedicated NPU tier after its model has been unloaded.
- *
- * The NPU model loader is the sole owner of this volatile tier.  This is
- * intentionally narrower than tiku_tier_reset(): unloading a model must not
- * orphan allocations in the general-purpose memory tiers.
- */
-tiku_mem_err_t tiku_tier_npu_reset(void);
-
-/**
- * @brief Detach the dedicated NPU extent after runtime shutdown.
- *
- * Refuses while the NPU tier still contains allocations.  A later application
- * may attach the same linker-owned extent again.
- */
-tiku_mem_err_t tiku_tier_detach_npu(void);
 
 /**
  * @brief Detach the PSRAM tier (power-down path).

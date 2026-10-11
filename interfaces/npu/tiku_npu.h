@@ -52,8 +52,8 @@
 /* Kept under the old public name for source compatibility.  This is the
  * runtime COPY arena limit, not the external-NOR bigblob capacity. */
 #ifndef TIKU_NPU_MODEL_SLOT_BYTES
-# ifdef TIKU_TIER_NPU_SIZE
-#  define TIKU_NPU_MODEL_SLOT_BYTES ((uint32_t)(TIKU_TIER_NPU_SIZE))
+# ifdef TIKU_NPU_SRAM_RESERVE_SIZE
+#  define TIKU_NPU_MODEL_SLOT_BYTES ((uint32_t)(TIKU_NPU_SRAM_RESERVE_SIZE))
 # else
 #  define TIKU_NPU_MODEL_SLOT_BYTES UINT32_C(524288)
 # endif
@@ -126,13 +126,16 @@ typedef struct tiku_npu_model {
  */
 int tiku_npu_model_bind(tiku_npu_model_t *model, const char *model_ref);
 
-/** Shut down the application-owned STM32N6 NPU runtime. */
+/**
+ * Shut down the application-owned NPU hardware/runtime while retaining the
+ * boot-owned NPU root reservation.
+ */
 int tiku_npu_shutdown(void);
 
-/** Install the bound model into the reserved NPU executable tier. */
+/** Install the bound model into the boot-owned NPU root arena. */
 int tiku_npu_model_load(tiku_npu_model_t *model);
 
-/** Release the model's NPU extent slice and make the slot reusable. */
+/** Release the model's child arenas and rewind the retained NPU root arena. */
 int tiku_npu_model_unload(tiku_npu_model_t *model);
 
 /** Return LL-ATON input/output metadata after installation. */

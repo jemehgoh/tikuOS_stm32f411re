@@ -8,7 +8,8 @@
  *
  * LL-ATON owns the ATON clock gates, ATON interrupt controller, epoch
  * controller, relocation, and inference execution. This file retains only
- * board-level power/security setup and the linker-owned NPU tier.
+ * board-level power/security setup. NPU SRAM is reserved by the boot-owned
+ * STM32N6 NPU memory module before this backend can be initialized.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -19,16 +20,9 @@
 #include <interfaces/npu/tiku_npu.h>
 #include "tiku_npu_arch.h"
 #include "tiku_npu_llaton.h"
+#include "tiku_npu_mem.h"
 #include "tiku_sram_arch.h"
 #include "tiku_stm32n6_regs.h"
-
-extern uint8_t __axisram_start;
-extern uint8_t __tier_sram_start;
-extern uint8_t __tier_sram_end;
-extern uint8_t __tier_npu_start;
-extern uint8_t __tier_npu_end;
-extern uint8_t __uninit_start;
-extern uint8_t __uninit_end;
 
 /* Keep the non-secure NPU alias selection local to this board backend. The
  * generic STM32N6 register header is also used by unrelated drivers. */
@@ -110,33 +104,12 @@ void tiku_stm32n6_npu_end_of_epoch_isr(void)
     tiku_npu_llaton_irq_bridge();
 }
 
-static int extents_overlap(uintptr_t a_start, uintptr_t a_end,
-                           uintptr_t b_start, uintptr_t b_end)
-{
-    return a_start < b_end && b_start < a_end;
-}
-
 static int npu_extent_is_valid(void)
 {
-    const uintptr_t axisram_start = (uintptr_t)&__axisram_start;
-    const uintptr_t sram_start = (uintptr_t)&__tier_sram_start;
-    const uintptr_t sram_end = (uintptr_t)&__tier_sram_end;
-    const uintptr_t npu_start = (uintptr_t)&__tier_npu_start;
-    const uintptr_t npu_end = (uintptr_t)&__tier_npu_end;
-    const uintptr_t nvm_start = (uintptr_t)&__uninit_start;
-    const uintptr_t nvm_end = (uintptr_t)&__uninit_end;
+    const tiku_arena_t *root = tiku_stm32n6_npu_mem_root();
 
-    if (npu_start < axisram_start || npu_end <= npu_start ||
-        (npu_end - npu_start) != (uintptr_t)TIKU_TIER_NPU_SIZE ||
-        ((npu_start | npu_end) & 31U) != 0U) {
-        return 0;
-    }
-    if (sram_end < sram_start ||
-        extents_overlap(sram_start, sram_end, npu_start, npu_end) ||
-        extents_overlap(nvm_start, nvm_end, npu_start, npu_end)) {
-        return 0;
-    }
-    return 1;
+    return root != NULL && root->capacity ==
+        (tiku_mem_arch_size_t)TIKU_NPU_SRAM_RESERVE_SIZE;
 }
 
 uint32_t tiku_npu_clock_readback(void)
@@ -151,7 +124,6 @@ int tiku_npu_power_enabled(void)
 
 int tiku_npu_init(void)
 {
-    tiku_mem_err_t attach_result;
     uint32_t clock_readback;
 
     if (npu_initialized) {
@@ -178,19 +150,9 @@ int tiku_npu_init(void)
     npu_cacheaxi_enable();
     npu_rif_configure();
 
-    attach_result = tiku_tier_attach_npu(
-        (void *)(uintptr_t)&__tier_npu_start,
-        (tiku_mem_arch_size_t)TIKU_TIER_NPU_SIZE);
-    if (attach_result != TIKU_MEM_OK) {
-        (void)tiku_tier_detach_npu();
-        npu_board_disable();
-        return TIKU_NPU_INIT_ERR_ALLOC;
-    }
-
     /* LL_ATON_RT_RuntimeInit() owns ATON clocks, OSAL, and ATON interrupts. */
     if (tiku_npu_llaton_runtime_init() != TIKU_NPU_OK) {
-        (void)tiku_tier_npu_reset();
-        (void)tiku_tier_detach_npu();
+        (void)tiku_npu_llaton_runtime_deinit();
         npu_board_disable();
         return TIKU_NPU_INIT_ERR_CONFIG;
     }
@@ -211,11 +173,6 @@ int tiku_npu_shutdown(void)
     if (rc != TIKU_NPU_OK) {
         return rc;
     }
-    if (tiku_tier_npu_reset() != TIKU_MEM_OK ||
-        tiku_tier_detach_npu() != TIKU_MEM_OK) {
-        return TIKU_NPU_ERR_STATE;
-    }
-
     npu_board_disable();
     npu_initialized = 0U;
     return TIKU_NPU_OK;

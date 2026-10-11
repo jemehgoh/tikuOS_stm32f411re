@@ -246,6 +246,9 @@ tiku_xspi_err_t tiku_xspi_init(void) {
     if (id.mfr != TIKU_XSPI_MFR_MACRONIX ||
         id.type != TIKU_XSPI_TYPE_MX25UM ||
         id.capacity != TIKU_XSPI_CAPACITY_512M) {
+        return TIKU_XSPI_ERR_ID;
+    }
+
     return TIKU_XSPI_OK;
 }
 

@@ -21,6 +21,9 @@
 #if defined(PLATFORM_STM32N6)
 #include <arch/stm32n6/tiku_ospi_arch.h>
 #include <arch/stm32n6/tiku_sram_arch.h>
+#if defined(TIKU_HAS_NPU) && TIKU_HAS_NPU
+#include <arch/stm32n6/tiku_npu_mem.h>
+#endif
 #elif defined(PLATFORM_ESP32C61)
 #include <arch/esp32c61/tiku_flash_arch.h>
 #include <arch/esp32c61/tiku_psram_arch.h>
@@ -239,7 +242,21 @@ tiku_boot_init_memory(void)
      * service, which fixes the NVM tier's extent for this boot.  The call is
      * idempotent, so a later one (BASIC, free) does nothing.  MSP430 wires
      * its tier on the first tiku_tier_init() call. */
-    (void)tiku_tier_init();
+    {
+        tiku_mem_err_t tier_result = tiku_tier_init();
+        if (tier_result != TIKU_MEM_OK) {
+            MAIN_PRINTF("Boot: tier init failed (%d)\n", (int)tier_result);
+            return TIKU_BOOT_ERROR;
+        }
+#if defined(PLATFORM_STM32N6) && defined(TIKU_HAS_NPU) && TIKU_HAS_NPU
+        tier_result = tiku_stm32n6_npu_mem_reserve();
+        if (tier_result != TIKU_MEM_OK) {
+            MAIN_PRINTF("Boot: NPU SRAM reservation failed (%d)\n",
+                        (int)tier_result);
+            return TIKU_BOOT_ERROR;
+        }
+#endif
+    }
 #endif
 
     return TIKU_BOOT_SUCCESS;
