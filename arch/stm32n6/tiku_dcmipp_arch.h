@@ -53,6 +53,157 @@ typedef enum {
     DCMIPP_INPUT_CSI = 1
 } tiku_dcmipp_input_t;
 
+/** @brief CSI-2 data-lane count. */
+typedef enum {
+    TIKU_DCMIPP_CSI_ONE_DATA_LANE = 1,
+    TIKU_DCMIPP_CSI_TWO_DATA_LANES = 2
+} tiku_dcmipp_csi_lane_count_t;
+
+/** @brief CSI logical-to-physical lane mapping. */
+typedef enum {
+    TIKU_DCMIPP_CSI_LANES_PHYSICAL = 1,
+    TIKU_DCMIPP_CSI_LANES_INVERTED = 2
+} tiku_dcmipp_csi_lane_mapping_t;
+
+/**
+ * @brief ST D-PHY bitrate selector, compatible with DCMIPP_CSI_PHY_BT_*.
+ *
+ * Values are ordered as the ST selectors from 80 Mbps through 2500 Mbps.
+ */
+typedef enum {
+    TIKU_DCMIPP_CSI_PHY_BT_80 = 0,
+    TIKU_DCMIPP_CSI_PHY_BT_90,
+    TIKU_DCMIPP_CSI_PHY_BT_100,
+    TIKU_DCMIPP_CSI_PHY_BT_110,
+    TIKU_DCMIPP_CSI_PHY_BT_120,
+    TIKU_DCMIPP_CSI_PHY_BT_130,
+    TIKU_DCMIPP_CSI_PHY_BT_140,
+    TIKU_DCMIPP_CSI_PHY_BT_150,
+    TIKU_DCMIPP_CSI_PHY_BT_160,
+    TIKU_DCMIPP_CSI_PHY_BT_170,
+    TIKU_DCMIPP_CSI_PHY_BT_180,
+    TIKU_DCMIPP_CSI_PHY_BT_190,
+    TIKU_DCMIPP_CSI_PHY_BT_205,
+    TIKU_DCMIPP_CSI_PHY_BT_220,
+    TIKU_DCMIPP_CSI_PHY_BT_235,
+    TIKU_DCMIPP_CSI_PHY_BT_250,
+    TIKU_DCMIPP_CSI_PHY_BT_275,
+    TIKU_DCMIPP_CSI_PHY_BT_300,
+    TIKU_DCMIPP_CSI_PHY_BT_325,
+    TIKU_DCMIPP_CSI_PHY_BT_350,
+    TIKU_DCMIPP_CSI_PHY_BT_400,
+    TIKU_DCMIPP_CSI_PHY_BT_450,
+    TIKU_DCMIPP_CSI_PHY_BT_500,
+    TIKU_DCMIPP_CSI_PHY_BT_550,
+    TIKU_DCMIPP_CSI_PHY_BT_600,
+    TIKU_DCMIPP_CSI_PHY_BT_650,
+    TIKU_DCMIPP_CSI_PHY_BT_700,
+    TIKU_DCMIPP_CSI_PHY_BT_750,
+    TIKU_DCMIPP_CSI_PHY_BT_800,
+    TIKU_DCMIPP_CSI_PHY_BT_850,
+    TIKU_DCMIPP_CSI_PHY_BT_900,
+    TIKU_DCMIPP_CSI_PHY_BT_950,
+    TIKU_DCMIPP_CSI_PHY_BT_1000,
+    TIKU_DCMIPP_CSI_PHY_BT_1050,
+    TIKU_DCMIPP_CSI_PHY_BT_1100,
+    TIKU_DCMIPP_CSI_PHY_BT_1150,
+    TIKU_DCMIPP_CSI_PHY_BT_1200,
+    TIKU_DCMIPP_CSI_PHY_BT_1250,
+    TIKU_DCMIPP_CSI_PHY_BT_1300,
+    TIKU_DCMIPP_CSI_PHY_BT_1350,
+    TIKU_DCMIPP_CSI_PHY_BT_1400,
+    TIKU_DCMIPP_CSI_PHY_BT_1450,
+    TIKU_DCMIPP_CSI_PHY_BT_1500,
+    TIKU_DCMIPP_CSI_PHY_BT_1550,
+    TIKU_DCMIPP_CSI_PHY_BT_1600,
+    TIKU_DCMIPP_CSI_PHY_BT_1650,
+    TIKU_DCMIPP_CSI_PHY_BT_1700,
+    TIKU_DCMIPP_CSI_PHY_BT_1750,
+    TIKU_DCMIPP_CSI_PHY_BT_1800,
+    TIKU_DCMIPP_CSI_PHY_BT_1850,
+    TIKU_DCMIPP_CSI_PHY_BT_1900,
+    TIKU_DCMIPP_CSI_PHY_BT_1950,
+    TIKU_DCMIPP_CSI_PHY_BT_2000,
+    TIKU_DCMIPP_CSI_PHY_BT_2050,
+    TIKU_DCMIPP_CSI_PHY_BT_2100,
+    TIKU_DCMIPP_CSI_PHY_BT_2150,
+    TIKU_DCMIPP_CSI_PHY_BT_2200,
+    TIKU_DCMIPP_CSI_PHY_BT_2250,
+    TIKU_DCMIPP_CSI_PHY_BT_2300,
+    TIKU_DCMIPP_CSI_PHY_BT_2350,
+    TIKU_DCMIPP_CSI_PHY_BT_2400,
+    TIKU_DCMIPP_CSI_PHY_BT_2450,
+    TIKU_DCMIPP_CSI_PHY_BT_2500
+} tiku_dcmipp_csi_phy_bitrate_t;
+
+/** @brief Parallel bus pixel format; values match ST DCMIPP format codes. */
+typedef enum {
+    TIKU_DCMIPP_PARALLEL_FORMAT_BYTE = 0,
+    TIKU_DCMIPP_PARALLEL_FORMAT_YUV422 = 0x001E0000UL,
+    TIKU_DCMIPP_PARALLEL_FORMAT_RGB565 = 0x00220000UL,
+    TIKU_DCMIPP_PARALLEL_FORMAT_RGB666 = 0x00230000UL,
+    TIKU_DCMIPP_PARALLEL_FORMAT_RGB888 = 0x00240000UL,
+    TIKU_DCMIPP_PARALLEL_FORMAT_RAW8 = 0x002A0000UL,
+    TIKU_DCMIPP_PARALLEL_FORMAT_RAW10 = 0x002B0000UL,
+    TIKU_DCMIPP_PARALLEL_FORMAT_RAW12 = 0x002C0000UL,
+    TIKU_DCMIPP_PARALLEL_FORMAT_RAW14 = 0x002D0000UL,
+    TIKU_DCMIPP_PARALLEL_FORMAT_MONO8 = 0x004A0000UL,
+    TIKU_DCMIPP_PARALLEL_FORMAT_MONO10 = 0x004B0000UL,
+    TIKU_DCMIPP_PARALLEL_FORMAT_MONO12 = 0x004C0000UL,
+    TIKU_DCMIPP_PARALLEL_FORMAT_MONO14 = 0x004D0000UL
+} tiku_dcmipp_parallel_format_t;
+
+typedef enum {
+    TIKU_DCMIPP_PARALLEL_POLARITY_LOW = 0,
+    TIKU_DCMIPP_PARALLEL_POLARITY_HIGH = 1
+} tiku_dcmipp_parallel_polarity_t;
+
+typedef enum {
+    TIKU_DCMIPP_PARALLEL_PCLK_FALLING = 0,
+    TIKU_DCMIPP_PARALLEL_PCLK_RISING = 1
+} tiku_dcmipp_parallel_pclk_t;
+
+typedef enum {
+    TIKU_DCMIPP_PARALLEL_DATA_8_BITS = 0,
+    TIKU_DCMIPP_PARALLEL_DATA_10_BITS,
+    TIKU_DCMIPP_PARALLEL_DATA_12_BITS,
+    TIKU_DCMIPP_PARALLEL_DATA_14_BITS,
+    TIKU_DCMIPP_PARALLEL_DATA_16_BITS
+} tiku_dcmipp_parallel_data_mode_t;
+
+typedef enum {
+    TIKU_DCMIPP_PARALLEL_SYNC_HARDWARE = 0,
+    TIKU_DCMIPP_PARALLEL_SYNC_EMBEDDED = 1
+} tiku_dcmipp_parallel_sync_mode_t;
+
+/** @brief Four embedded-sync delimiter bytes used by the parallel interface. */
+typedef struct {
+    uint8_t frame_start;
+    uint8_t line_start;
+    uint8_t line_end;
+    uint8_t frame_end;
+} tiku_dcmipp_parallel_sync_codes_t;
+
+/** @brief CSI-2 host and D-PHY configuration. */
+typedef struct {
+    tiku_dcmipp_csi_lane_count_t lane_count;
+    tiku_dcmipp_csi_lane_mapping_t lane_mapping;
+    tiku_dcmipp_csi_phy_bitrate_t phy_bitrate;
+} tiku_dcmipp_csi_config_t;
+
+/** @brief Parallel camera bus configuration. */
+typedef struct {
+    tiku_dcmipp_parallel_format_t format;
+    tiku_dcmipp_parallel_polarity_t vsync_polarity;
+    tiku_dcmipp_parallel_polarity_t hsync_polarity;
+    tiku_dcmipp_parallel_pclk_t pixel_clock_polarity;
+    tiku_dcmipp_parallel_data_mode_t extended_data_mode;
+    tiku_dcmipp_parallel_sync_mode_t sync_mode;
+    tiku_dcmipp_parallel_sync_codes_t sync_codes;
+    uint8_t swap_bits;
+    uint8_t swap_cycles;
+} tiku_dcmipp_parallel_config_t;
+
 /** @brief Pipe2 source selection controlled by the Pipe1 PIPEDIFF bit. */
 typedef enum {
     DCMIPP_PIPEDIFF_COUPLED = 0,
@@ -234,6 +385,25 @@ int tiku_dcmipp_arch_disable(void);
  * @return TIKU_DCMIPP_OK, or a negative error.
  */
 int tiku_dcmipp_arch_set_input(tiku_dcmipp_input_t input_type);
+
+/**
+ * @brief Configure and select the CSI-2 host input.
+ *
+ * Configures the lane merger and D-PHY for the supplied camera link, enables
+ * CSI error interrupts, and selects CSI as the DCMIPP input.
+ *
+ * @param config CSI configuration; must not be NULL.
+ * @return TIKU_DCMIPP_OK, or a negative error.
+ */
+int tiku_dcmipp_arch_config_csi(const tiku_dcmipp_csi_config_t *config);
+
+/**
+ * @brief Configure and select the parallel camera input.
+ *
+ * @param config Parallel bus configuration; must not be NULL.
+ * @return TIKU_DCMIPP_OK, or a negative error.
+ */
+int tiku_dcmipp_arch_config_parallel(const tiku_dcmipp_parallel_config_t *config);
 
 /** @brief Enable the selected DCMIPP input path. */
 int tiku_dcmipp_arch_enable_input(void);

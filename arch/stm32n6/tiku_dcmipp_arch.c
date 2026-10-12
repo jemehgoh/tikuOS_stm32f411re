@@ -12,6 +12,7 @@
 
 #include "tiku_dcmipp_arch.h"
 #include "tiku_stm32n6_regs.h"
+#include "tiku_cpu_common.h"
 
 #define TIKU_DCMIPP_POSTPROC_ENABLE (1UL << 31)
 #define TIKU_DCMIPP_STAGE_ENABLE    (1UL << 0)
@@ -26,6 +27,31 @@
 #define TIKU_DCMIPP_EVENT_ERR_MSK   (0xFUL << TIKU_DCMIPP_EVENT_ERR_POS)
 #define TIKU_DCMIPP_EVENT_FLAG_POS  12U
 #define TIKU_DCMIPP_EVENT_FLAG_MSK  (0x3FUL << TIKU_DCMIPP_EVENT_FLAG_POS)
+
+typedef struct {
+    uint8_t hsfreqrange;
+    uint16_t osc_freq_target;
+} tiku_dcmipp_snps_freq_t;
+
+/* ST's D-PHY bitrate selector table (DCMIPP_CSI_PHY_BT_80..2500). */
+static const tiku_dcmipp_snps_freq_t tiku_dcmipp_snps_freqs[63] = {
+    {0x00U, 460U}, {0x10U, 460U}, {0x20U, 460U}, {0x30U, 460U},
+    {0x01U, 460U}, {0x11U, 460U}, {0x21U, 460U}, {0x31U, 460U},
+    {0x02U, 460U}, {0x12U, 460U}, {0x22U, 460U}, {0x32U, 460U},
+    {0x03U, 460U}, {0x13U, 460U}, {0x23U, 460U}, {0x33U, 460U},
+    {0x04U, 460U}, {0x14U, 460U}, {0x25U, 460U}, {0x35U, 460U},
+    {0x05U, 460U}, {0x16U, 460U}, {0x26U, 460U}, {0x37U, 460U},
+    {0x07U, 460U}, {0x18U, 460U}, {0x28U, 460U}, {0x39U, 460U},
+    {0x09U, 460U}, {0x19U, 460U}, {0x29U, 460U}, {0x3AU, 460U},
+    {0x0AU, 460U}, {0x1AU, 460U}, {0x2AU, 460U}, {0x3BU, 460U},
+    {0x0BU, 460U}, {0x1BU, 460U}, {0x2BU, 460U}, {0x3CU, 460U},
+    {0x0CU, 460U}, {0x1CU, 460U}, {0x2CU, 460U}, {0x3DU, 285U},
+    {0x0DU, 295U}, {0x1DU, 304U}, {0x2EU, 313U}, {0x3EU, 322U},
+    {0x0EU, 331U}, {0x1EU, 341U}, {0x2FU, 350U}, {0x3FU, 359U},
+    {0x0FU, 368U}, {0x40U, 377U}, {0x41U, 387U}, {0x42U, 396U},
+    {0x43U, 405U}, {0x44U, 414U}, {0x45U, 423U}, {0x46U, 432U},
+    {0x47U, 442U}, {0x48U, 451U}, {0x49U, 460U}
+};
 
 typedef struct {
     uint8_t enabled;
@@ -69,6 +95,53 @@ static int tiku_dcmipp_fail(int err) {
 
 static uint8_t tiku_dcmipp_valid_pipe(tiku_dcmipp_pipe_t pipe) {
     return pipe == PIPE0 || pipe == PIPE1 || pipe == PIPE2;
+}
+
+static uint8_t tiku_dcmipp_valid_parallel_format(
+    tiku_dcmipp_parallel_format_t format) {
+    switch (format) {
+    case TIKU_DCMIPP_PARALLEL_FORMAT_BYTE:
+    case TIKU_DCMIPP_PARALLEL_FORMAT_YUV422:
+    case TIKU_DCMIPP_PARALLEL_FORMAT_RGB565:
+    case TIKU_DCMIPP_PARALLEL_FORMAT_RGB666:
+    case TIKU_DCMIPP_PARALLEL_FORMAT_RGB888:
+    case TIKU_DCMIPP_PARALLEL_FORMAT_RAW8:
+    case TIKU_DCMIPP_PARALLEL_FORMAT_RAW10:
+    case TIKU_DCMIPP_PARALLEL_FORMAT_RAW12:
+    case TIKU_DCMIPP_PARALLEL_FORMAT_RAW14:
+    case TIKU_DCMIPP_PARALLEL_FORMAT_MONO8:
+    case TIKU_DCMIPP_PARALLEL_FORMAT_MONO10:
+    case TIKU_DCMIPP_PARALLEL_FORMAT_MONO12:
+    case TIKU_DCMIPP_PARALLEL_FORMAT_MONO14:
+        return 1U;
+    default:
+        return 0U;
+    }
+}
+
+static void tiku_dcmipp_csi_phy_write(uint8_t reg_msb,
+                                     uint8_t reg_lsb,
+                                     uint8_t value) {
+    /* Synopsys D-PHY test-interface write sequence used by the ST HAL. */
+    TIKU_REG32(STM32N6_CSI_PHY_PTCR1) = STM32N6_CSI_PHY_PTCR1_TWM;
+    TIKU_REG32(STM32N6_CSI_PHY_PTCR0) = STM32N6_CSI_PHY_PTCR0_TCKEN;
+    TIKU_REG32(STM32N6_CSI_PHY_PTCR1) = STM32N6_CSI_PHY_PTCR1_TWM;
+    TIKU_REG32(STM32N6_CSI_PHY_PTCR0) = 0UL;
+    TIKU_REG32(STM32N6_CSI_PHY_PTCR1) = 0UL;
+    TIKU_REG32(STM32N6_CSI_PHY_PTCR1) =
+        (uint32_t)reg_msb & STM32N6_CSI_PHY_PTCR1_TDI_MSK;
+    TIKU_REG32(STM32N6_CSI_PHY_PTCR0) = STM32N6_CSI_PHY_PTCR0_TCKEN;
+    TIKU_REG32(STM32N6_CSI_PHY_PTCR0) = 0UL;
+    TIKU_REG32(STM32N6_CSI_PHY_PTCR1) = STM32N6_CSI_PHY_PTCR1_TWM;
+    TIKU_REG32(STM32N6_CSI_PHY_PTCR0) = STM32N6_CSI_PHY_PTCR0_TCKEN;
+    TIKU_REG32(STM32N6_CSI_PHY_PTCR1) =
+        STM32N6_CSI_PHY_PTCR1_TWM |
+        ((uint32_t)reg_lsb & STM32N6_CSI_PHY_PTCR1_TDI_MSK);
+    TIKU_REG32(STM32N6_CSI_PHY_PTCR0) = 0UL;
+    TIKU_REG32(STM32N6_CSI_PHY_PTCR1) =
+        (uint32_t)value & STM32N6_CSI_PHY_PTCR1_TDI_MSK;
+    TIKU_REG32(STM32N6_CSI_PHY_PTCR0) = STM32N6_CSI_PHY_PTCR0_TCKEN;
+    TIKU_REG32(STM32N6_CSI_PHY_PTCR0) = 0UL;
 }
 
 static void tiku_dcmipp_nvic_enable(uint32_t irq) {
@@ -600,6 +673,169 @@ int tiku_dcmipp_arch_set_input(tiku_dcmipp_input_t input_type) {
     return TIKU_DCMIPP_OK;
 }
 
+int tiku_dcmipp_arch_config_csi(const tiku_dcmipp_csi_config_t *config) {
+    if (config == NULL ||
+        (config->lane_count != TIKU_DCMIPP_CSI_ONE_DATA_LANE &&
+         config->lane_count != TIKU_DCMIPP_CSI_TWO_DATA_LANES) ||
+        (config->lane_mapping != TIKU_DCMIPP_CSI_LANES_PHYSICAL &&
+         config->lane_mapping != TIKU_DCMIPP_CSI_LANES_INVERTED) ||
+        (uint32_t)config->phy_bitrate >=
+            (uint32_t)(sizeof(tiku_dcmipp_snps_freqs) /
+                       sizeof(tiku_dcmipp_snps_freqs[0]))) {
+        return tiku_dcmipp_fail(TIKU_DCMIPP_ERR_INVALID);
+    }
+    if (tiku_dcmipp_require_enabled() != TIKU_DCMIPP_OK) {
+        return dcmipp.last_error;
+    }
+
+    const tiku_dcmipp_snps_freq_t *freq =
+        &tiku_dcmipp_snps_freqs[(uint32_t)config->phy_bitrate];
+    uint32_t lane0_map =
+        (config->lane_mapping == TIKU_DCMIPP_CSI_LANES_PHYSICAL) ? 1UL : 2UL;
+    uint32_t lane1_map =
+        (config->lane_mapping == TIKU_DCMIPP_CSI_LANES_PHYSICAL) ? 2UL : 1UL;
+    uint32_t lane_error_mask = STM32N6_CSI_IER1_ALL;
+    uint32_t active_lane_error_mask;
+
+    /* Switch away from parallel capture while the CSI host is initialized. */
+    TIKU_REG32(STM32N6_DCMIPP_PRCR) &= ~STM32N6_DCMIPP_PRCR_ENABLE;
+    TIKU_REG32(STM32N6_DCMIPP_CMCR) |= STM32N6_DCMIPP_CMCR_INSEL;
+
+    TIKU_REG32(STM32N6_CSI_CR) &= ~STM32N6_CSI_CR_CSIEN;
+    TIKU_REG32(STM32N6_CSI_LMCFGR) =
+        ((uint32_t)config->lane_count << STM32N6_CSI_LMCFGR_LANENB_POS) |
+        (lane0_map << STM32N6_CSI_LMCFGR_DL0MAP_POS) |
+        (lane1_map << STM32N6_CSI_LMCFGR_DL1MAP_POS);
+    TIKU_REG32(STM32N6_CSI_CR) |= STM32N6_CSI_CR_CSIEN;
+
+    /* Enable shared CSI error and short-packet interrupt sources. */
+    TIKU_REG32(STM32N6_CSI_IER0) |=
+        STM32N6_CSI_IER0_CCFIFOFIE | STM32N6_CSI_IER0_SYNCERRIE |
+        STM32N6_CSI_IER0_SPKTERRIE | STM32N6_CSI_IER0_IDERRIE |
+        STM32N6_CSI_IER0_SPKTIE;
+
+    /* Enable D-PHY errors for only the physical receive lanes in use. */
+    if (config->lane_count == TIKU_DCMIPP_CSI_ONE_DATA_LANE) {
+        if (config->lane_mapping == TIKU_DCMIPP_CSI_LANES_PHYSICAL) {
+            active_lane_error_mask = STM32N6_CSI_IER1_ESOTDL0IE |
+                STM32N6_CSI_IER1_ESOTSYNCDL0IE | STM32N6_CSI_IER1_EESCDL0IE |
+                STM32N6_CSI_IER1_ESYNCESCDL0IE | STM32N6_CSI_IER1_ECTRLDL0IE;
+        } else {
+            active_lane_error_mask = STM32N6_CSI_IER1_ESOTDL1IE |
+                STM32N6_CSI_IER1_ESOTSYNCDL1IE | STM32N6_CSI_IER1_EESCDL1IE |
+                STM32N6_CSI_IER1_ESYNCESCDL1IE | STM32N6_CSI_IER1_ECTRLDL1IE;
+        }
+    } else {
+        active_lane_error_mask = lane_error_mask;
+    }
+    TIKU_REG32(STM32N6_CSI_IER1) &= ~lane_error_mask;
+    TIKU_REG32(STM32N6_CSI_IER1) |= active_lane_error_mask;
+
+    /* Reset and configure the Synopsys D-PHY using ST's test-interface flow. */
+    TIKU_REG32(STM32N6_CSI_PHY_PRCR) &= ~STM32N6_CSI_PHY_PEN;
+    TIKU_REG32(STM32N6_CSI_PCR) = 0UL;
+    TIKU_REG32(STM32N6_CSI_PHY_PTCR0) = STM32N6_CSI_PHY_PTCR0_TCKEN;
+    tiku_cpu_stm32n6_delay_ms(1U);
+    TIKU_REG32(STM32N6_CSI_PHY_PTCR0) = 0UL;
+
+    TIKU_REG32(STM32N6_CSI_PHY_PFCR) =
+        (0x28UL << STM32N6_CSI_PHY_PFCR_CCFR_POS) |
+        ((uint32_t)freq->hsfreqrange << STM32N6_CSI_PHY_PFCR_HSFR_POS);
+    tiku_dcmipp_csi_phy_write(0x00U, 0x08U, 0x38U);
+    tiku_dcmipp_csi_phy_write(0x00U, 0xE4U, 0x11U);
+    tiku_dcmipp_csi_phy_write(0x00U, 0xE3U,
+                              (uint8_t)(freq->osc_freq_target >> 8));
+    tiku_dcmipp_csi_phy_write(0x00U, 0xE3U,
+                              (uint8_t)(freq->osc_freq_target & 0xFFU));
+    TIKU_REG32(STM32N6_CSI_PHY_PFCR) =
+        (0x28UL << STM32N6_CSI_PHY_PFCR_CCFR_POS) |
+        ((uint32_t)freq->hsfreqrange << STM32N6_CSI_PHY_PFCR_HSFR_POS) |
+        STM32N6_CSI_PHY_PFCR_DLD;
+
+    uint32_t phy_control = STM32N6_CSI_PCR_DL0EN | STM32N6_CSI_PCR_CLEN |
+                           STM32N6_CSI_PCR_NPWRDOWN;
+    if (config->lane_count == TIKU_DCMIPP_CSI_TWO_DATA_LANES) {
+        phy_control |= STM32N6_CSI_PCR_DL1EN;
+    }
+    TIKU_REG32(STM32N6_CSI_PCR) = phy_control;
+    TIKU_REG32(STM32N6_CSI_PHY_PRCR) |= STM32N6_CSI_PHY_PEN;
+    TIKU_REG32(STM32N6_CSI_PHY_PMCR) = 0UL;
+
+    tiku_dcmipp_nvic_enable(STM32N6_IRQ_CSI);
+    dcmipp.input = DCMIPP_INPUT_CSI;
+    dcmipp.input_enabled = 1U;
+    dcmipp.last_error = TIKU_DCMIPP_OK;
+    return TIKU_DCMIPP_OK;
+}
+
+int tiku_dcmipp_arch_config_parallel(
+    const tiku_dcmipp_parallel_config_t *config) {
+    if (config == NULL || !tiku_dcmipp_valid_parallel_format(config->format) ||
+        config->vsync_polarity > TIKU_DCMIPP_PARALLEL_POLARITY_HIGH ||
+        config->hsync_polarity > TIKU_DCMIPP_PARALLEL_POLARITY_HIGH ||
+        config->pixel_clock_polarity > TIKU_DCMIPP_PARALLEL_PCLK_RISING ||
+        config->extended_data_mode > TIKU_DCMIPP_PARALLEL_DATA_16_BITS ||
+        config->sync_mode > TIKU_DCMIPP_PARALLEL_SYNC_EMBEDDED ||
+        config->swap_bits > 1U || config->swap_cycles > 1U) {
+        return tiku_dcmipp_fail(TIKU_DCMIPP_ERR_INVALID);
+    }
+    if (tiku_dcmipp_require_enabled() != TIKU_DCMIPP_OK) {
+        return dcmipp.last_error;
+    }
+
+    uint32_t prcr = (uint32_t)config->format;
+    if (config->vsync_polarity == TIKU_DCMIPP_PARALLEL_POLARITY_HIGH) {
+        prcr |= STM32N6_DCMIPP_PRCR_VSPOL;
+    }
+    if (config->hsync_polarity == TIKU_DCMIPP_PARALLEL_POLARITY_HIGH) {
+        prcr |= STM32N6_DCMIPP_PRCR_HSPOL;
+    }
+    if (config->pixel_clock_polarity == TIKU_DCMIPP_PARALLEL_PCLK_RISING) {
+        prcr |= STM32N6_DCMIPP_PRCR_PCKPOL;
+    }
+    prcr |= (uint32_t)config->extended_data_mode << STM32N6_DCMIPP_PRCR_EDM_POS;
+    if (config->sync_mode == TIKU_DCMIPP_PARALLEL_SYNC_EMBEDDED) {
+        prcr |= STM32N6_DCMIPP_PRCR_ESS;
+    }
+    if (config->swap_cycles != 0U) {
+        prcr |= STM32N6_DCMIPP_PRCR_SWAPCYCLES;
+    }
+    if (config->swap_bits != 0U) {
+        prcr |= STM32N6_DCMIPP_PRCR_SWAPBITS;
+    }
+
+    /* Parallel selection disables and powers down the CSI host and PHY. */
+    TIKU_REG32(STM32N6_CSI_CR) &= ~STM32N6_CSI_CR_CSIEN;
+    TIKU_REG32(STM32N6_CSI_PHY_PRCR) &= ~STM32N6_CSI_PHY_PEN;
+    TIKU_REG32(STM32N6_CSI_PCR) = 0UL;
+    TIKU_REG32(STM32N6_CSI_IER0) = 0UL;
+    TIKU_REG32(STM32N6_CSI_IER1) = 0UL;
+    tiku_dcmipp_nvic_disable(STM32N6_IRQ_CSI);
+
+    TIKU_REG32(STM32N6_DCMIPP_PRCR) = prcr;
+    if (config->sync_mode == TIKU_DCMIPP_PARALLEL_SYNC_EMBEDDED) {
+        TIKU_REG32(STM32N6_DCMIPP_PRESCR) =
+            ((uint32_t)config->sync_codes.frame_start) |
+            ((uint32_t)config->sync_codes.line_start << STM32N6_DCMIPP_PRESCR_LSC_POS) |
+            ((uint32_t)config->sync_codes.line_end << STM32N6_DCMIPP_PRESCR_LEC_POS) |
+            ((uint32_t)config->sync_codes.frame_end << STM32N6_DCMIPP_PRESCR_FEC_POS);
+        TIKU_REG32(STM32N6_DCMIPP_PRESUR) = 0xFFFFFFFFUL;
+    }
+    TIKU_REG32(STM32N6_DCMIPP_CMFCR) =
+        STM32N6_DCMIPP_CLEAR_PARALLEL_SYNC_ERROR;
+    TIKU_REG32(STM32N6_DCMIPP_PRIER) |= STM32N6_DCMIPP_PRIER_ERRIE;
+    TIKU_REG32(STM32N6_DCMIPP_CMIER) |=
+        STM32N6_DCMIPP_IT_PARALLEL_SYNC_ERR;
+    TIKU_REG32(STM32N6_DCMIPP_PRCR) |= STM32N6_DCMIPP_PRCR_ENABLE;
+    TIKU_REG32(STM32N6_DCMIPP_CMCR) &= ~STM32N6_DCMIPP_CMCR_INSEL;
+
+    tiku_dcmipp_nvic_enable(STM32N6_IRQ_DCMIPP);
+    dcmipp.input = DCMIPP_INPUT_PARALLEL;
+    dcmipp.input_enabled = 1U;
+    dcmipp.last_error = TIKU_DCMIPP_OK;
+    return TIKU_DCMIPP_OK;
+}
+
 int tiku_dcmipp_arch_enable_input(void) {
     if (tiku_dcmipp_require_enabled() != TIKU_DCMIPP_OK) {
         return dcmipp.last_error;
@@ -607,6 +843,9 @@ int tiku_dcmipp_arch_enable_input(void) {
 
     if (dcmipp.input == DCMIPP_INPUT_PARALLEL) {
         TIKU_REG32(STM32N6_DCMIPP_PRCR) |= STM32N6_DCMIPP_PRCR_ENABLE;
+    } else {
+        TIKU_REG32(STM32N6_CSI_CR) |= STM32N6_CSI_CR_CSIEN;
+        TIKU_REG32(STM32N6_CSI_PHY_PRCR) |= STM32N6_CSI_PHY_PEN;
     }
     dcmipp.input_enabled = 1U;
     dcmipp.last_error = TIKU_DCMIPP_OK;
@@ -620,6 +859,9 @@ int tiku_dcmipp_arch_disable_input(void) {
 
     if (dcmipp.input == DCMIPP_INPUT_PARALLEL) {
         TIKU_REG32(STM32N6_DCMIPP_PRCR) &= ~STM32N6_DCMIPP_PRCR_ENABLE;
+    } else {
+        TIKU_REG32(STM32N6_CSI_CR) &= ~STM32N6_CSI_CR_CSIEN;
+        TIKU_REG32(STM32N6_CSI_PHY_PRCR) &= ~STM32N6_CSI_PHY_PEN;
     }
     dcmipp.input_enabled = 0U;
     dcmipp.last_error = TIKU_DCMIPP_OK;
