@@ -1976,6 +1976,7 @@ SRCS += arch/stm32n6/tiku_trng_arch.c
 SRCS += arch/stm32n6/tiku_lcd_arch.c
 SRCS += arch/stm32n6/tiku_dma_arch.c
 SRCS += arch/stm32n6/tiku_dcmipp_arch.c
+SRCS += arch/stm32n6/tiku_ltdc_arch.c
 SRCS += arch/stm32n6/tiku_pwm_arch.c
 SRCS += arch/stm32n6/tiku_xspi_arch.c
 SRCS += arch/stm32n6/tiku_ospi_arch.c

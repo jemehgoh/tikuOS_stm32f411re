@@ -40,10 +40,10 @@ extern int main(void);
 
 typedef void (*stm32n6_isr_t)(void);
 
-/* 160 external IRQs after the 16 system vectors: 176 entries, 704 bytes.
- * VTOR needs the table aligned to the next power of two, 1024, which the
- * image base meets. */
-#define STM32N6_NUM_EXT_IRQS    160
+/* IRQ 194 is the highest vector used by the LTDC up-layer error source.
+ * Include slots 0..194 so the designated vector entries are inside the table.
+ * The resulting 211-entry table is 844 bytes and remains 1024-byte aligned. */
+#define STM32N6_NUM_EXT_IRQS    195
 
 /**
  * @brief Default handler: park the core on an unhandled exception.
@@ -81,6 +81,10 @@ void tiku_stm32n6_csi_isr(void)             __attribute__((weak, alias("stm32n6_
 void tiku_stm32n6_dcmipp_isr(void)          __attribute__((weak, alias("stm32n6_default_handler")));
 void tiku_stm32n6_gpdma_ch0_isr(void)       __attribute__((weak, alias("stm32n6_default_handler")));
 void tiku_stm32n6_npu_end_of_epoch_isr(void) __attribute__((weak, alias("stm32n6_default_handler")));
+void tiku_stm32n6_ltdc_lo_isr(void)         __attribute__((weak, alias("stm32n6_default_handler")));
+void tiku_stm32n6_ltdc_lo_err_isr(void)     __attribute__((weak, alias("stm32n6_default_handler")));
+void tiku_stm32n6_ltdc_up_isr(void)         __attribute__((weak, alias("stm32n6_default_handler")));
+void tiku_stm32n6_ltdc_up_err_isr(void)     __attribute__((weak, alias("stm32n6_default_handler")));
 
 /* One EXTI vector per line; tiku_gpio_irq_arch.c defines the handlers. */
 #define EXTI_WEAK(n) \
@@ -139,9 +143,9 @@ void tiku_stm32n6_startup(void) {
     /* _GLOBAL_OFFSET_TABLE_ has special GOTPC relocation semantics, so use the
      * ordinary linker symbol exported at the start of .got. */
     __asm__ volatile (
-        "ldr r9, =__tiku_got_start\n"
-        ".ltorg\n"
-        ::: "r9", "memory");
+    "movw r9, #:lower16:__tiku_got_start\n"
+    "movt r9, #:upper16:__tiku_got_start\n"
+    ::: "r9", "memory");
 #endif
 
     extern const stm32n6_isr_t tiku_stm32n6_vectors[];
@@ -234,6 +238,10 @@ const stm32n6_isr_t tiku_stm32n6_vectors[16 + STM32N6_NUM_EXT_IRQS] = {
     [16 + STM32N6_IRQ_LPTIM1]     = tiku_stm32n6_lptim1_isr,
     [16 + STM32N6_IRQ_GPDMA1_CH0] = tiku_stm32n6_gpdma_ch0_isr,
     [16 + STM32N6_IRQ_NPU_END_OF_EPOCH] = tiku_stm32n6_npu_end_of_epoch_isr,
+    [16 + STM32N6_IRQ_LTDC_LO]     = tiku_stm32n6_ltdc_lo_isr,
+    [16 + STM32N6_IRQ_LTDC_LO_ERR] = tiku_stm32n6_ltdc_lo_err_isr,
+    [16 + STM32N6_IRQ_LTDC_UP]     = tiku_stm32n6_ltdc_up_isr,
+    [16 + STM32N6_IRQ_LTDC_UP_ERR] = tiku_stm32n6_ltdc_up_err_isr,
 
     [16 + STM32N6_IRQ_EXTI0 +  0] = tiku_stm32n6_exti0_isr,
     [16 + STM32N6_IRQ_EXTI0 +  1] = tiku_stm32n6_exti1_isr,
