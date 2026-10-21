@@ -5,10 +5,10 @@
  *
  * Authors: Ambuj Varshney <ambuj@tiku-os.org>
  *
- * tiku_i2c_arch.h - STM32N6 I2C stub.
+ * tiku_i2c_arch.h - STM32N6 polled I2C master.
  *
- * This port has no I2C driver: every call returns TIKU_I2C_ERR_PARAM and
- * moves no data.
+ * The selected board provides an I2C1 or I2C2 master bus. Operations block
+ * while polling the peripheral and support 7-bit addresses.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -18,24 +18,23 @@
 
 #include <interfaces/bus/tiku_i2c_bus.h>
 
-/** @brief Ignores @p config and returns TIKU_I2C_ERR_PARAM. */
+/** @brief Initialize the board's I2C master at standard or fast speed. */
 int  tiku_i2c_arch_init(const tiku_i2c_config_t *config);
 
-/** @brief Does nothing. */
+/** @brief Disable the I2C peripheral and release its pins to input mode. */
 void tiku_i2c_arch_close(void);
 
-/** @brief Sends nothing and returns TIKU_I2C_ERR_PARAM. */
+/** @brief Write a non-empty buffer to a 7-bit target address. */
 int  tiku_i2c_arch_write(uint8_t addr, const uint8_t *buf, uint16_t len);
 
-/** @brief Leaves @p buf untouched and returns TIKU_I2C_ERR_PARAM. */
+/** @brief Read a non-empty buffer from a 7-bit target address. */
 int  tiku_i2c_arch_read (uint8_t addr, uint8_t *buf, uint16_t len);
 
-/** @brief Probes nothing and returns TIKU_I2C_ERR_PARAM. */
+/** @brief Probe a 7-bit address with an address-only transaction. */
 int  tiku_i2c_arch_probe(uint8_t addr);
 
 /**
- * @brief Sends nothing, leaves @p rx_buf untouched and returns
- *        TIKU_I2C_ERR_PARAM.
+ * @brief Write then read using a repeated START and one final STOP.
  */
 int  tiku_i2c_arch_write_read(uint8_t addr,
                               const uint8_t *tx_buf, uint16_t tx_len,
