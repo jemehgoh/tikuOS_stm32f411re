@@ -23,6 +23,7 @@
 #include "tiku_n6_model_store.h"
 #include "tiku_npu_llaton.h"
 #include "tiku_npu_mem.h"
+#include "tiku_cache_arch.h"
 #include "tiku_stm32n6_regs.h"
 
 #include "ll_aton_reloc_network.h"
@@ -1315,6 +1316,15 @@ int tiku_npu_model_load(tiku_npu_model_t *model)
     ll_state.instance_installed = 1u;
     LL_ATON_RT_Init_Network(&ll_state.instance);
     ll_state.network_initialized = 1u;
+    /* The CPU just copied and relocated the image (including the epoch
+     * controller blobs) through the D-cache; the NPU fetches it over the bus,
+     * so push it out to SRAM before the first run. */
+    tiku_stm32n6_dcache_clean(ll_state.exec_arena.buf,
+                              ll_state.exec_arena.capacity);
+    if (ll_state.ext_arena.active) {
+        tiku_stm32n6_dcache_clean(ll_state.ext_arena.buf,
+                                  ll_state.ext_arena.capacity);
+    }
 #if defined(TIKU_NPU_LIFECYCLE_TEST_ENABLE)
     if (ll_test_load_failure == TIKU_NPU_LIFECYCLE_FAIL_AFTER_INIT) {
         return handle_load_runtime_error(model, TIKU_NPU_ERR_RUNTIME);
@@ -1369,6 +1379,22 @@ int tiku_npu_model_io(const tiku_npu_model_t *model, tiku_npu_model_io_t *out)
     }
     *out = model->io;
     return TIKU_NPU_OK;
+}
+
+void *tiku_npu_model_io_buffer(const tiku_npu_model_t *model, int is_output,
+                               uint16_t index)
+{
+    const LL_Buffer_InfoTypeDef *desc;
+
+    if (model == NULL || model != ll_model || !model->container_loaded ||
+        index >= (is_output ? model->io.output_count
+                            : model->io.input_count)) {
+        return NULL;
+    }
+    desc = is_output
+        ? ll_aton_reloc_get_output_buffers_info(&ll_state.instance, index)
+        : ll_aton_reloc_get_input_buffers_info(&ll_state.instance, index);
+    return desc != NULL ? (void *)LL_Buffer_addr_start(desc) : NULL;
 }
 
 int tiku_npu_model_last_error(const tiku_npu_model_t *model)
@@ -1670,20 +1696,40 @@ int tiku_npu_run(const tiku_npu_model_t *model, const void *in[], void *out[])
     for (uint16_t i = 0u; i < model->io.input_count; i++) {
         const LL_Buffer_InfoTypeDef *desc =
             ll_aton_reloc_get_input_buffers_info(&ll_state.instance, i);
-        if (in[i] == NULL || desc == NULL ||
-            ((uintptr_t)in[i] & 3u) != 0u || LL_ATON_Set_User_Input_Buffer(
-                &ll_state.instance, i, (void *)in[i],
-                LL_Buffer_len(desc)) !=
-                LL_ATON_User_IO_NOERROR) return TIKU_NPU_ERR_ARGUMENT;
+        LL_ATON_User_IO_Result_t io_rc = LL_ATON_User_IO_WRONG_INDEX;
+
+        if (in[i] == NULL && desc != NULL) {
+            io_rc = LL_ATON_User_IO_NOERROR;   /* model-owned buffer */
+        } else if (in[i] != NULL && desc != NULL &&
+                   ((uintptr_t)in[i] & 3u) == 0u) {
+            io_rc = LL_ATON_Set_User_Input_Buffer(
+                &ll_state.instance, i, (void *)in[i], LL_Buffer_len(desc));
+        }
+        if (io_rc != LL_ATON_User_IO_NOERROR) {
+            TIKU_PRINTF("NPU run: input %u rejected rc=%d len=%u\n",
+                        (unsigned)i, (int)io_rc,
+                        desc != NULL ? (unsigned)LL_Buffer_len(desc) : 0u);
+            return TIKU_NPU_ERR_ARGUMENT;
+        }
     }
     for (uint16_t i = 0u; i < model->io.output_count; i++) {
         const LL_Buffer_InfoTypeDef *desc =
             ll_aton_reloc_get_output_buffers_info(&ll_state.instance, i);
-        if (out[i] == NULL || desc == NULL ||
-            ((uintptr_t)out[i] & 3u) != 0u || LL_ATON_Set_User_Output_Buffer(
-                &ll_state.instance, i, out[i],
-                LL_Buffer_len(desc)) !=
-            LL_ATON_User_IO_NOERROR) return TIKU_NPU_ERR_ARGUMENT;
+        LL_ATON_User_IO_Result_t io_rc = LL_ATON_User_IO_WRONG_INDEX;
+
+        if (out[i] == NULL && desc != NULL) {
+            io_rc = LL_ATON_User_IO_NOERROR;   /* model-owned buffer */
+        } else if (out[i] != NULL && desc != NULL &&
+                   ((uintptr_t)out[i] & 3u) == 0u) {
+            io_rc = LL_ATON_Set_User_Output_Buffer(
+                &ll_state.instance, i, out[i], LL_Buffer_len(desc));
+        }
+        if (io_rc != LL_ATON_User_IO_NOERROR) {
+            TIKU_PRINTF("NPU run: output %u rejected rc=%d len=%u\n",
+                        (unsigned)i, (int)io_rc,
+                        desc != NULL ? (unsigned)LL_Buffer_len(desc) : 0u);
+            return TIKU_NPU_ERR_ARGUMENT;
+        }
     }
 #if defined(TIKU_NPU_RUN_TEST_ENABLE)
     ll_run_trace.submissions++;
@@ -1772,6 +1818,17 @@ void tiku_llaton_osal_signal_event(void) { }
 
 void tiku_npu_llaton_irq_bridge(void)
 {
+    /* With no inference holding the ATON and nothing latched, there is no
+     * event to deliver; the LL-ATON handler would treat the call as an error
+     * and assert on the missing owner. */
+    {
+        extern const NN_Instance_TypeDef *volatile __ll_current_aton_ip_owner;
+
+        if (__ll_current_aton_ip_owner == NULL && !ll_state.running &&
+            ATON_INTCTRL_INTREG_GET(0) == 0u) {
+            return;
+        }
+    }
     if (ll_irq_handler != NULL) ll_irq_handler();
     if (ll_model != NULL && ll_state.running) {
         (void)tiku_llaton_post_wake(ll_model, 1u);

@@ -136,6 +136,12 @@ typedef enum {
     TIKU_DCMIPP_CSI_PHY_BT_2500
 } tiku_dcmipp_csi_phy_bitrate_t;
 
+/** @brief CSI-2 data type class selected on the configured virtual channel. */
+typedef enum {
+    TIKU_DCMIPP_CSI_DT_RAW10 = 0x2B,
+    TIKU_DCMIPP_CSI_DT_RAW12 = 0x2C,
+} tiku_dcmipp_csi_data_type_t;
+
 /** @brief Parallel bus pixel format; values match ST DCMIPP format codes. */
 typedef enum {
     TIKU_DCMIPP_PARALLEL_FORMAT_BYTE = 0,
@@ -189,6 +195,8 @@ typedef struct {
     tiku_dcmipp_csi_lane_count_t lane_count;
     tiku_dcmipp_csi_lane_mapping_t lane_mapping;
     tiku_dcmipp_csi_phy_bitrate_t phy_bitrate;
+    tiku_dcmipp_csi_data_type_t data_type;
+    uint8_t virtual_channel;
 } tiku_dcmipp_csi_config_t;
 
 /** @brief Parallel camera bus configuration. */
@@ -306,6 +314,18 @@ typedef struct {
     uint32_t pitch[3];
 } tiku_dcmipp_pixel_packer_config_t;
 
+/* Pipe 2 Pixel Packer Control Register FORMAT values. */
+typedef enum {
+    TIKU_DCMIPP_PIXEL_PACKER_RGB888 = 0x0U,
+    TIKU_DCMIPP_PIXEL_PACKER_RGB565 = 0x1U,
+    TIKU_DCMIPP_PIXEL_PACKER_ARGB8888 = 0x2U,
+    TIKU_DCMIPP_PIXEL_PACKER_RGBA8888 = 0x3U,
+    TIKU_DCMIPP_PIXEL_PACKER_Y8 = 0x4U,
+    TIKU_DCMIPP_PIXEL_PACKER_YUV444 = 0x5U,
+    TIKU_DCMIPP_PIXEL_PACKER_YUYV = 0x6U,
+    TIKU_DCMIPP_PIXEL_PACKER_UYVY = 0xAU
+} tiku_dcmipp_pixel_packer_format_t;
+
 /**
  * @brief Shared ISP configuration.
  *
@@ -396,6 +416,16 @@ int tiku_dcmipp_arch_set_input(tiku_dcmipp_input_t input_type);
  * @return TIKU_DCMIPP_OK, or a negative error.
  */
 int tiku_dcmipp_arch_config_csi(const tiku_dcmipp_csi_config_t *config);
+
+/**
+ * @brief Configure the DCMIPP AXI IP-Plug for the Pipe 2 output client.
+ *
+ * Uses the N657 reset allocation for Pipe 2's client (FIFO words 448..639),
+ * 64-byte memory pages, 128-byte bursts, and the reset QoS mapping. The
+ * operation locks the IP-Plug, waits for IDLE, updates the client registers,
+ * then unlocks it. Call after tiku_dcmipp_arch_enable().
+ */
+int tiku_dcmipp_arch_axi_plug_configure_pipe2(void);
 
 /**
  * @brief Configure and select the parallel camera input.
@@ -495,6 +525,11 @@ int tiku_dcmipp_arch_pipe_flow_selection_disable(tiku_dcmipp_pipe_t pipe);
 int tiku_dcmipp_arch_pipe_crop_configure(tiku_dcmipp_pipe_t pipe,
                                          const tiku_dcmipp_crop_config_t *config);
 
+/** @brief Configure a pixel-coordinate crop rectangle (PIPE1 or PIPE2). */
+int tiku_dcmipp_arch_pipe_crop_rect(tiku_dcmipp_pipe_t pipe,
+                                    uint16_t x, uint16_t y,
+                                    uint16_t width, uint16_t height);
+
 /**
  * @brief Disable a pipe crop component and reset it to hardware defaults.
  *
@@ -592,6 +627,24 @@ int tiku_dcmipp_arch_double_buffer_enable(tiku_dcmipp_pipe_t pipe);
  */
 int tiku_dcmipp_arch_double_buffer_update_address(tiku_dcmipp_pipe_t pipe,
                                                   const tiku_dcmipp_plane_address_t *addr);
+
+/**
+ * @brief Set one of the two double-buffer destination addresses of a pipe.
+ *
+ * In double-buffer mode frames alternate between address 0 and address 1.
+ * Reprogramming the address of a frame that has just completed lets software
+ * rotate more than two buffers (for example three, so the buffer on screen is
+ * never the next write target). Only change an address that is not in use by
+ * the frame being captured.
+ *
+ * @param pipe  Pipe selector; double-buffer mode must be enabled on it.
+ * @param index 0 for the first-frame address, 1 for the second.
+ * @param addr  One to three output plane addresses.
+ * @return TIKU_DCMIPP_OK, or a negative error.
+ */
+int tiku_dcmipp_arch_double_buffer_set_address(tiku_dcmipp_pipe_t pipe,
+                                               uint8_t index,
+                                               const tiku_dcmipp_plane_address_t *addr);
 
 /**
  * @brief Configure the shared Pipe1 ISP block.

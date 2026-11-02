@@ -95,6 +95,11 @@ int tiku_n6_model_store_busy(void);
  */
 void tiku_n6_model_store_set_model_bound(int bound);
 
+#if defined(TIKU_NPU_LIFECYCLE_TEST_ENABLE)
+/** @brief Test-only view of the raw-slot update interlock. */
+int tiku_n6_model_store_test_model_bound(void);
+#endif
+
 /** @brief Report the last provisioning result. */
 tiku_n6_model_store_state_t tiku_n6_model_store_state(void);
 

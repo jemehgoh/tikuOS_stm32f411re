@@ -88,14 +88,33 @@ static void npu_board_disable(void)
     __asm__ volatile ("dsb\n\tisb" ::: "memory");
 }
 
-/* RIFSC is secure-firmware-owned board policy, not an NS runtime register.
- * Secure boot must assign NPU control/access and the NPU IRQ to NS before
- * handing control to this image. Attempting the former secure writes here is
- * an immediate security fault on a genuinely non-secure image. */
-static void npu_rif_configure(void)
+/* The NPU masters the bus on its own: the exec arena, activation pool and
+ * epoch-controller blobs sit in the secure AXISRAM alias (0x34xxxxxx), so the
+ * NPU master must be secure, privileged and CID 1 or the epoch controller
+ * cannot fetch its blob (ERR_START before the first opcode).  The CPU runs
+ * secure, as the DCMIPP and LTDC drivers rely on when they program RIFSC.
+ * Returns non-zero when a locked RIMC refused the write. */
+static int npu_rif_configure(void)
 {
-    /* Deliberately empty. RIFSC is secure-only; the NS image cannot turn a
-     * secure resource into an NS resource at runtime. */
+    const uint32_t attr_mask = STM32N6_RIFSC_RIMC_ATTR_MCID |
+                               STM32N6_RIFSC_RIMC_ATTR_SEC |
+                               STM32N6_RIFSC_RIMC_ATTR_PRIV;
+    const uint32_t attr = STM32N6_RIFSC_RIMC_NPU_CID1 |
+                          STM32N6_RIFSC_RIMC_ATTR_SEC |
+                          STM32N6_RIFSC_RIMC_ATTR_PRIV;
+    uint32_t value;
+
+    /* ST's example also makes the NPU slave secure and privileged. */
+    TIKU_REG32(STM32N6_RIFSC_RISC_SECCFGR3) |= STM32N6_RIFSC_NPU_BIT;
+    TIKU_REG32(STM32N6_RIFSC_RISC_PRIVCFGR3) |= STM32N6_RIFSC_NPU_BIT;
+    value = TIKU_REG32(STM32N6_RIFSC_RIMC_ATTR1);
+    value &= ~attr_mask;
+    value |= attr;
+    TIKU_REG32(STM32N6_RIFSC_RIMC_ATTR1) = value;
+    __asm__ volatile ("dsb\n\tisb" ::: "memory");
+    return (TIKU_REG32(STM32N6_RIFSC_RIMC_ATTR1) & attr_mask) == attr &&
+           (TIKU_REG32(STM32N6_RIFSC_RISC_SECCFGR3) &
+            STM32N6_RIFSC_NPU_BIT) != 0U;
 }
 
 /* The vector entry is retained as a thin bridge to ATON_STD_IRQHandler. */
@@ -148,7 +167,10 @@ int tiku_npu_init(void)
 
     npu_reset_release();
     npu_cacheaxi_enable();
-    npu_rif_configure();
+    if (!npu_rif_configure()) {
+        npu_board_disable();
+        return TIKU_NPU_INIT_ERR_CONFIG;
+    }
 
     /* LL_ATON_RT_RuntimeInit() owns ATON clocks, OSAL, and ATON interrupts. */
     if (tiku_npu_llaton_runtime_init() != TIKU_NPU_OK) {

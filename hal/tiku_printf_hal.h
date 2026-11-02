@@ -98,6 +98,8 @@
 #elif defined(PLATFORM_STM32N6)
 /* Console over USART1, the ST-LINK virtual COM port. */
 #include <arch/stm32n6/tiku_uart_arch.h>
+/* TIKU_PRINTF uses the direct custom formatter. libc printf is retargeted
+ * separately through _write to the same UART as raw bytes. */
 #define TIKU_PRINTF(...) tiku_uart_printf(__VA_ARGS__)
 
 /*---------------------------------------------------------------------------*/

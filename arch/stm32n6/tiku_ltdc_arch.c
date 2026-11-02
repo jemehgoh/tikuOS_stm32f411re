@@ -552,6 +552,21 @@ tiku_ltdc_status_t tiku_ltdc_configure_layer(
         return TIKU_LTDC_ERR_RANGE;
     }
 
+    /* Configure LTDC layer 1 as secure, privileged, and CID 1 before scanout.
+     * RIFSC policy is programmed by the secure + privileged CPU. */
+    TIKU_LTDC_REG_WRITE(
+        STM32N6_RIFSC_RISC_SECCFGR3,
+        TIKU_LTDC_REG_READ(STM32N6_RIFSC_RISC_SECCFGR3) |
+            STM32N6_RIFSC_LTDC_BIT(layer));
+    TIKU_LTDC_REG_WRITE(
+        STM32N6_RIFSC_RISC_PRIVCFGR3,
+        TIKU_LTDC_REG_READ(STM32N6_RIFSC_RISC_PRIVCFGR3) |
+            STM32N6_RIFSC_LTDC_BIT(layer));
+    TIKU_LTDC_REG_WRITE(
+        STM32N6_RIFSC_RIMC_ATTR(STM32N6_RIFSC_RIMC_LTDC(layer)),
+        STM32N6_RIFSC_RIMC_ATTR_SEC | STM32N6_RIFSC_RIMC_ATTR_PRIV |
+            STM32N6_RIFSC_RIMC_NPU_CID1);
+
     index = (uint32_t)layer;
     h_back = handle->global_config.hsync_width +
              handle->global_config.h_back_porch;

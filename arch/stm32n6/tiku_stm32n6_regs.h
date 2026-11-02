@@ -384,11 +384,25 @@
 #define STM32N6_RIFSC_RISC_SECCFGR3   (STM32N6_RIFSC_BASE + 0x01CU)
 #define STM32N6_RIFSC_RISC_PRIVCFGR3  (STM32N6_RIFSC_BASE + 0x03CU)
 #define STM32N6_RIFSC_RIMC_ATTR1      (STM32N6_RIFSC_BASE + 0xC14U)
+#define STM32N6_RIFSC_RIMC_ATTR(n)    (STM32N6_RIFSC_BASE + 0xC10U + 4U * (n))
+#define STM32N6_RIFSC_LTDC_BIT(layer) (1UL << (7 + layer))
 #define STM32N6_RIFSC_NPU_BIT         (1UL << 10)
 #define STM32N6_RIFSC_RIMC_ATTR_MCID  (7UL << 4)
 #define STM32N6_RIFSC_RIMC_ATTR_SEC   (1UL << 8)
 #define STM32N6_RIFSC_RIMC_ATTR_PRIV  (1UL << 9)
 #define STM32N6_RIFSC_RIMC_NPU_CID1   (1UL << 4)
+#define STM32N6_RIFSC_RIMC_LTDC(n)    (10U + n)
+/* Master-ID-agnostic CID 1 (the trusted CID RISAF passes by default) and the
+ * DCMIPP bus master, RIF_MASTER_INDEX_DCMIPP in ST's stm32n6xx_hal_rif.h. */
+#define STM32N6_RIFSC_RIMC_ATTR_CID1  (1UL << 4)
+#define STM32N6_RIFSC_RIMC_DCMIPP     9U
+/* The DCMIPP peripheral itself is RISC register 2, bit 29 (CSI is bit 28);
+ * ST's RIF_RISC_PERIPH_INDEX_DCMIPP. Its bus-master attributes (RIMC) only
+ * take effect as secure/privileged once the peripheral is configured secure
+ * and privileged here too, as the LTDC driver does for its layers. */
+#define STM32N6_RIFSC_RISC_SECCFGR2   (STM32N6_RIFSC_BASE + 0x018U)
+#define STM32N6_RIFSC_RISC_PRIVCFGR2  (STM32N6_RIFSC_BASE + 0x038U)
+#define STM32N6_RIFSC_DCMIPP_BIT      (1UL << 29)
 
 #define STM32N6_GPDMA_BASE          0x58020000UL
 #define STM32N6_GPDMA_SECCFGR       (STM32N6_GPDMA_BASE + 0x00U)
@@ -820,6 +834,13 @@
 #define STM32N6_CSI_PHY_PTCR1      (STM32N6_CSI_BASE + 0x1014U)
 #define STM32N6_CSI_PHY_PTSR       (STM32N6_CSI_BASE + 0x1018U)
 #define STM32N6_CSI_VCxCFGR2(vc)   (STM32N6_CSI_BASE + 0x014U + ((uint32_t)(vc) * 0x10U))
+/* VCxCFGR1 enables data types for a virtual channel: ALLDT forwards every data
+ * type using the common format CDTFT, or DTnEN enable individual entries (the
+ * DT1/DT2 definitions in VCxCFGR2). With none set the channel drops all pixel
+ * lines and only the frame sync packets get through. */
+#define STM32N6_CSI_VCxCFGR1(vc)   (STM32N6_CSI_BASE + 0x010U + ((uint32_t)(vc) * 0x10U))
+#define STM32N6_CSI_VCxCFGR1_ALLDT   (1UL << 0)
+#define STM32N6_CSI_VCxCFGR1_CDTFT_POS 8U
 #define STM32N6_CSI_VCxCFGR2_DT1_POS 0U
 #define STM32N6_CSI_VCxCFGR2_DT1_MSK (0x3FUL << STM32N6_CSI_VCxCFGR2_DT1_POS)
 #define STM32N6_CSI_VCxCFGR2_DT1FT_POS 8U
@@ -831,6 +852,12 @@
 
 /* CSI-2 host, lane merger, and D-PHY control fields. */
 #define STM32N6_CSI_CR_CSIEN          (1UL << 0)
+/* Virtual channel n is started by VCnSTART (a command bit, bits 2/6/10/14) and
+ * only forwards pixel data to the pipes once started; SR0.VCnSTATEF reports it
+ * active. Without the start bit SOF/EOF flags still fire but no pipe sees a
+ * frame. */
+#define STM32N6_CSI_CR_VCSTART(vc)    (1UL << (2U + 4U * (uint32_t)(vc)))
+#define STM32N6_CSI_SR0_VCSTATEF(vc)  (1UL << (17U + (uint32_t)(vc)))
 #define STM32N6_CSI_PCR_NPWRDOWN       (1UL << 0)
 #define STM32N6_CSI_PCR_CLEN           (1UL << 1)
 #define STM32N6_CSI_PCR_DL0EN          (1UL << 2)
@@ -1098,6 +1125,16 @@
 #define STM32N6_PWR_SVMCR3_VDDIO3RDY (1UL << 17)
 #define STM32N6_PWR_SVMCR3_VDDIO3VRSEL (1UL << 26)
 
+/* The VDDIO4 pad bank also comes up undeclared. On the STM32N6570-DK it holds
+ * the I2C1 pads (PC1 SDA, PH9 SCL) and the camera reset (PC8): until the supply
+ * is declared valid those pins read 0 and drive nothing. ST's BSP does this in
+ * its I2C1 MSP init (HAL_PWREx_EnableVddIO4 sets only VDDIO4SV). VDDIO4 is a
+ * 3.3 V rail on this board, so no range bit is touched. */
+#define STM32N6_PWR_SVMCR1          (STM32N6_PWR_BASE + 0x034U)
+#define STM32N6_PWR_SVMCR1_VDDIO4VMEN (1UL << 0)
+#define STM32N6_PWR_SVMCR1_VDDIO4SV (1UL << 8)
+#define STM32N6_PWR_SVMCR1_VDDIO4RDY (1UL << 16)
+
 #define STM32N6_XSPIM_BASE          0x4802B400UL
 #define STM32N6_XSPIM_CR            (STM32N6_XSPIM_BASE + 0x00U)
 #define STM32N6_XSPIM_CR_MUXEN      (1UL << 0)
@@ -1337,6 +1374,18 @@
 #define STM32N6_RCC_CCIPR4_LTDCSEL_POS 24U
 #define STM32N6_RCC_CCIPR4_LTDCSEL_MSK (3UL << STM32N6_RCC_CCIPR4_LTDCSEL_POS)
 #define STM32N6_RCC_CCIPR4_LTDCSEL_IC16 (2UL << STM32N6_RCC_CCIPR4_LTDCSEL_POS)
+
+/* IC17 is the DCMIPP kernel clock and IC18 the CSI-2 kernel clock. Both come up
+ * disabled (default source PLL4), so nothing reaches the CSI host or its D-PHY
+ * until software enables them. ST's BSP does this in MX_DCMIPP_ClockConfig. */
+#define STM32N6_RCC_IC17            17U
+#define STM32N6_RCC_IC18            18U
+#define STM32N6_RCC_DIVENR_IC17     (1UL << (STM32N6_RCC_IC17 - 1U))
+#define STM32N6_RCC_DIVENR_IC18     (1UL << (STM32N6_RCC_IC18 - 1U))
+#define STM32N6_RCC_CCIPR1          (STM32N6_RCC_BASE + 0x144U)
+#define STM32N6_RCC_CCIPR1_DCMIPPSEL_POS 20U
+#define STM32N6_RCC_CCIPR1_DCMIPPSEL_MSK (3UL << STM32N6_RCC_CCIPR1_DCMIPPSEL_POS)
+#define STM32N6_RCC_CCIPR1_DCMIPPSEL_IC17 (2UL << STM32N6_RCC_CCIPR1_DCMIPPSEL_POS)
 
 #define STM32N6_LTDC_MAX_PIXEL_CLOCK_HZ 88000000UL
 

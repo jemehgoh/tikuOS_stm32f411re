@@ -99,6 +99,7 @@ PT_THREAD(tiku_process_thread_npu_pool_test(
     size_t desc0;
     size_t desc1;
     size_t desc2;
+    size_t desc3;
     uint32_t params_offset;
     unsigned reserve_before;
     unsigned install_before;
@@ -119,6 +120,7 @@ PT_THREAD(tiku_process_thread_npu_pool_test(
     desc0 = descriptor_at(image, 0u);
     desc1 = descriptor_at(image, 1u);
     desc2 = descriptor_at(image, 2u);
+    desc3 = descriptor_at(image, 3u);
     params_offset = get32(image, IMAGE_WORD(12u));
     reserve_before = tiku_npu_llaton_test_ext_ram_reserve_attempts();
     install_before = tiku_npu_llaton_test_install_calls();
@@ -267,6 +269,9 @@ PT_THREAD(tiku_process_thread_npu_pool_test(
     put32(image, desc2 + DESC_FLAGS, UINT32_C(0x03020200));
     put32(image, desc2 + DESC_DST, UINT32_C(0x342e0000));
     put32(image, desc2 + DESC_SIZE, UINT32_C(0x20));
+    /* Slot 3 holds unrelated image data in the fixture; terminate the table
+     * after the third descriptor so only the overlap is under test. */
+    memset(image + desc3, 0, DESC_BYTES);
     check(validate(image, 0u, 0u, params_offset, 0u) ==
               TIKU_NPU_ERR_ARGUMENT,
           "overlapping fixed writable pools were accepted");
@@ -289,10 +294,17 @@ PT_THREAD(tiku_process_thread_npu_pool_test(
     make_base(image);
 
     put32(image, desc0 + DESC_FLAGS, UINT32_C(0x02010200));
-    put32(image, desc0 + DESC_DST, UINT32_C(0x343bfff0));
+    put32(image, desc0 + DESC_DST, UINT32_C(0x343bffe0));
     put32(image, desc0 + DESC_SIZE, UINT32_C(0xffffffe0));
+    check(validate(image, 0u, 0u, params_offset, 0u) == TIKU_NPU_ERR_HEADER,
+          "COPY pool larger than its parameter image was accepted");
+    make_base(image);
+
+    put32(image, desc0 + DESC_FLAGS, UINT32_C(0x02010200));
+    put32(image, desc0 + DESC_DST, UINT32_C(0x343bffe0));
+    put32(image, desc0 + DESC_SIZE, UINT32_C(0x40));
     check(validate(image, 0u, 0u, params_offset, 0u) ==
-              TIKU_NPU_ERR_ARGUMENT,
+              TIKU_NPU_ERR_CAPACITY,
           "COPY destination span overflow was accepted");
     make_base(image);
 

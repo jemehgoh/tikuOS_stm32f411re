@@ -74,16 +74,20 @@
 #define TIKU_BOARD_BTN2_INIT()      do { } while (0)
 #define TIKU_BOARD_BTN2_PRESSED()   (0)
 
-/* This port has no backscatter, ADC, I2C, one-wire or SPI driver: the
- * AVAILABLE flags are 0 and the port and pin numbers below are placeholders. */
+/* This port has no backscatter, ADC, one-wire or SPI driver. */
 #define TIKU_BOARD_BSCAT_PORT       0U
 #define TIKU_BOARD_BSCAT_PIN        0U
 #define TIKU_BOARD_ADC_AVAILABLE    0
-#define TIKU_BOARD_I2C_BRW_100K     1   /* placeholder; no I2C driver */
+#define TIKU_BOARD_I2C_BRW_100K     1
 #define TIKU_BOARD_OW_AVAILABLE     0
 #define TIKU_BOARD_OW_PIN           0U
-#define TIKU_BOARD_I2C0_SDA_PIN     0U
-#define TIKU_BOARD_I2C0_SCL_PIN     0U
+/* ST's Nucleo BSP routes I2C2 to PB11 SDA and PB10 SCL, AF4. */
+#define TIKU_BOARD_I2C_INSTANCE     2U
+#define TIKU_BOARD_I2C_SDA_PORT     STM32N6_GPIO_PORT_B
+#define TIKU_BOARD_I2C_SDA_PIN      11U
+#define TIKU_BOARD_I2C_SCL_PORT     STM32N6_GPIO_PORT_B
+#define TIKU_BOARD_I2C_SCL_PIN      10U
+#define TIKU_BOARD_I2C_AF           4U
 #define TIKU_BOARD_SPI0_MISO_PIN    0U
 #define TIKU_BOARD_SPI0_SCK_PIN     0U
 #define TIKU_BOARD_SPI0_MOSI_PIN    0U

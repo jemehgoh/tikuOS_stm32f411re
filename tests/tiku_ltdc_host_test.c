@@ -24,6 +24,21 @@ static size_t write_count;
 static uint32_t callback_count;
 static tiku_ltdc_error_flags_t callback_errors;
 static tiku_ltdc_handle_t *callback_handle;
+static uint8_t auto_clock_ready = 1U;
+
+static void test_mmio_store(uintptr_t address, uint32_t value) {
+    size_t i;
+    for (i = 0U; i < register_count; ++i) {
+        if (registers[i].address == address) {
+            registers[i].value = value;
+            return;
+        }
+    }
+    assert(register_count < (sizeof(registers) / sizeof(registers[0])));
+    registers[register_count].address = address;
+    registers[register_count].value = value;
+    ++register_count;
+}
 
 static uint32_t test_mmio_read(uintptr_t address) {
     size_t i;
@@ -54,6 +69,21 @@ static void test_mmio_write(uintptr_t address, uint32_t value) {
         ++register_count;
     }
 
+    if (address == STM32N6_RCC_CR && auto_clock_ready != 0U) {
+        uint32_t sr = test_mmio_read(STM32N6_RCC_SR);
+        if ((value & STM32N6_RCC_CR_HSION) != 0UL) {
+            sr |= STM32N6_RCC_SR_HSIRDY;
+        } else {
+            sr &= ~STM32N6_RCC_SR_HSIRDY;
+        }
+        if ((value & STM32N6_RCC_CR_PLL4ON) != 0UL) {
+            sr |= STM32N6_RCC_SR_PLL4RDY;
+        } else {
+            sr &= ~STM32N6_RCC_SR_PLL4RDY;
+        }
+        test_mmio_store(STM32N6_RCC_SR, sr);
+    }
+
     /* ICR and ICR2 are write-one-to-clear views of ISR and ISR2. */
     if (address == STM32N6_LTDC_ICR || address == STM32N6_LTDC_ICR2) {
         uintptr_t status_address = address == STM32N6_LTDC_ICR
@@ -69,8 +99,18 @@ static void test_mmio_write(uintptr_t address, uint32_t value) {
     }
 }
 
-static void test_mmio_reset(void) {
+static void test_mmio_clear(void) {
     register_count = 0U;
+    write_count = 0U;
+    auto_clock_ready = 1U;
+}
+
+static void test_mmio_reset(void) {
+    const tiku_ltdc_clock_config_t clock = {20000000UL};
+    uint32_t actual;
+    test_mmio_clear();
+    assert(tiku_ltdc_clock_configure(&clock, &actual) == TIKU_LTDC_OK);
+    assert(actual == 20000000UL);
     write_count = 0U;
 }
 
@@ -126,6 +166,73 @@ static tiku_ltdc_layer_config_t valid_layer_config(
     config.blending_factor2 = TIKU_LTDC_BLEND_CONSTANT_ALPHA;
     config.default_argb = 0xA1B2C3D4UL;
     return config;
+}
+
+static void test_clock_configuration(void) {
+    const tiku_ltdc_clock_config_t request = {20100000UL};
+    const tiku_ltdc_clock_config_t too_fast = {
+        STM32N6_LTDC_MAX_PIXEL_CLOCK_HZ + 1UL};
+    uint32_t actual = 0UL;
+    uint32_t unrelated_ccipr4 = 0xA5A55A5AUL;
+    uint32_t unrelated_divenr = 0x80000021UL;
+    uint32_t unrelated_ic16 = 0x01234567UL;
+    uint32_t expected_ic16;
+    uint32_t cr_before;
+
+    test_mmio_clear();
+    test_mmio_store(STM32N6_RCC_CR, STM32N6_RCC_CR_HSION | (1UL << 4));
+    test_mmio_store(STM32N6_RCC_SR,
+                    STM32N6_RCC_SR_HSIRDY | (1UL << 4));
+    test_mmio_store(STM32N6_RCC_CCIPR4, unrelated_ccipr4);
+    test_mmio_store(STM32N6_RCC_DIVENR, unrelated_divenr);
+    test_mmio_store(STM32N6_RCC_ICCFGR(STM32N6_RCC_IC16), unrelated_ic16);
+    cr_before = test_mmio_read(STM32N6_RCC_CR);
+
+    assert(tiku_ltdc_clock_configure(&request, &actual) == TIKU_LTDC_OK);
+    /* /60 is closer to 20.1 MHz than /59; the achieved frequency is reported. */
+    assert(actual == 20000000UL);
+    expected_ic16 = (unrelated_ic16 &
+                     ~(STM32N6_IC_INT_MSK | STM32N6_IC_SEL_MSK)) |
+                    (59UL << STM32N6_IC_INT_POS) |
+                    (STM32N6_IC_SEL_PLL4 << STM32N6_IC_SEL_POS);
+    assert(test_mmio_read(STM32N6_RCC_ICCFGR(STM32N6_RCC_IC16)) ==
+           expected_ic16);
+    assert((test_mmio_read(STM32N6_RCC_DIVENR) & ~STM32N6_RCC_DIVENR_IC16) ==
+           unrelated_divenr);
+    assert((test_mmio_read(STM32N6_RCC_DIVENR) &
+            STM32N6_RCC_DIVENR_IC16) != 0UL);
+    assert(test_mmio_read(STM32N6_RCC_CCIPR4) ==
+           ((unrelated_ccipr4 & ~STM32N6_RCC_CCIPR4_LTDCSEL_MSK) |
+            STM32N6_RCC_CCIPR4_LTDCSEL_IC16));
+    assert((test_mmio_read(STM32N6_RCC_CR) & ~STM32N6_RCC_CR_PLL4ON) ==
+           cr_before);
+    assert((test_mmio_read(STM32N6_RCC_PLL4CFGR1) &
+            STM32N6_PLL4_SEL_MSK) == 0UL);
+    assert((test_mmio_read(STM32N6_RCC_PLL4CFGR1) &
+            STM32N6_PLL4_DIVN_MSK) == (75UL << STM32N6_PLL4_DIVN_POS));
+    assert(tiku_ltdc_clock_configure(&too_fast, &actual) ==
+           TIKU_LTDC_ERR_RANGE);
+}
+
+static void test_clock_timeout_and_init_guard(void) {
+    const tiku_ltdc_clock_config_t request = {20000000UL};
+    tiku_ltdc_handle_t handle;
+    uint32_t actual = 0UL;
+
+    test_mmio_clear();
+    test_mmio_store(STM32N6_RCC_CR, STM32N6_RCC_CR_HSION);
+    test_mmio_store(STM32N6_RCC_SR, STM32N6_RCC_SR_HSIRDY);
+    auto_clock_ready = 0U;
+    assert(tiku_ltdc_clock_configure(&request, &actual) ==
+           TIKU_LTDC_ERR_CLOCK);
+    assert(tiku_ltdc_init(&handle) == TIKU_LTDC_ERR_CLOCK);
+    assert((test_mmio_read(STM32N6_RCC_APB5ENR) &
+            STM32N6_RCC_APB5ENR_LTDC) == 0UL);
+
+    auto_clock_ready = 1U;
+    assert(tiku_ltdc_clock_configure(&request, &actual) == TIKU_LTDC_OK);
+    assert(tiku_ltdc_init(&handle) == TIKU_LTDC_OK);
+    assert(tiku_ltdc_deinit(&handle) == TIKU_LTDC_OK);
 }
 
 static void test_init_and_deinit(void) {
@@ -600,6 +707,8 @@ static void test_irq_bank_routing_and_errors(void) {
 }
 
 int main(void) {
+    test_clock_configuration();
+    test_clock_timeout_and_init_guard();
     test_init_and_deinit();
     test_global_configuration();
     test_layer_formats_and_reload();

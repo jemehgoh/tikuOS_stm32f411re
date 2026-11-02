@@ -49,8 +49,18 @@ static void make_valid(uint8_t *image)
 {
     memcpy(image, tiku_npu_stm32n6_identity_corrupt,
            tiku_npu_stm32n6_identity_corrupt_len);
-    /* The checked-in fixture differs from a valid image only at this site. */
+    /* The checked-in fixture differs from a valid image at this relocation
+     * site and in its first pool descriptor: the fixture's COPY initializer
+     * (source offset 0x300, size 1) runs past the end of the parameter image
+     * once the preflight rounds the span to 8 bytes.  Turn it into the
+     * combined-image read-only parameter pool, as the pool test does. */
+    size_t desc0 = raw_offset(image, 4u) + raw_offset(image, 11u);
+
     put32(image, raw_offset(image, 9u), UINT32_C(0x40000000));
+    put32(image, desc0 + 4u, UINT32_C(0x01010100));  /* flags */
+    put32(image, desc0 + 8u, UINT32_C(0));           /* foff  */
+    put32(image, desc0 + 12u, UINT32_C(0));          /* dst   */
+    put32(image, desc0 + 16u, UINT32_C(4));          /* size  */
 }
 
 static int preflight(const uint8_t *image, size_t length)

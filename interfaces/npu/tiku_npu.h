@@ -142,7 +142,24 @@ int tiku_npu_model_unload(tiku_npu_model_t *model);
 int tiku_npu_model_io(const tiku_npu_model_t *model,
                       tiku_npu_model_io_t *out);
 
-/** Start one nonblocking LL-ATON inference. */
+/**
+ * Return the model-owned buffer of one input or output, or NULL.
+ *
+ * Networks exported with their I/O inside the activation pool cannot take a
+ * caller buffer.  Fill the input here before tiku_npu_run() and read the
+ * outputs here after completion.  Pass NULL for that entry in tiku_npu_run().
+ * The pointer is valid only while the model is loaded.
+ */
+void *tiku_npu_model_io_buffer(const tiku_npu_model_t *model, int is_output,
+                               uint16_t index);
+
+/**
+ * Start one nonblocking LL-ATON inference.
+ *
+ * An in[]/out[] entry that is NULL selects the model-owned buffer returned by
+ * tiku_npu_model_io_buffer(); a non-NULL entry is bound as a user buffer and
+ * is rejected with TIKU_NPU_ERR_ARGUMENT if the network does not accept one.
+ */
 int tiku_npu_run(const tiku_npu_model_t *model,
                  const void *in[], void *out[]);
 

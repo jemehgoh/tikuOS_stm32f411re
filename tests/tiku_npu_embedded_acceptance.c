@@ -18,6 +18,8 @@
 #include <arch/stm32n6/tiku_stm32n6_regs.h>
 #include <arch/stm32n6/tiku_npu_arch.h>
 #include <arch/stm32n6/tiku_npu_llaton.h>
+#include <arch/stm32n6/tiku_cache_arch.h>
+#include <arch/stm32n6/tiku_n6_model_store.h>
 #include <drivers/stm32n6/npu/models/stm32n6_network_model.h>
 
 #include "ll_aton_rt_user_api.h"
@@ -68,30 +70,53 @@ static int npu_embedded_tensor_bytes(const tiku_npu_tensor_t *tensor,
     return 1;
 }
 
+/* The network was exported with its I/O inside the AXISRAM5 activation pool,
+ * so the buffers are owned by the model: fetch them after load and pass NULL
+ * to tiku_npu_run(). */
+static int8_t *npu_embedded_in;
+static int8_t *npu_embedded_out[TIKU_NPU_FIXTURE_OUTPUT_COUNT];
+static size_t npu_embedded_out_bytes[TIKU_NPU_FIXTURE_OUTPUT_COUNT];
+static unsigned npu_embedded_out_count;
+
 static void npu_embedded_fill(size_t input_bytes)
 {
-    volatile int8_t *input =
-        (volatile int8_t *)TIKU_NPU_FIXTURE_INPUT_ADDRESS;
-
     /* Use a deterministic signed image-like INT8 input. */
     for (size_t i = 0u; i < input_bytes; i++) {
-        input[i] = (int8_t)((i & 63U) - 32);
+        npu_embedded_in[i] = (int8_t)((i & 63U) - 32);
+    }
+    tiku_stm32n6_dcache_clean(npu_embedded_in, input_bytes);
+}
+
+/* Poison every output so an untouched buffer is detectable after the run. */
+static void npu_embedded_prime_outputs(void)
+{
+    for (unsigned o = 0u; o < npu_embedded_out_count; o++) {
+        for (size_t i = 0u; i < npu_embedded_out_bytes[o]; i++) {
+            npu_embedded_out[o][i] = (int8_t)0x5a;
+        }
+        tiku_stm32n6_dcache_clean(npu_embedded_out[o],
+                                  npu_embedded_out_bytes[o]);
     }
 }
 
-static void npu_embedded_check_output(size_t output_bytes)
+static void npu_embedded_check_outputs(void)
 {
-    volatile const int8_t *output =
-        (volatile const int8_t *)TIKU_NPU_FIXTURE_OUTPUT_ADDRESS;
-    int unchanged = 1;
+    for (unsigned o = 0u; o < npu_embedded_out_count; o++) {
+        int unchanged = 1;
 
-    for (size_t i = 0u; i < output_bytes; i++) {
-        if (output[i] != (int8_t)0x5a) {
-            unchanged = 0;
-            break;
+        tiku_stm32n6_dcache_invalidate(npu_embedded_out[o],
+                                       npu_embedded_out_bytes[o]);
+        for (size_t i = 0u; i < npu_embedded_out_bytes[o]; i++) {
+            if (npu_embedded_out[o][i] != (int8_t)0x5a) {
+                unchanged = 0;
+                break;
+            }
         }
+        if (unchanged) {
+            TIKU_PRINTF("NPU output %u was not written\n", o);
+        }
+        npu_embedded_check(!unchanged, "network output was not written");
     }
-    npu_embedded_check(!unchanged, "network output was not written");
 }
 
 PT_THREAD(tiku_process_thread_npu_embedded_observer(
@@ -113,16 +138,14 @@ PT_THREAD(tiku_process_thread_npu_embedded_observer(
 PT_THREAD(tiku_process_thread_npu_embedded_owner(
     struct pt *process_pt, tiku_event_t ev, tiku_event_data_t data))
 {
-    const void *inputs[] = {
-        (const void *)TIKU_NPU_FIXTURE_INPUT_ADDRESS
-    };
-    void *outputs[] = {
-        (void *)TIKU_NPU_FIXTURE_OUTPUT_ADDRESS
-    };
+    /* Protothread locals do not survive a WAIT_EVENT: anything used after
+     * one is static. */
+    static const void *inputs[1];
+    static void *outputs[TIKU_NPU_FIXTURE_OUTPUT_COUNT];
     tiku_npu_model_io_t io;
     int rc;
-    int model_loaded = 0;
-    int npu_initialized = 0;
+    static int model_loaded;
+    static int npu_initialized;
     int io_ok;
     size_t input_bytes = 0u;
     size_t output_bytes = 0u;
@@ -138,6 +161,8 @@ PT_THREAD(tiku_process_thread_npu_embedded_owner(
     uint32_t required_exec_size;
     uint32_t requested_ext_size;
     size_t ext_size;
+    tiku_n6_model_image_t model_image;
+    uintptr_t expected_param;
 #endif
 
     (void)data;
@@ -164,33 +189,46 @@ PT_THREAD(tiku_process_thread_npu_embedded_owner(
     if (rc != TIKU_NPU_OK) goto npu_embedded_report;
     model_loaded = 1;
 
-    // rc = tiku_npu_model_io(&tiku_npu_fixture_model, &io);
-    // io_ok = rc == TIKU_NPU_OK && io.input_count == 1u &&
-    //         io.output_count == 1u &&
-    //         io.inputs[0].type == TIKU_NPU_TENSOR_INT8 &&
-    //         io.inputs[0].rank == 4u &&
-    //         io.inputs[0].shape[0] == 1u &&
-    //         io.inputs[0].shape[1] == 3u &&
-    //         io.inputs[0].shape[2] == 192u &&
-    //         io.inputs[0].shape[3] == 192u &&
-    //         io.outputs[0].type == TIKU_NPU_TENSOR_INT8 &&
-    //         io.outputs[0].rank == 3u &&
-    //         io.outputs[0].shape[0] == 1u &&
-    //         io.outputs[0].shape[1] == 5u &&
-    //         io.outputs[0].shape[2] == 756u &&
-    //         npu_embedded_tensor_bytes(&io.inputs[0], &input_bytes) &&
-    //         npu_embedded_tensor_bytes(&io.outputs[0], &output_bytes);
-    // npu_embedded_check(io_ok,
-    //                    "deployed network I/O metadata mismatch");
-    // if (!io_ok) goto npu_embedded_report;
-    npu_embedded_check(input_bytes <= TIKU_NPU_FIXTURE_INPUT_BYTES,
-                       "network input exceeds the fixture buffer");
-    npu_embedded_check(output_bytes <= TIKU_NPU_FIXTURE_OUTPUT_BYTES,
-                       "network output exceeds the fixture buffer");
-    if (input_bytes > TIKU_NPU_FIXTURE_INPUT_BYTES ||
-        output_bytes > TIKU_NPU_FIXTURE_OUTPUT_BYTES) {
-        goto npu_embedded_report;
+    rc = tiku_npu_model_io(&tiku_npu_fixture_model, &io);
+    io_ok = rc == TIKU_NPU_OK && io.input_count == 1u &&
+            io.output_count == TIKU_NPU_FIXTURE_OUTPUT_COUNT &&
+            io.inputs[0].type == TIKU_NPU_TENSOR_INT8 &&
+            io.inputs[0].rank == 4u &&
+            io.inputs[0].shape[0] == 1u &&
+            io.inputs[0].shape[1] == TIKU_NPU_FIXTURE_INPUT_CHANNELS &&
+            io.inputs[0].shape[2] == TIKU_NPU_FIXTURE_INPUT_HEIGHT &&
+            io.inputs[0].shape[3] == TIKU_NPU_FIXTURE_INPUT_WIDTH &&
+            npu_embedded_tensor_bytes(&io.inputs[0], &input_bytes) &&
+            input_bytes == TIKU_NPU_FIXTURE_INPUT_BYTES;
+    npu_embedded_out_count = 0u;
+    for (unsigned o = 0u; io_ok && o < io.output_count; o++) {
+        const tiku_npu_tensor_t *tn = &io.outputs[o];
+
+        io_ok = tn->type == TIKU_NPU_TENSOR_INT8 &&
+                npu_embedded_tensor_bytes(tn, &output_bytes) &&
+                output_bytes <= TIKU_NPU_FIXTURE_OUTPUT_MAX_BYTES;
+        if (io_ok) {
+            npu_embedded_out_bytes[o] = output_bytes;
+            npu_embedded_out_count++;
+            npu_embedded_out[o] = tiku_npu_model_io_buffer(
+                &tiku_npu_fixture_model, 1, (uint16_t)o);
+            io_ok = npu_embedded_out[o] != NULL;
+            outputs[o] = NULL;
+        }
+        TIKU_PRINTF("NPU io out%u: rank=%u shape=[%u,%u,%u,%u] bytes=%u zp=%d\n",
+                    o, (unsigned)tn->rank, (unsigned)tn->shape[0],
+                    (unsigned)tn->shape[1], (unsigned)tn->shape[2],
+                    (unsigned)tn->shape[3], (unsigned)output_bytes,
+                    (int)tn->zero_point);
     }
+    npu_embedded_check(io_ok,
+                       "deployed network I/O metadata mismatch");
+    if (!io_ok) goto npu_embedded_report;
+    npu_embedded_in = tiku_npu_model_io_buffer(&tiku_npu_fixture_model, 0, 0u);
+    npu_embedded_check(npu_embedded_in != NULL,
+                       "model-owned input buffer is unavailable");
+    if (npu_embedded_in == NULL) goto npu_embedded_report;
+    inputs[0] = NULL;
 
 #if defined(TIKU_NPU_RUN_TEST_ENABLE)
     tiku_npu_llaton_test_reset_run_trace();
@@ -201,21 +239,31 @@ PT_THREAD(tiku_process_thread_npu_embedded_owner(
                                          &ext_addr, &ext_size, &param_addr,
                                          &required_exec_size,
                                          &requested_ext_size);
+    /* A combined image keeps its parameters inside the mapped model slot:
+     * the runtime is handed file_ptr + the header's params_offset (word 12). */
+    expected_param = 0u;
+    if (tiku_n6_model_store_resolve(TIKU_NPU_FIXTURE_MODEL_PATH,
+                                    &model_image) == TIKU_NPU_OK) {
+        expected_param = model_image.file_ptr +
+            *(const uint32_t *)(uintptr_t)(model_image.file_ptr + 48u);
+    }
     npu_embedded_check(rc == TIKU_NPU_OK && exec_addr != 0u &&
                            (exec_addr & 7u) == 0u &&
                            exec_size == required_exec_size &&
                            requested_ext_size == 0u && ext_addr == 0u &&
-                           ext_size == 0u && param_addr == 0u,
+                           ext_size == 0u && expected_param != 0u &&
+                           param_addr == expected_param,
                        "combined model resource configuration mismatch");
 #endif
 
     npu_embedded_fill(input_bytes);
-    for (size_t i = 0u; i < output_bytes; i++) {
-        ((volatile int8_t *)TIKU_NPU_FIXTURE_OUTPUT_ADDRESS)[i] = (int8_t)0x5a;
-    }
+    npu_embedded_prime_outputs();
     npu_embedded_start = npu_embedded_cycles();
     rc = tiku_npu_run(&tiku_npu_fixture_model, inputs, outputs);
     npu_embedded_submit_cycles = npu_embedded_cycles() - npu_embedded_start;
+    if (rc != TIKU_NPU_OK) {
+        TIKU_PRINTF("NPU run rc=%d\n", rc);
+    }
     npu_embedded_check(rc == TIKU_NPU_OK, "async submit failed");
     if (rc != TIKU_NPU_OK) goto npu_embedded_report;
 
@@ -241,7 +289,7 @@ PT_THREAD(tiku_process_thread_npu_embedded_owner(
     npu_embedded_check(tiku_event_npu_model(ev, data) ==
                            &tiku_npu_fixture_model,
                        "completion carried the wrong model");
-    npu_embedded_check_output(output_bytes);
+    npu_embedded_check_outputs();
 
 #if defined(TIKU_NPU_RUN_TEST_ENABLE)
     rc = tiku_npu_llaton_test_get_run_trace(&trace);
@@ -272,14 +320,12 @@ PT_THREAD(tiku_process_thread_npu_embedded_owner(
 #endif
 
     npu_embedded_fill(input_bytes);
-    for (size_t i = 0u; i < output_bytes; i++) {
-        ((volatile int8_t *)TIKU_NPU_FIXTURE_OUTPUT_ADDRESS)[i] = (int8_t)0x5a;
-    }
+    npu_embedded_prime_outputs();
     npu_embedded_start = npu_embedded_cycles();
     tiku_npu_run_sync(&tiku_npu_fixture_model, inputs, outputs);
     npu_embedded_sync_cycles = npu_embedded_cycles() - npu_embedded_start;
     npu_embedded_done_events++;
-    npu_embedded_check_output(output_bytes);
+    npu_embedded_check_outputs();
 
 #if defined(TIKU_NPU_RUN_TEST_ENABLE)
     rc = tiku_npu_llaton_test_get_run_trace(&trace);

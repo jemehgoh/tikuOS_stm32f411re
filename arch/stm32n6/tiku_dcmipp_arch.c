@@ -14,6 +14,13 @@
 #include "tiku_stm32n6_regs.h"
 #include "tiku_cpu_common.h"
 
+#ifndef TIKU_DCMIPP_REG_READ
+#define TIKU_DCMIPP_REG_READ(address) TIKU_REG32(address)
+#endif
+#ifndef TIKU_DCMIPP_REG_WRITE
+#define TIKU_DCMIPP_REG_WRITE(address, value) (TIKU_REG32(address) = (value))
+#endif
+
 #define TIKU_DCMIPP_POSTPROC_ENABLE (1UL << 31)
 #define TIKU_DCMIPP_STAGE_ENABLE    (1UL << 0)
 #define TIKU_DCMIPP_FS_DT_MSK       0x3FUL
@@ -27,6 +34,7 @@
 #define TIKU_DCMIPP_EVENT_ERR_MSK   (0xFUL << TIKU_DCMIPP_EVENT_ERR_POS)
 #define TIKU_DCMIPP_EVENT_FLAG_POS  12U
 #define TIKU_DCMIPP_EVENT_FLAG_MSK  (0x3FUL << TIKU_DCMIPP_EVENT_FLAG_POS)
+#define TIKU_DCMIPP_AXI_WAIT_SPINS  100000UL
 
 typedef struct {
     uint8_t hsfreqrange;
@@ -612,10 +620,84 @@ int tiku_dcmipp_arch_event_from_data(tiku_event_data_t data,
     return TIKU_DCMIPP_OK;
 }
 
+/* The DCMIPP writes frames into the secure AXISRAM alias as its own bus
+ * master, not with the CPU's attributes. RISAF drops writes that are not
+ * secure, privileged and CID 1, with no error on the DCMIPP side, so set the
+ * master up the way the LTDC and HPDMA drivers do. RIFSC is written by the
+ * secure CPU; read back to catch a locked RIMC (GLOCK). */
+static int tiku_dcmipp_master_attr_configure(void) {
+    const uint32_t attr_mask = STM32N6_RIFSC_RIMC_ATTR_MCID |
+                               STM32N6_RIFSC_RIMC_ATTR_SEC |
+                               STM32N6_RIFSC_RIMC_ATTR_PRIV;
+    const uint32_t attr = STM32N6_RIFSC_RIMC_ATTR_SEC |
+                          STM32N6_RIFSC_RIMC_ATTR_PRIV |
+                          STM32N6_RIFSC_RIMC_ATTR_CID1;
+    const uintptr_t reg =
+        STM32N6_RIFSC_RIMC_ATTR(STM32N6_RIFSC_RIMC_DCMIPP);
+
+    /* The peripheral must be secure and privileged as well (ST's example calls
+     * HAL_RIF_RISC_SetSlaveSecureAttributes for the DCMIPP next to the RIMC
+     * setup): without it the master's frame writes never reach AXISRAM, while
+     * the pipes still count lines and raise frame-complete. */
+    TIKU_DCMIPP_REG_WRITE(STM32N6_RIFSC_RISC_SECCFGR2,
+                          TIKU_DCMIPP_REG_READ(STM32N6_RIFSC_RISC_SECCFGR2) |
+                              STM32N6_RIFSC_DCMIPP_BIT);
+    TIKU_DCMIPP_REG_WRITE(STM32N6_RIFSC_RISC_PRIVCFGR2,
+                          TIKU_DCMIPP_REG_READ(STM32N6_RIFSC_RISC_PRIVCFGR2) |
+                              STM32N6_RIFSC_DCMIPP_BIT);
+    if ((TIKU_DCMIPP_REG_READ(STM32N6_RIFSC_RISC_SECCFGR2) &
+         STM32N6_RIFSC_DCMIPP_BIT) == 0UL ||
+        (TIKU_DCMIPP_REG_READ(STM32N6_RIFSC_RISC_PRIVCFGR2) &
+         STM32N6_RIFSC_DCMIPP_BIT) == 0UL) {
+        return tiku_dcmipp_fail(TIKU_DCMIPP_ERR_NOT_ALLOWED);
+    }
+
+    TIKU_DCMIPP_REG_WRITE(reg, attr);
+    if ((TIKU_DCMIPP_REG_READ(reg) & attr_mask) != attr) {
+        return tiku_dcmipp_fail(TIKU_DCMIPP_ERR_NOT_ALLOWED);
+    }
+    return TIKU_DCMIPP_OK;
+}
+
+/* PLL1 runs at 1200 MHz. IC17 /4 gives the 300 MHz DCMIPP kernel clock and
+ * IC18 /60 the 20 MHz CSI-2 kernel clock, the values ST's BSP programs. The
+ * D-PHY configuration-clock range written in config_csi (CCFR 0x28) assumes
+ * that 20 MHz. */
+#define TIKU_DCMIPP_IC17_DIVIDER    4UL
+#define TIKU_DCMIPP_IC18_DIVIDER    60UL
+
+/** @brief Start one IC divider from PLL1 unless something already runs it. */
+static void tiku_dcmipp_ic_start(uint32_t index, uint32_t divider) {
+    uint32_t enable_bit = 1UL << (index - 1U);
+    uint32_t cfg;
+
+    if ((TIKU_REG32(STM32N6_RCC_DIVENR) & enable_bit) != 0UL) {
+        return;
+    }
+    cfg = TIKU_REG32(STM32N6_RCC_ICCFGR(index));
+    cfg &= ~(STM32N6_IC_INT_MSK | STM32N6_IC_SEL_MSK);
+    cfg |= (STM32N6_IC_SEL_PLL1 << STM32N6_IC_SEL_POS) |
+           ((divider - 1UL) << STM32N6_IC_INT_POS);
+    TIKU_REG32(STM32N6_RCC_ICCFGR(index)) = cfg;
+    TIKU_REG32(STM32N6_RCC_DIVENR) |= enable_bit;
+}
+
 int tiku_dcmipp_arch_enable(void) {
     TIKU_REG32(STM32N6_RCC_APB5ENR) |=
         STM32N6_RCC_APB5ENR_DCMIPP | STM32N6_RCC_APB5ENR_CSI;
     (void)TIKU_REG32(STM32N6_RCC_APB5ENR);
+
+    /* Both kernel clocks come up disabled, so without this the CSI host and
+     * D-PHY see no clock and never report a frame or an error. */
+    tiku_dcmipp_ic_start(STM32N6_RCC_IC17, TIKU_DCMIPP_IC17_DIVIDER);
+    tiku_dcmipp_ic_start(STM32N6_RCC_IC18, TIKU_DCMIPP_IC18_DIVIDER);
+    TIKU_REG32(STM32N6_RCC_CCIPR1) =
+        (TIKU_REG32(STM32N6_RCC_CCIPR1) & ~STM32N6_RCC_CCIPR1_DCMIPPSEL_MSK) |
+        STM32N6_RCC_CCIPR1_DCMIPPSEL_IC17;
+
+    if (tiku_dcmipp_master_attr_configure() != TIKU_DCMIPP_OK) {
+        return dcmipp.last_error;
+    }
 
     TIKU_REG32(STM32N6_DCMIPP_CMFCR) = STM32N6_DCMIPP_CMFCR_ALL;
     TIKU_REG32(STM32N6_DCMIPP_PRFCR) = STM32N6_DCMIPP_PRFCR_CERRF;
@@ -679,6 +761,9 @@ int tiku_dcmipp_arch_config_csi(const tiku_dcmipp_csi_config_t *config) {
          config->lane_count != TIKU_DCMIPP_CSI_TWO_DATA_LANES) ||
         (config->lane_mapping != TIKU_DCMIPP_CSI_LANES_PHYSICAL &&
          config->lane_mapping != TIKU_DCMIPP_CSI_LANES_INVERTED) ||
+        (config->data_type != TIKU_DCMIPP_CSI_DT_RAW10 &&
+         config->data_type != TIKU_DCMIPP_CSI_DT_RAW12) ||
+        config->virtual_channel > 3U ||
         (uint32_t)config->phy_bitrate >=
             (uint32_t)(sizeof(tiku_dcmipp_snps_freqs) /
                        sizeof(tiku_dcmipp_snps_freqs[0]))) {
@@ -707,6 +792,28 @@ int tiku_dcmipp_arch_config_csi(const tiku_dcmipp_csi_config_t *config) {
         (lane0_map << STM32N6_CSI_LMCFGR_DL0MAP_POS) |
         (lane1_map << STM32N6_CSI_LMCFGR_DL1MAP_POS);
     TIKU_REG32(STM32N6_CSI_CR) |= STM32N6_CSI_CR_CSIEN;
+
+    /* Program the selected VC's CSI-2 data type and packed word width. */
+    uintptr_t vc_cfgr2 = STM32N6_CSI_VCxCFGR2(config->virtual_channel);
+    uint32_t vc_value = TIKU_REG32(vc_cfgr2);
+    vc_value &= ~(STM32N6_CSI_VCxCFGR2_DT1_MSK |
+                  STM32N6_CSI_VCxCFGR2_DT1FT_MSK |
+                  STM32N6_CSI_VCxCFGR2_DT2_MSK |
+                  STM32N6_CSI_VCxCFGR2_DT2FT_MSK);
+    vc_value |= ((uint32_t)config->data_type &
+                 STM32N6_CSI_VCxCFGR2_DT1_MSK) |
+                ((config->data_type == TIKU_DCMIPP_CSI_DT_RAW10 ? 3UL : 4UL)
+                 << STM32N6_CSI_VCxCFGR2_DT1FT_POS);
+    TIKU_REG32(vc_cfgr2) = vc_value;
+
+    /* Enable the data type: VCxCFGR2 only defines DT1, VCxCFGR1 turns it on.
+     * Without this every pixel line is dropped and only frame sync packets get
+     * through. Same as ST's HAL_DCMIPP_CSI_SetVCConfig: all data types, with
+     * the common word-width format (BPP10 = 3, BPP12 = 4). */
+    TIKU_REG32(STM32N6_CSI_VCxCFGR1(config->virtual_channel)) =
+        ((config->data_type == TIKU_DCMIPP_CSI_DT_RAW10 ? 3UL : 4UL)
+         << STM32N6_CSI_VCxCFGR1_CDTFT_POS) |
+        STM32N6_CSI_VCxCFGR1_ALLDT;
 
     /* Enable shared CSI error and short-packet interrupt sources. */
     TIKU_REG32(STM32N6_CSI_IER0) |=
@@ -764,6 +871,56 @@ int tiku_dcmipp_arch_config_csi(const tiku_dcmipp_csi_config_t *config) {
     tiku_dcmipp_nvic_enable(STM32N6_IRQ_CSI);
     dcmipp.input = DCMIPP_INPUT_CSI;
     dcmipp.input_enabled = 1U;
+    dcmipp.last_error = TIKU_DCMIPP_OK;
+    return TIKU_DCMIPP_OK;
+}
+
+int tiku_dcmipp_arch_axi_plug_configure_pipe2(void) {
+    uint32_t spins;
+    uint32_t value;
+
+    if (tiku_dcmipp_require_enabled() != TIKU_DCMIPP_OK) {
+        return dcmipp.last_error;
+    }
+
+    /* IPGR2.PSTART requests a short freeze; IPGR3.IDLE acknowledges it. */
+    TIKU_DCMIPP_REG_WRITE(STM32N6_DCMIPP_IPGR2,
+                          TIKU_DCMIPP_REG_READ(STM32N6_DCMIPP_IPGR2) |
+                              STM32N6_DCMIPP_IPGR2_PSTART);
+    for (spins = 0UL; spins < TIKU_DCMIPP_AXI_WAIT_SPINS; ++spins) {
+        if ((TIKU_DCMIPP_REG_READ(STM32N6_DCMIPP_IPGR3) &
+             STM32N6_DCMIPP_IPGR3_IDLE) != 0UL) {
+            break;
+        }
+    }
+    if (spins == TIKU_DCMIPP_AXI_WAIT_SPINS) {
+        TIKU_DCMIPP_REG_WRITE(STM32N6_DCMIPP_IPGR2,
+                              TIKU_DCMIPP_REG_READ(STM32N6_DCMIPP_IPGR2) &
+                                  ~STM32N6_DCMIPP_IPGR2_PSTART);
+        return tiku_dcmipp_fail(TIKU_DCMIPP_ERR_BUSY);
+    }
+
+    value = TIKU_DCMIPP_REG_READ(STM32N6_DCMIPP_IPGR1);
+    value &= ~STM32N6_DCMIPP_IPGR1_MEMORYPAGE_MSK;
+    TIKU_DCMIPP_REG_WRITE(STM32N6_DCMIPP_IPGR1, value);
+
+    /* Client 5 is Pipe 2. Keep SVCMAPPING at reset (hardware-owned), give
+     * this single active client the default arbitration weight, and retain
+     * its full reset FIFO span. A 128-byte burst is the documented maximum. */
+    TIKU_DCMIPP_REG_WRITE(STM32N6_DCMIPP_IPC5R1,
+                          (4UL << STM32N6_DCMIPP_IPC5R1_TRAFFIC_POS) |
+                              (0UL << STM32N6_DCMIPP_IPC5R1_OTR_POS));
+    value = TIKU_DCMIPP_REG_READ(STM32N6_DCMIPP_IPC5R2);
+    value &= ~STM32N6_DCMIPP_IPC5R2_WLRU_MSK;
+    value |= 1UL << STM32N6_DCMIPP_IPC5R2_WLRU_POS;
+    TIKU_DCMIPP_REG_WRITE(STM32N6_DCMIPP_IPC5R2, value);
+    TIKU_DCMIPP_REG_WRITE(STM32N6_DCMIPP_IPC5R3,
+                          (448UL << STM32N6_DCMIPP_IPC5R3_DPREGSTART_POS) |
+                              (639UL << STM32N6_DCMIPP_IPC5R3_DPREGEND_POS));
+
+    TIKU_DCMIPP_REG_WRITE(STM32N6_DCMIPP_IPGR2,
+                          TIKU_DCMIPP_REG_READ(STM32N6_DCMIPP_IPGR2) &
+                              ~STM32N6_DCMIPP_IPGR2_PSTART);
     dcmipp.last_error = TIKU_DCMIPP_OK;
     return TIKU_DCMIPP_OK;
 }
@@ -968,6 +1125,15 @@ int tiku_dcmipp_arch_pipe_start_capture(tiku_dcmipp_pipe_t pipe,
         return tiku_dcmipp_fail(TIKU_DCMIPP_ERR_BUSY);
     }
 
+    /* A CSI virtual channel forwards nothing to the pipes until it is started
+     * (ST's HAL does this in HAL_DCMIPP_CSI_PIPE_Start). The channel begins at
+     * the next frame boundary, so this is also safe before the sensor streams.
+     * ST then polls SR0.VCnSTATEF, but that only goes active once frames are
+     * arriving, so it is left to the caller (see STM32N6_CSI_SR0_VCSTATEF). */
+    if (dcmipp.input == DCMIPP_INPUT_CSI) {
+        TIKU_REG32(STM32N6_CSI_CR) |= STM32N6_CSI_CR_VCSTART(virtual_channel);
+    }
+
     tiku_dcmipp_write_pipe_addresses(pipe, address, 0U);
     TIKU_REG32(tiku_dcmipp_fscr(pipe)) =
         tiku_dcmipp_pipe_fscr_value(pipe, &dcmipp.pipe[pipe].config,
@@ -1035,6 +1201,21 @@ int tiku_dcmipp_arch_pipe_crop_configure(tiku_dcmipp_pipe_t pipe,
         config->size | TIKU_DCMIPP_POSTPROC_ENABLE;
     dcmipp.last_error = TIKU_DCMIPP_OK;
     return TIKU_DCMIPP_OK;
+}
+
+int tiku_dcmipp_arch_pipe_crop_rect(tiku_dcmipp_pipe_t pipe,
+                                    uint16_t x, uint16_t y,
+                                    uint16_t width, uint16_t height) {
+    tiku_dcmipp_crop_config_t config;
+
+    if ((pipe != PIPE1 && pipe != PIPE2) || width == 0U || height == 0U ||
+        x > 4094U || y > 4094U || width > 4094U || height > 4094U) {
+        return tiku_dcmipp_fail(TIKU_DCMIPP_ERR_INVALID);
+    }
+    config.start = (uint32_t)x | ((uint32_t)y << 16);
+    config.size = (uint32_t)width | ((uint32_t)height << 16) |
+                  TIKU_DCMIPP_POSTPROC_ENABLE;
+    return tiku_dcmipp_arch_pipe_crop_configure(pipe, &config);
 }
 
 int tiku_dcmipp_arch_pipe_crop_disable(tiku_dcmipp_pipe_t pipe) {
@@ -1208,6 +1389,25 @@ int tiku_dcmipp_arch_double_buffer_update_address(tiku_dcmipp_pipe_t pipe,
     }
 
     tiku_dcmipp_write_pipe_addresses(pipe, addr, 1U);
+    dcmipp.last_error = TIKU_DCMIPP_OK;
+    return TIKU_DCMIPP_OK;
+}
+
+int tiku_dcmipp_arch_double_buffer_set_address(tiku_dcmipp_pipe_t pipe,
+                                               uint8_t index,
+                                               const tiku_dcmipp_plane_address_t *addr) {
+    if (!tiku_dcmipp_valid_pipe(pipe) || index > 1U ||
+        !tiku_dcmipp_valid_plane_address(pipe, addr)) {
+        return TIKU_DCMIPP_ERR_INVALID;
+    }
+    if (tiku_dcmipp_require_enabled() != TIKU_DCMIPP_OK) {
+        return dcmipp.last_error;
+    }
+    if (dcmipp.pipe[pipe].double_buffer == 0U) {
+        return tiku_dcmipp_fail(TIKU_DCMIPP_ERR_NOT_ALLOWED);
+    }
+
+    tiku_dcmipp_write_pipe_addresses(pipe, addr, index);
     dcmipp.last_error = TIKU_DCMIPP_OK;
     return TIKU_DCMIPP_OK;
 }

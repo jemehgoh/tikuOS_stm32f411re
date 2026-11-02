@@ -87,14 +87,40 @@ void tiku_uart_init(void) {
         STM32N6_USART_CR1_UE | STM32N6_USART_CR1_TE | STM32N6_USART_CR1_RE;
 }
 
-void tiku_uart_putc(char c) {
+static int uart_putc_status(char c) {
     unsigned long spins = UART_TX_SPINS;
     while ((TIKU_REG32(STM32N6_USART_ISR(UART_BASE)) & STM32N6_USART_ISR_TXE) == 0UL) {
         if (--spins == 0UL) {
-            return;
+            return -1;
         }
     }
     TIKU_REG32(STM32N6_USART_TDR(UART_BASE)) = (uint32_t)(unsigned char)c;
+    return 0;
+}
+
+void tiku_uart_putc(char c) {
+    (void)uart_putc_status(c);
+}
+
+int tiku_uart_write(const void *buffer, size_t length) {
+    const unsigned char *bytes = (const unsigned char *)buffer;
+    size_t sent = 0U;
+
+    if (buffer == NULL && length != 0U) {
+        return -1;
+    }
+
+    while (sent < length) {
+        if (uart_putc_status((char)bytes[sent]) != 0) {
+            break;
+        }
+        sent++;
+    }
+
+    if (sent == 0U && length != 0U) {
+        return -1;
+    }
+    return (int)sent;
 }
 
 void tiku_uart_puts(const char *s) {

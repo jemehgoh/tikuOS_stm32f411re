@@ -318,6 +318,13 @@ void tiku_n6_model_store_set_model_bound(int bound)
     model_bound = bound ? 1U : 0U;
 }
 
+#if defined(TIKU_NPU_LIFECYCLE_TEST_ENABLE)
+int tiku_n6_model_store_test_model_bound(void)
+{
+    return (int)model_bound;
+}
+#endif
+
 tiku_n6_model_store_state_t tiku_n6_model_store_state(void)
 {
     return model_last;

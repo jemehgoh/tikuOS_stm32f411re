@@ -362,6 +362,12 @@ int tiku_i2c_arch_init(const tiku_i2c_config_t *config)
         return TIKU_I2C_ERR_TIMEOUT;
     }
 
+    /* The board's I2C pads sit in the VDDIO4 bank, which reads 0 until its
+     * supply is declared valid (ST does this in its I2C1 MSP init). */
+    I2C_REG_WRITE(STM32N6_PWR_SVMCR1,
+                  I2C_REG_READ(STM32N6_PWR_SVMCR1) |
+                  STM32N6_PWR_SVMCR1_VDDIO4SV);
+
     i2c_pins_init();
     I2C_REG_WRITE(STM32N6_RCC_APB1LENR,
                   I2C_REG_READ(STM32N6_RCC_APB1LENR) | I2C_RCC_MASK);

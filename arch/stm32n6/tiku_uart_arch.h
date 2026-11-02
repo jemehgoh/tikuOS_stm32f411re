@@ -16,6 +16,7 @@
 #ifndef TIKU_STM32N6_UART_ARCH_H_
 #define TIKU_STM32N6_UART_ARCH_H_
 
+#include <stddef.h>
 #include <stdint.h>
 
 /**
@@ -34,6 +35,15 @@ void tiku_uart_init(void);
  * @param c  Character to send
  */
 void tiku_uart_putc(char c);
+
+/**
+ * @brief Write a raw byte buffer without formatting or newline expansion.
+ *
+ * @param buffer  Bytes to send; NULL is allowed only when length is zero
+ * @param length  Number of bytes to send
+ * @return Number of bytes sent, or -1 if the first byte could not be sent
+ */
+int tiku_uart_write(const void *buffer, size_t length);
 
 /**
  * @brief Write a NUL-terminated string, expanding '\n' to CR LF.

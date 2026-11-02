@@ -261,6 +261,45 @@ $(error BOARD=$(BOARD) is a $(BOARD_PLATFORM_$(BOARD)) board, but MCU=$(MCU) \
 is $(TIKU_PLATFORM). Pick a $(TIKU_PLATFORM) board, or change MCU.)
 endif
 
+# The DK TFT test images use board-specific panel wiring. Reject every other
+# board before the platform source list can include their test processes.
+ifeq ($(TIKU_STM32N6_DK_TFT_TEST_ENABLE),1)
+ifneq ($(BOARD),stm32n6570_dk)
+$(error TIKU_STM32N6_DK_TFT_TEST_ENABLE=1 requires BOARD=stm32n6570_dk)
+endif
+endif
+ifeq ($(TIKU_STM32N6_DK_TFT_COLORCYCLE_TEST_ENABLE),1)
+ifneq ($(BOARD),stm32n6570_dk)
+$(error TIKU_STM32N6_DK_TFT_COLORCYCLE_TEST_ENABLE=1 requires BOARD=stm32n6570_dk)
+endif
+endif
+ifeq ($(TIKU_STM32N6_DK_DCMIPP_CSI192_TEST_ENABLE),1)
+ifneq ($(BOARD),stm32n6570_dk)
+$(error TIKU_STM32N6_DK_DCMIPP_CSI192_TEST_ENABLE=1 requires BOARD=stm32n6570_dk)
+endif
+endif
+ifeq ($(TIKU_STM32N6_DK_IMX335_TEST_ENABLE),1)
+ifneq ($(BOARD),stm32n6570_dk)
+$(error TIKU_STM32N6_DK_IMX335_TEST_ENABLE=1 requires BOARD=stm32n6570_dk)
+endif
+endif
+ifeq ($(TIKU_STM32N6_DK_DCMIPP_CAPTURE_TEST_ENABLE),1)
+ifneq ($(BOARD),stm32n6570_dk)
+$(error TIKU_STM32N6_DK_DCMIPP_CAPTURE_TEST_ENABLE=1 requires BOARD=stm32n6570_dk)
+endif
+endif
+# Every DK test image autostarts its own process, so at most one may link.
+STM32N6_DK_TEST_FLAGS := $(filter 1,$(TIKU_STM32N6_DK_TFT_TEST_ENABLE) \
+    $(TIKU_STM32N6_DK_TFT_COLORCYCLE_TEST_ENABLE) \
+    $(TIKU_STM32N6_DK_DCMIPP_CSI192_TEST_ENABLE) \
+    $(TIKU_STM32N6_DK_IMX335_TEST_ENABLE) \
+    $(TIKU_STM32N6_DK_DCMIPP_CAPTURE_TEST_ENABLE))
+ifneq ($(filter-out 1,$(words $(STM32N6_DK_TEST_FLAGS))),)
+ifneq ($(STM32N6_DK_TEST_FLAGS),)
+$(error Enable only one STM32N6 DK test image at a time)
+endif
+endif
+
 # An immediate (:=) assignment, so it must stay below the lines that resolve
 # BOARD.  Above them, $(BOARD_CAPS_$(BOARD)) expands to nothing: no
 # -DTIKU_BOARD_HAS_* reaches the compiler, while the board_has gates, which
@@ -1985,6 +2024,30 @@ ifeq ($(TIKU_STM32N6_REGION_TEST_ENABLE),1)
 SRCS += tests/tiku_stm32n6_region_acceptance.c
 CFLAGS += -DTIKU_STM32N6_REGION_TEST_ENABLE=1
 endif
+ifeq ($(TIKU_STM32N6_DK_TFT_TEST_ENABLE),1)
+SRCS += tests/tiku_stm32n6_dk_tft_single.c
+CFLAGS += -DTIKU_STM32N6_DK_TFT_TEST_ENABLE=1
+endif
+ifeq ($(TIKU_STM32N6_DK_TFT_COLORCYCLE_TEST_ENABLE),1)
+SRCS += tests/tiku_stm32n6_dk_tft_colorcycle.c
+CFLAGS += -DTIKU_STM32N6_DK_TFT_COLORCYCLE_TEST_ENABLE=1
+endif
+ifeq ($(TIKU_STM32N6_DK_DCMIPP_CSI192_TEST_ENABLE),1)
+SRCS += tests/tiku_stm32n6_dk_dcmipp_csi192.c
+CFLAGS += -DTIKU_STM32N6_DK_DCMIPP_CSI192_TEST_ENABLE=1
+endif
+ifeq ($(TIKU_STM32N6_DK_IMX335_TEST_ENABLE),1)
+# applications.mk skips the IMX335 driver whenever a test image is selected.
+SRCS += tests/tiku_stm32n6_dk_imx335_stream.c
+SRCS += applications/tiku_stm32n6570_imx335.c
+CFLAGS += -DTIKU_STM32N6_DK_IMX335_TEST_ENABLE=1
+endif
+ifeq ($(TIKU_STM32N6_DK_DCMIPP_CAPTURE_TEST_ENABLE),1)
+# applications.mk skips the IMX335 driver whenever a test image is selected.
+SRCS += tests/tiku_stm32n6_dk_dcmipp_capture.c
+SRCS += applications/tiku_stm32n6570_imx335.c
+CFLAGS += -DTIKU_STM32N6_DK_DCMIPP_CAPTURE_TEST_ENABLE=1
+endif
 ifeq ($(TIKU_NPU_ENABLE),1)
 SRCS += arch/stm32n6/tiku_npu_mem.c
 SRCS += arch/stm32n6/tiku_npu_arch.c
@@ -2097,12 +2160,11 @@ endif
 SRCS += kernel/shell/commands/tiku_shell_cmd_xflash.c
 SRCS += kernel/shell/commands/tiku_shell_cmd_cache.c
 SRCS += kernel/shell/commands/tiku_shell_cmd_diag.c
-# Stubs: this port has no ADC, I2C, SPI or 1-Wire driver.  What each
+# Stubs: this port has no ADC, SPI or 1-Wire driver. What each
 # tiku_<bus>_arch_* call does:
 #   adc      init, channel_init and read return TIKU_ADC_ERR_PARAM; read
 #            also stores 0 in *value
-#   i2c      init, read, write, write_read and probe return
-#            TIKU_I2C_ERR_PARAM
+#   i2c      implemented below as a polled I2C1/I2C2 master, selected by board
 #   spi      init, read, write and write_read return TIKU_SPI_ERR_PARAM;
 #            transfer returns 0xFF
 #   onewire  init returns TIKU_OW_ERR_PARAM, reset TIKU_OW_ERR_NO_DEVICE,
@@ -2112,7 +2174,7 @@ SRCS += arch/stm32n6/tiku_adc_arch.c
 SRCS += arch/stm32n6/tiku_i2c_arch.c
 SRCS += arch/stm32n6/tiku_spi_arch.c
 SRCS += arch/stm32n6/tiku_onewire_arch.c
-ifeq ($(BOARD),$(BOARD_DEFINE_stm32n6570_dk))
+ifeq ($(TIKU_BOARD_DEFINE),$(BOARD_DEFINE_stm32n6570_dk))
 # Compiler flag to handle different flash configuration for N6570-DK in xflash
 CFLAGS += -DTIKU_HAS_MX66
 endif
@@ -3604,6 +3666,32 @@ lint:
 	       && echo "$${t} host test: OK" \
 	       || { echo "$${t} host test: FAILED -- tools/$${t}_test.c"; rc=1; }; \
 	     rm -f /tmp/tiku_$${t}_test; \
+	   done; \
+	   cc -Wall -Wextra -I. -o /tmp/tiku_ltdc_host_test tests/tiku_ltdc_host_test.c \
+	     >/dev/null 2>&1 && /tmp/tiku_ltdc_host_test >/dev/null 2>&1 \
+	     && echo "ltdc host test: OK" \
+	     || { echo "ltdc host test: FAILED -- tests/tiku_ltdc_host_test.c"; rc=1; }; \
+	   rm -f /tmp/tiku_ltdc_host_test; \
+	   cc -Wall -Wextra -I. -o /tmp/tiku_dcmipp_axi_host_test tests/tiku_dcmipp_axi_host_test.c \
+	     >/dev/null 2>&1 && /tmp/tiku_dcmipp_axi_host_test >/dev/null 2>&1 \
+	     && echo "dcmipp AXI host test: OK" \
+	     || { echo "dcmipp AXI host test: FAILED -- tests/tiku_dcmipp_axi_host_test.c"; rc=1; }; \
+	   rm -f /tmp/tiku_dcmipp_axi_host_test; \
+	   cc -Wall -Wextra -I. -o /tmp/tiku_stm32n6570_imx335_test \
+	     tests/tiku_stm32n6570_imx335_test.c applications/tiku_stm32n6570_imx335.c \
+	     >/dev/null 2>&1 && /tmp/tiku_stm32n6570_imx335_test >/dev/null 2>&1 \
+	     && echo "stm32n6570-dk IMX335 host test: OK" \
+	     || { echo "stm32n6570-dk IMX335 host test: FAILED -- tests/tiku_stm32n6570_imx335_test.c"; rc=1; }; \
+	   rm -f /tmp/tiku_stm32n6570_imx335_test; \
+	   for b in NUCLEO_N657X0Q STM32N6570_DK; do \
+	     cc -Wall -Wextra -I. -DTIKU_DEVICE_STM32N6 -DTIKU_BOARD_$${b} \
+	       -DTIKU_STM32N6_I2C_HOST_TEST -DI2C_POLL_SPINS=32 \
+	       -o /tmp/tiku_stm32n6_i2c_host_test tests/tiku_stm32n6_i2c_host_test.c \
+	       arch/stm32n6/tiku_i2c_arch.c >/dev/null 2>&1 \
+	       && /tmp/tiku_stm32n6_i2c_host_test >/dev/null 2>&1 \
+	       && echo "stm32n6 I2C host test ($${b}): OK" \
+	       || { echo "stm32n6 I2C host test ($${b}): FAILED"; rc=1; }; \
+	     rm -f /tmp/tiku_stm32n6_i2c_host_test; \
 	   done; \
 	 else \
 	   echo "usb host checks: SKIPPED -- no host C compiler"; \
