@@ -261,43 +261,58 @@ $(error BOARD=$(BOARD) is a $(BOARD_PLATFORM_$(BOARD)) board, but MCU=$(MCU) \
 is $(TIKU_PLATFORM). Pick a $(TIKU_PLATFORM) board, or change MCU.)
 endif
 
-# The DK TFT test images use board-specific panel wiring. Reject every other
-# board before the platform source list can include their test processes.
-ifeq ($(TIKU_STM32N6_DK_TFT_TEST_ENABLE),1)
+# Firmware tests.  They live in the separate tikutests repo, cloned into
+# tests/ (gitignored).  TIKU_TESTS_ENABLE=1 turns them on; tests/tests.config
+# (copied from tests/tests.config.example), TIKU_TESTS="name ..." or
+# TEST_<name>=1 on the command line says which.  tests/tests.mk validates the
+# selection (board, one test per image) and sets TEST_SRCS and TEST_CFLAGS,
+# which are appended below once every platform block has run.
+# `make test-list` shows the tests; `make test-config` the resolved selection.
+TIKU_TESTS_ENABLE ?= 0
+
+# The per-test TIKU_*_TEST_ENABLE flags selected tests before tests/tests.mk.
+# Setting one now would build without the test, so refuse it.
+TIKU_LEGACY_TEST_FLAGS := \
+    TIKU_STM32N6_REGION_TEST_ENABLE \
+    TIKU_STM32N6_DK_TFT_TEST_ENABLE \
+    TIKU_STM32N6_DK_TFT_COLORCYCLE_TEST_ENABLE \
+    TIKU_STM32N6_DK_DCMIPP_CSI192_TEST_ENABLE \
+    TIKU_STM32N6_DK_IMX335_TEST_ENABLE \
+    TIKU_STM32N6_DK_DCMIPP_CAPTURE_TEST_ENABLE \
+    TIKU_STM32N6_DK_DCMIPP_PIPE2_640_TEST_ENABLE \
+    TIKU_STM32N6_DK_DCMIPP_DUAL_TEST_ENABLE \
+    TIKU_NPU_MEM_TEST_ENABLE \
+    TIKU_NPU_MEM_NEGATIVE_TEST_ENABLE \
+    TIKU_NPU_EMBEDDED_TEST_ENABLE \
+    TIKU_NPU_RUN_TEST_ENABLE \
+    TIKU_NPU_VFS_TEST_ENABLE \
+    TIKU_NPU_PREFLIGHT_TEST_ENABLE \
+    TIKU_NPU_POOL_TEST_ENABLE \
+    TIKU_NPU_RESOURCE_TEST_ENABLE \
+    TIKU_NPU_LIFECYCLE_TEST_ENABLE
+$(foreach f,$(TIKU_LEGACY_TEST_FLAGS),$(if $(filter 1,$($(f))),\
+    $(error $(f)=1 no longer selects a test. Use TIKU_TESTS_ENABLE=1 with \
+TEST_<name>=1 or tests/tests.config; run `make test-list`)))
+
+ifneq ($(or $(filter 1,$(TIKU_TESTS_ENABLE)),$(filter test-list test-config,$(MAKECMDGOALS))),)
+ifeq ($(wildcard tests/tests.mk),)
+$(error TIKU_TESTS_ENABLE=1 needs the tikutests repo in tests/. Clone it there, \
+or build without tests)
+endif
+include tests/tests.mk
+endif
+
+# The edge detection app is not a test, but it autostarts a process on the DK
+# like the DK test images, so the two cannot be combined.
+ifeq ($(TIKU_STM32N6_DK_EDGE_DETECT_ENABLE),1)
 ifneq ($(BOARD),stm32n6570_dk)
-$(error TIKU_STM32N6_DK_TFT_TEST_ENABLE=1 requires BOARD=stm32n6570_dk)
+$(error TIKU_STM32N6_DK_EDGE_DETECT_ENABLE=1 requires BOARD=stm32n6570_dk)
 endif
+ifeq ($(TIKU_TESTS_DK_IMAGE),1)
+$(error TIKU_STM32N6_DK_EDGE_DETECT_ENABLE=1 cannot be combined with a DK test image)
 endif
-ifeq ($(TIKU_STM32N6_DK_TFT_COLORCYCLE_TEST_ENABLE),1)
-ifneq ($(BOARD),stm32n6570_dk)
-$(error TIKU_STM32N6_DK_TFT_COLORCYCLE_TEST_ENABLE=1 requires BOARD=stm32n6570_dk)
-endif
-endif
-ifeq ($(TIKU_STM32N6_DK_DCMIPP_CSI192_TEST_ENABLE),1)
-ifneq ($(BOARD),stm32n6570_dk)
-$(error TIKU_STM32N6_DK_DCMIPP_CSI192_TEST_ENABLE=1 requires BOARD=stm32n6570_dk)
-endif
-endif
-ifeq ($(TIKU_STM32N6_DK_IMX335_TEST_ENABLE),1)
-ifneq ($(BOARD),stm32n6570_dk)
-$(error TIKU_STM32N6_DK_IMX335_TEST_ENABLE=1 requires BOARD=stm32n6570_dk)
-endif
-endif
-ifeq ($(TIKU_STM32N6_DK_DCMIPP_CAPTURE_TEST_ENABLE),1)
-ifneq ($(BOARD),stm32n6570_dk)
-$(error TIKU_STM32N6_DK_DCMIPP_CAPTURE_TEST_ENABLE=1 requires BOARD=stm32n6570_dk)
-endif
-endif
-# Every DK test image autostarts its own process, so at most one may link.
-STM32N6_DK_TEST_FLAGS := $(filter 1,$(TIKU_STM32N6_DK_TFT_TEST_ENABLE) \
-    $(TIKU_STM32N6_DK_TFT_COLORCYCLE_TEST_ENABLE) \
-    $(TIKU_STM32N6_DK_DCMIPP_CSI192_TEST_ENABLE) \
-    $(TIKU_STM32N6_DK_IMX335_TEST_ENABLE) \
-    $(TIKU_STM32N6_DK_DCMIPP_CAPTURE_TEST_ENABLE))
-ifneq ($(filter-out 1,$(words $(STM32N6_DK_TEST_FLAGS))),)
-ifneq ($(STM32N6_DK_TEST_FLAGS),)
-$(error Enable only one STM32N6 DK test image at a time)
-endif
+# The edge detection app runs a Neural-ART model.
+TIKU_NPU_ENABLE := 1
 endif
 
 # An immediate (:=) assignment, so it must stay below the lines that resolve
@@ -342,7 +357,7 @@ endif
 # Applications overlay: the same arrangement for programs that run on TikuOS,
 # each a process and a VFS client.  It exports APPL_SRCS and APPL_CFLAGS,
 # which are appended once every platform block has run, on every platform.
--include applications/applications.mk
+-include apps/apps.mk
 
 # ---------------------------------------------------------------------------
 # Capability refusals
@@ -2020,34 +2035,6 @@ SRCS += arch/stm32n6/tiku_pwm_arch.c
 SRCS += arch/stm32n6/tiku_xspi_arch.c
 SRCS += arch/stm32n6/tiku_ospi_arch.c
 SRCS += arch/stm32n6/tiku_sram_arch.c
-ifeq ($(TIKU_STM32N6_REGION_TEST_ENABLE),1)
-SRCS += tests/tiku_stm32n6_region_acceptance.c
-CFLAGS += -DTIKU_STM32N6_REGION_TEST_ENABLE=1
-endif
-ifeq ($(TIKU_STM32N6_DK_TFT_TEST_ENABLE),1)
-SRCS += tests/tiku_stm32n6_dk_tft_single.c
-CFLAGS += -DTIKU_STM32N6_DK_TFT_TEST_ENABLE=1
-endif
-ifeq ($(TIKU_STM32N6_DK_TFT_COLORCYCLE_TEST_ENABLE),1)
-SRCS += tests/tiku_stm32n6_dk_tft_colorcycle.c
-CFLAGS += -DTIKU_STM32N6_DK_TFT_COLORCYCLE_TEST_ENABLE=1
-endif
-ifeq ($(TIKU_STM32N6_DK_DCMIPP_CSI192_TEST_ENABLE),1)
-SRCS += tests/tiku_stm32n6_dk_dcmipp_csi192.c
-CFLAGS += -DTIKU_STM32N6_DK_DCMIPP_CSI192_TEST_ENABLE=1
-endif
-ifeq ($(TIKU_STM32N6_DK_IMX335_TEST_ENABLE),1)
-# applications.mk skips the IMX335 driver whenever a test image is selected.
-SRCS += tests/tiku_stm32n6_dk_imx335_stream.c
-SRCS += applications/tiku_stm32n6570_imx335.c
-CFLAGS += -DTIKU_STM32N6_DK_IMX335_TEST_ENABLE=1
-endif
-ifeq ($(TIKU_STM32N6_DK_DCMIPP_CAPTURE_TEST_ENABLE),1)
-# applications.mk skips the IMX335 driver whenever a test image is selected.
-SRCS += tests/tiku_stm32n6_dk_dcmipp_capture.c
-SRCS += applications/tiku_stm32n6570_imx335.c
-CFLAGS += -DTIKU_STM32N6_DK_DCMIPP_CAPTURE_TEST_ENABLE=1
-endif
 ifeq ($(TIKU_NPU_ENABLE),1)
 SRCS += arch/stm32n6/tiku_npu_mem.c
 SRCS += arch/stm32n6/tiku_npu_arch.c
@@ -2095,44 +2082,6 @@ CFLAGS += -I$(PROJ_DIR)/arch/stm32n6
 CFLAGS += -D__int64_t_defined=1
 LDLIBS += $(PROJ_DIR)/third_party/st/edgeai/4.0.0/Middlewares/ST/AI/Lib/GCC/ARMCortexM55/NetworkRuntime1201_CM55_GCC_PIC.a
 CFLAGS += -DTIKU_HAS_NPU=1
-ifeq ($(TIKU_NPU_MEM_TEST_ENABLE),1)
-SRCS += tests/tiku_npu_mem_acceptance.c
-CFLAGS += -DTIKU_NPU_MEM_TEST_ENABLE=1
-endif
-ifeq ($(TIKU_NPU_MEM_NEGATIVE_TEST_ENABLE),1)
-CFLAGS += -DTIKU_NPU_MEM_NEGATIVE_TEST_ENABLE=1
-endif
-ifeq ($(TIKU_NPU_EMBEDDED_TEST_ENABLE),1)
-SRCS += tests/tiku_npu_embedded_acceptance.c
-CFLAGS += -DTIKU_NPU_EMBEDDED_TEST_ENABLE=1
-endif
-ifeq ($(TIKU_NPU_RUN_TEST_ENABLE),1)
-CFLAGS += -DTIKU_NPU_RUN_TEST_ENABLE=1
-endif
-ifeq ($(TIKU_NPU_VFS_TEST_ENABLE),1)
-SRCS += tests/tiku_npu_vfs_acceptance.c
-CFLAGS += -DTIKU_NPU_VFS_TEST_ENABLE=1
-endif
-ifeq ($(TIKU_NPU_PREFLIGHT_TEST_ENABLE),1)
-SRCS += tests/tiku_npu_preflight_acceptance.c
-SRCS += tests/npu/fixtures/stm32n6_identity_corrupt.network_rel.c
-CFLAGS += -DTIKU_NPU_PREFLIGHT_TEST_ENABLE=1
-endif
-ifeq ($(TIKU_NPU_POOL_TEST_ENABLE),1)
-SRCS += tests/tiku_npu_pool_acceptance.c
-ifneq ($(TIKU_NPU_PREFLIGHT_TEST_ENABLE),1)
-SRCS += tests/npu/fixtures/stm32n6_identity_corrupt.network_rel.c
-endif
-CFLAGS += -DTIKU_NPU_POOL_TEST_ENABLE=1
-endif
-ifeq ($(TIKU_NPU_RESOURCE_TEST_ENABLE),1)
-SRCS += tests/tiku_npu_resource_acceptance.c
-CFLAGS += -DTIKU_NPU_RESOURCE_TEST_ENABLE=1
-endif
-ifeq ($(TIKU_NPU_LIFECYCLE_TEST_ENABLE),1)
-SRCS += tests/tiku_npu_lifecycle_acceptance.c
-CFLAGS += -DTIKU_NPU_LIFECYCLE_TEST_ENABLE=1
-endif
 # The current YOLO network_rel.bin is a 3.2 MiB combined image. It is deployed
 # to the reserved external-NOR raw model slot before the acceptance tests run; it is
 # intentionally not linked into the 255 KiB STM32N6 boot image.
@@ -3580,10 +3529,17 @@ endif # MINIMAL=1 / else
 # they compile with CFLAGS, since .S is preprocessed and then assembled and
 # needs only the include paths and -D macros.
 # Apps overlay sources (APPL_SRCS and APPL_CFLAGS from
-# applications/applications.mk), appended after every platform block, so
+# apps/apps.mk), appended after every platform block, so
 # they build on every platform.
 SRCS   += $(APPL_SRCS)
 CFLAGS += $(APPL_CFLAGS)
+# Firmware tests from tests/tests.mk.  Appended here, after the platform
+# blocks, which assign SRCS and CFLAGS with `=` and would drop anything added
+# earlier.  The $(sort) below also removes the sources two tests share.
+ifeq ($(TIKU_TESTS_ENABLE),1)
+SRCS   += $(TEST_SRCS)
+CFLAGS += $(TEST_CFLAGS)
+endif
 # $(sort) also removes duplicates.  Some files are added by two blocks
 # (tikukits/crypto/p256 by the Nordic BLE-SMP block for LE Secure
 # Connections and by the crypto kit; tiku_i2c_arch.c twice on RA8P1), and an
@@ -3667,6 +3623,7 @@ lint:
 	       || { echo "$${t} host test: FAILED -- tools/$${t}_test.c"; rc=1; }; \
 	     rm -f /tmp/tiku_$${t}_test; \
 	   done; \
+	   if [ -d tests ]; then \
 	   cc -Wall -Wextra -I. -o /tmp/tiku_ltdc_host_test tests/tiku_ltdc_host_test.c \
 	     >/dev/null 2>&1 && /tmp/tiku_ltdc_host_test >/dev/null 2>&1 \
 	     && echo "ltdc host test: OK" \
@@ -3678,7 +3635,7 @@ lint:
 	     || { echo "dcmipp AXI host test: FAILED -- tests/tiku_dcmipp_axi_host_test.c"; rc=1; }; \
 	   rm -f /tmp/tiku_dcmipp_axi_host_test; \
 	   cc -Wall -Wextra -I. -o /tmp/tiku_stm32n6570_imx335_test \
-	     tests/tiku_stm32n6570_imx335_test.c applications/tiku_stm32n6570_imx335.c \
+	     tests/tiku_stm32n6570_imx335_test.c drivers/stm32n6/imx335/tiku_stm32n6570_imx335.c \
 	     >/dev/null 2>&1 && /tmp/tiku_stm32n6570_imx335_test >/dev/null 2>&1 \
 	     && echo "stm32n6570-dk IMX335 host test: OK" \
 	     || { echo "stm32n6570-dk IMX335 host test: FAILED -- tests/tiku_stm32n6570_imx335_test.c"; rc=1; }; \
@@ -3693,6 +3650,9 @@ lint:
 	       || { echo "stm32n6 I2C host test ($${b}): FAILED"; rc=1; }; \
 	     rm -f /tmp/tiku_stm32n6_i2c_host_test; \
 	   done; \
+	   else \
+	     echo "tests host tests: SKIPPED -- no tests/ checkout"; \
+	   fi; \
 	 else \
 	   echo "usb host checks: SKIPPED -- no host C compiler"; \
 	 fi; \

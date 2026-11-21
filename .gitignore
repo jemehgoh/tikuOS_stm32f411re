@@ -90,10 +90,10 @@ tikuConsole/
 # cloned in place, not a submodule -- so it must stay out of this index.  Left
 # untracked instead, `git add -A` records it as a bare gitlink with no
 # .gitmodules entry, and it clones as an empty directory for everyone else.
-!applications/
-applications/*
-!applications/applications.mk
-!applications/stm32n6570_dk_camera_preview.c
+# apps/ is the tikuos/apps repo, cloned in place and versioned separately.
+apps/
+# tests/ is the tikutests repo, cloned in place and versioned separately.
+tests/
 applications/tracker/
 
 # Python bytecode cache
