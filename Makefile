@@ -268,6 +268,9 @@ endif
 # selection (board, one test per image) and sets TEST_SRCS and TEST_CFLAGS,
 # which are appended below once every platform block has run.
 # `make test-list` shows the tests; `make test-config` the resolved selection.
+# Tests and apps never share an image: with TIKU_TESTS_ENABLE=1 apps/apps.mk
+# is not included, and tests/tests.mk refuses APP=, DEMO=, HAS_TESTS=1 and the
+# edge detection app, since each owns the image's autostart table.
 TIKU_TESTS_ENABLE ?= 0
 
 # The per-test TIKU_*_TEST_ENABLE flags selected tests before tests/tests.mk.
@@ -302,14 +305,11 @@ endif
 include tests/tests.mk
 endif
 
-# The edge detection app is not a test, but it autostarts a process on the DK
-# like the DK test images, so the two cannot be combined.
+# The edge detection app is not a test.  It cannot be combined with one; that
+# is checked in tests/tests.mk.
 ifeq ($(TIKU_STM32N6_DK_EDGE_DETECT_ENABLE),1)
 ifneq ($(BOARD),stm32n6570_dk)
 $(error TIKU_STM32N6_DK_EDGE_DETECT_ENABLE=1 requires BOARD=stm32n6570_dk)
-endif
-ifeq ($(TIKU_TESTS_DK_IMAGE),1)
-$(error TIKU_STM32N6_DK_EDGE_DETECT_ENABLE=1 cannot be combined with a DK test image)
 endif
 # The edge detection app runs a Neural-ART model.
 TIKU_NPU_ENABLE := 1
@@ -357,7 +357,11 @@ endif
 # Applications overlay: the same arrangement for programs that run on TikuOS,
 # each a process and a VFS client.  It exports APPL_SRCS and APPL_CFLAGS,
 # which are appended once every platform block has run, on every platform.
+# Not included in a test build (TIKU_TESTS_ENABLE=1): apps and tests each
+# register autostart processes, and an image holds one set.
+ifneq ($(TIKU_TESTS_ENABLE),1)
 -include apps/apps.mk
+endif
 
 # ---------------------------------------------------------------------------
 # Capability refusals
